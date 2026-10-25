@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -28,8 +29,25 @@ import (
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
+// defaultVersion 是未被 -X 注入时的值，同时充当「是否已注入」的哨兵。
+const defaultVersion = "0.1.0"
+
 // version 由构建时注入（-X main.version=...），这里是 go run/源码直用的默认值。
-var version = "0.1.0"
+var version = defaultVersion
+
+// resolveVersion 返回展示用版本号。task build / goreleaser 之类会注入 version;
+// `go install ...@vX.Y.Z` 没有 -ldflags，此时回退到 build info 里的模块版本。
+func resolveVersion() string {
+	if version != defaultVersion {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if v := bi.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return version
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -103,7 +121,7 @@ func parseFlags(args []string) (*flags, error) {
 	fs.BoolVar(&f.noWeb, "no-web", false, "关闭 web_search/web_fetch")
 
 	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "acp-agent %s — 终端编码 agent\n\n", version)
+		fmt.Fprintf(os.Stderr, "acp-agent %s — 终端编码 agent\n\n", resolveVersion())
 		fmt.Fprintf(os.Stderr, "用法:\n  acp-agent [flags]            交互式 REPL\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent -p \"任务\" [flags]   执行一次后退出\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent \"任务\" [flags]      同上（位置参数等价于 -p）\n")
@@ -157,7 +175,7 @@ func run() error {
 		return err
 	}
 	if f.showVersion {
-		fmt.Println(version)
+		fmt.Println(resolveVersion())
 		return nil
 	}
 	if f.listEndpoints {
@@ -491,7 +509,7 @@ func (a *app) serveACP(ctx context.Context) error {
 	conn := acp.NewConn(os.Stdin, os.Stdout, nil)
 	srv, err := acp.NewServer(conn, acp.ServerOptions{
 		Handler: handler,
-		Info:    acp.Implementation{Name: "acp-agent", Version: version},
+		Info:    acp.Implementation{Name: "acp-agent", Version: resolveVersion()},
 	})
 	if err != nil {
 		return err
