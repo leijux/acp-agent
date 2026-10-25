@@ -1,0 +1,217 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# acp-agent 开发任务。
+#   task          → 列出全部任务
+#   task check    → 提交前必过（fmt + vet + test）
+#   task ci       → 等价于 CI 全流程
+#
+# 约定：Task 内置 shell（mvdan/sh）解析，Windows 下无需 Git-Bash。
+
+version: '3'
+
+vars:
+  PROG: acp-agent
+  BIN: bin
+  DIST: dist
+  # 可执行文件后缀。注意 Task 的 OS 变量：裸名 OS 才是 "windows"，
+  # 带点的 .OS 是 "Windows_NT"；.exeExt 在本版本不可靠，一律自己算。
+  EXE: '{{if eq OS "windows"}}.exe{{end}}'
+  # 版本号：优先取 git 描述，非 git 仓库回退源码里的默认值。
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo 0.1.0
+  # -s -w 去符号表；-X 注入 cmd/acp-agent 的 version 变量。
+  LDFLAGS: -s -w -X main.version={{.VERSION}}
+
+set: [pipefail]
+
+tasks:
+  default:
+    desc: 列出全部任务
+    cmds:
+      - '{{.TASK_EXE}} --list'
+    silent: true
+
+  # ── 构建 ────────────────────────────────────────────────────────────────
+
+  build:
+    desc: 构建主程序到 bin/（注入 git 版本号）
+    aliases: [b]
+    sources:
+      - cmd/**/*.go
+      - internal/**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BIN}}/{{.PROG}}{{.EXE}}'
+    cmds:
+      - go build -trimpath -ldflags '{{.LDFLAGS}}' -o '{{.BIN}}/{{.PROG}}{{.EXE}}' ./cmd/acp-agent
+
+  build:all:
+    desc: 构建全部 cmd/ 下的程序
+    cmds:
+      - for: { var: PROGRAMS }
+        cmd: go build -trimpath -o '{{.BIN}}/{{.ITEM}}{{.EXE}}' ./cmd/{{.ITEM}}
+    vars:
+      PROGRAMS:
+        - acp-agent
+        - verify-kernel
+
+  install:
+    desc: go install 到 $GOBIN
+    cmds:
+      - go install -trimpath -ldflags '{{.LDFLAGS}}' ./cmd/acp-agent
+
+  cross:
+    desc: 交叉编译发布矩阵到 dist/（纯 Go，无 cgo）
+    cmds:
+      - |
+        set -e
+        for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+          os=${target%/*}; arch=${target#*/}
+          ext=""; [ "$os" = windows ] && ext=".exe"
+          out="{{.DIST}}/${os}-${arch}/{{.PROG}}${ext}"
+          mkdir -p "$(dirname "$out")"
+          echo "→ $out"
+          CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
+            go build -trimpath -ldflags '{{.LDFLAGS}}' -o "$out" ./cmd/acp-agent
+        done
+
+  # ── 测试 ────────────────────────────────────────────────────────────────
+
+  test:
+    desc: 全量测试
+    aliases: [t]
+    cmds:
+      - go test ./... {{.CLI_ARGS}}
+
+  test:race:
+    desc: 全量测试 + 竞态检测（慢，CI 用）
+    cmds:
+      - go test -race -count=1 ./... {{.CLI_ARGS}}
+
+  test:cover:
+    desc: 覆盖率报告 → coverage.html
+    cmds:
+      - go test -coverprofile=coverage.out -covermode=atomic ./...
+      - go tool cover -func=coverage.out | tail -1
+      - go tool cover -html=coverage.out -o coverage.html
+      - echo "已生成 coverage.html"
+    silent: false
+
+  test:pkg:
+    desc: 只测某个包，如 task test:pkg -- kernel
+    cmds:
+      - go test ./internal/{{.CLI_ARGS}}/ -count=1
+
+  test:native:
+    desc: 用系统 shell（Git Bash）跑 tools 测试（默认走内置解释器）
+    cmds:
+      - go test -tags shellnative ./internal/tools -count=1
+
+  bench:
+    desc: kernel 基准测试
+    cmds:
+      - go test ./internal/kernel/ -bench=. -benchmem -run='^$' -count=1 {{.CLI_ARGS}}
+
+  # ── 质量 ────────────────────────────────────────────────────────────────
+
+  fmt:
+    desc: gofmt 全部源码
+    cmds:
+      - gofmt -w ./cmd ./internal
+
+  fmt:check:
+    desc: 检查格式（不改文件）
+    cmds:
+      - |
+        out=$(gofmt -l ./cmd ./internal)
+        if [ -n "$out" ]; then
+          echo "以下文件未格式化，运行 `task fmt`:"
+          echo "$out"
+          exit 1
+        fi
+        echo "格式检查通过"
+
+  vet:
+    desc: go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: golangci-lint（需自行安装）
+    preconditions:
+      - sh: command -v golangci-lint
+        msg: 未安装 golangci-lint，见 https://golangci-lint.run/usage/install/
+    cmds:
+      - golangci-lint run ./...
+
+  tidy:
+    desc: 整理 go.mod
+    cmds:
+      - go mod tidy
+
+  check:
+    desc: 提交前必过：格式 + vet + 测试
+    deps: [fmt:check, vet]
+    cmds:
+      - '{{.TASK_EXE}} test'
+
+  ci:
+    desc: CI 全流程
+    cmds:
+      - '{{.TASK_EXE}} check'
+      - '{{.TASK_EXE}} test:race'
+      - '{{.TASK_EXE}} test:native'
+      - '{{.TASK_EXE}} build'
+
+  # ── 运行 ────────────────────────────────────────────────────────────────
+
+  run:
+    desc: 交互式 REPL（透传 flag：task run -- -m gpt-5）
+    interactive: true
+    cmds:
+      - go run ./cmd/acp-agent {{.CLI_ARGS}}
+
+  acp:
+    desc: 以 ACP agent 模式启动（stdio JSON-RPC）
+    interactive: true
+    cmds:
+      - go run ./cmd/acp-agent --acp {{.CLI_ARGS}}
+
+  endpoints:
+    desc: 列出内置服务端点与模型定价
+    cmds:
+      - go run ./cmd/acp-agent -endpoints
+
+  mcp:
+    desc: 连接 MCP server 并打印状态与工具清单
+    cmds:
+      - go run ./cmd/acp-agent -mcp-status {{.CLI_ARGS}}
+
+  verify:kernel:
+    desc: 裸 goja 全链路验证（不复用 internal/kernel）
+    cmds:
+      - go run ./cmd/verify-kernel
+
+  # ── 资源 ────────────────────────────────────────────────────────────────
+
+  cjs:
+    desc: 重新打包上游 ESM → internal/kernel/kernel.dist.cjs（需 node）
+    preconditions:
+      - sh: test -d "${KERNEL:-/tmp/billion-context/kernel}/node_modules"
+        msg: 找不到上游仓库的 node_modules，先 clone billion-context/kernel 并 pnpm install
+    sources:
+      - script/build-cjs.sh
+    generates:
+      - internal/kernel/kernel.dist.cjs
+    cmds:
+      - bash script/build-cjs.sh
+      - echo "kernel.dist.cjs 已更新（记得 task build）"
+
+  clean:
+    desc: 清理构建产物与覆盖率
+    cmds:
+      - rm -rf '{{.BIN}}' '{{.DIST}}' coverage.out coverage.html
+      - rm -f acp-agent.exe kernel.test.exe
+      - echo 已清理
+    silent: true

@@ -1,0 +1,15 @@
+# 构建产物
+bin/
+dist/
+coverage.out
+coverage.html
+*.exe
+
+# go-task 的 checksum 缓存
+.task/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store
