@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/web"
+	"github.com/leijux/acp-agent/internal/web"
 )
 
 // 写一个配置文件并让 LoadConfig 指向它。

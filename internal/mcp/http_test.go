@@ -10,7 +10,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // newFakeHTTPServer 用官方 SDK 的 streamable HTTP handler 起一个测试 server。

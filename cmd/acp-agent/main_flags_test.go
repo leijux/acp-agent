@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/agent"
 )
 
 func TestParseFlags_PositionalPrompt(t *testing.T) {

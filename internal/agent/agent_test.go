@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // reply 构造一条纯文本 assistant 响应。

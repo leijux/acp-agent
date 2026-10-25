@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
-	"gitlab.com/leijux/acp-agent/internal/provider"
+	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/provider"
 )
 
 // TestOpenAI_ImageBlockBecomesImageURL ImageBlock 必须转成 OpenAI 的

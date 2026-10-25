@@ -10,7 +10,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // DefaultConnectTimeout 是单个 server 建连（含 initialize 握手）的默认超时。

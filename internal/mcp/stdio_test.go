@@ -12,7 +12,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // fakeServerEnv 让测试二进制把自己当成 MCP stdio server 启动。

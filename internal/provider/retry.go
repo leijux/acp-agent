@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/agent"
 )
 
 // RetryOptions 控制重试策略。

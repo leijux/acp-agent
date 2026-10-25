@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
-	"gitlab.com/leijux/acp-agent/internal/provider"
+	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/provider"
 )
 
 func ptr[T any](v T) *T { return &v }

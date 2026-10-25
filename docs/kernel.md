@@ -80,7 +80,7 @@ if n := res.Nudge; n != nil && len(n.CompressibleRanges) > 0 {
 state 是纯 JSON，丢了就丢了全部压缩块与引用。内置两种 `Store`：
 
 ```go
-import "gitlab.com/leijux/acp-agent/internal/kernel"
+import "github.com/leijux/acp-agent/internal/kernel"
 
 // JSON 文件（零依赖；每会话一个文件，临时文件 + fsync + rename 原子写）
 store, err := kernel.NewFileStore("/var/lib/agent/sessions")

@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
-	"gitlab.com/leijux/acp-agent/internal/mcp"
-	"gitlab.com/leijux/acp-agent/internal/provider"
-	"gitlab.com/leijux/acp-agent/internal/web"
+	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/mcp"
+	"github.com/leijux/acp-agent/internal/provider"
+	"github.com/leijux/acp-agent/internal/web"
 )
 
 // Config 是落盘的配置。字段为空时由默认值或环境变量补齐。

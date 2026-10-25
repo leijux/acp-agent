@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/kernel"
+	"github.com/leijux/acp-agent/internal/kernel"
 )
 
 // compressedSession 返回一个已压缩过一次的会话（含 1 个活跃块）。

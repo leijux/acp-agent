@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/kernel"
+	"github.com/leijux/acp-agent/internal/kernel"
 )
 
 // fixture 复现 main.go 里的 40 条消息，用于与 Node 输出做回归比对。

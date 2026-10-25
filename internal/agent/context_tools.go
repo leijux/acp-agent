@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"gitlab.com/leijux/acp-agent/internal/kernel"
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/kernel"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // 本文件把 tools.ContextBackend 接到 kernel 上，实现「主动压缩」：

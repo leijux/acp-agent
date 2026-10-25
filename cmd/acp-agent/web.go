@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
-	"gitlab.com/leijux/acp-agent/internal/web"
+	"github.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/web"
 )
 
 // buildWebProviders 依据配置构造 web_search / web_fetch 的后端。

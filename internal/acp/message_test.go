@@ -3,7 +3,7 @@ package acp
 import (
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/agent"
 )
 
 // TestToAgentMessageTextOnly 纯文本仍合成单条 TextBlock，行为与旧版一致。

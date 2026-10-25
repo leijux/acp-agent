@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // ContextOptions 控制系统 prompt 与请求组装。

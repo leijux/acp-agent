@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"gitlab.com/leijux/acp-agent/internal/kernel"
+	"github.com/leijux/acp-agent/internal/kernel"
 )
 
 // 压缩相关的默认值。

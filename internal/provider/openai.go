@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/agent"
 )
 
 // OpenAIConfig 配置 OpenAI 兼容端点。

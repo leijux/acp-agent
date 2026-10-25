@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/kernel"
+	"github.com/leijux/acp-agent/internal/kernel"
 )
 
 // TestConcurrentSessionsIndependent 是 ③ 的正确性配套验证：

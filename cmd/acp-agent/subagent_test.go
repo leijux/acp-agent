@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/acp"
+	"github.com/leijux/acp-agent/internal/acp"
 )
 
 // buildSpec 决定子代理进程的全部启动参数，错了就是「子代理跑起来不是自己」，

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // permMode 决定工具调用是否需要人工确认。

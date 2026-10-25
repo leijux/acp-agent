@@ -3,7 +3,7 @@ package provider
 import (
 	"strings"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/agent"
 )
 
 // Endpoint 是一个 OpenAI 兼容服务端点的预设。

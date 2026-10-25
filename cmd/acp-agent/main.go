@@ -21,11 +21,11 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/acp"
-	"gitlab.com/leijux/acp-agent/internal/agent"
-	"gitlab.com/leijux/acp-agent/internal/mcp"
-	"gitlab.com/leijux/acp-agent/internal/provider"
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/acp"
+	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/mcp"
+	"github.com/leijux/acp-agent/internal/provider"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // version 由构建时注入（-X main.version=...），这里是 go run/源码直用的默认值。

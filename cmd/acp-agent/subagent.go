@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitlab.com/leijux/acp-agent/internal/acp"
+	"github.com/leijux/acp-agent/internal/acp"
 )
 
 // 子代理通过 ACP 协议驱动本程序自身：

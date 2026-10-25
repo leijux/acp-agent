@@ -8,7 +8,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // maxResultBytes 是单次工具结果回传给模型的上限（文本），超出部分截断。

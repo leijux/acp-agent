@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
-	"gitlab.com/leijux/acp-agent/internal/provider"
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/provider"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 func sse(frames ...string) string {

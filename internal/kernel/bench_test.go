@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/kernel"
+	"github.com/leijux/acp-agent/internal/kernel"
 )
 
 // benchMessages 生成 n 条混合消息：约 1/5 是工具结果（真实 agent 的 token 大头）。

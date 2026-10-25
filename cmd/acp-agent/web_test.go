@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/leijux/acp-agent/internal/web"
+	"github.com/leijux/acp-agent/internal/web"
 )
 
 func TestBuildWebProviders(t *testing.T) {

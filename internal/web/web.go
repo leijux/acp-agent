@@ -35,7 +35,7 @@ const (
 	// DefaultMaxChars 是提取后的正文字符上限：5MiB 的 HTML 展开成纯文本
 	// 可能有十几万字，直接吞掉模型上下文，所以必须单独限一次。
 	DefaultMaxChars  = 40000
-	DefaultUserAgent = "Mozilla/5.0 (compatible; acp-agent/0.1; +https://gitlab.com/leijux/acp-agent)"
+	DefaultUserAgent = "Mozilla/5.0 (compatible; acp-agent/0.1; +https://github.com/leijux/acp-agent)"
 )
 
 // Config 是 web 能力的配置。

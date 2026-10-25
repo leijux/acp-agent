@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // AgentConfig 描述每个 ACP 会话背后的 agent 实例如何构造。

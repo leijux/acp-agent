@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/mcp"
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/mcp"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // connectMCP 按配置连接所有 MCP server，并把它们的工具注册进 reg。

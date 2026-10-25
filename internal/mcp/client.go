@@ -14,7 +14,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.com/leijux/acp-agent/internal/proc"
+	"github.com/leijux/acp-agent/internal/proc"
 )
 
 // Implementation 描述 MCP 客户端或服务端的身份。

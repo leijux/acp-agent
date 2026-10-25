@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // Options 配置 Agent。

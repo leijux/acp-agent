@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"gitlab.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tools"
 )
 
 // Guard 决定一次工具调用是否放行。

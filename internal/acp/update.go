@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitlab.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/agent"
 )
 
 // updates 把 agent.Event 流翻译成 ACP session/update 通知。

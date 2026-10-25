@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitlab.com/leijux/acp-agent/internal/kernel"
+	"github.com/leijux/acp-agent/internal/kernel"
 )
 
 // 本文件把 Agent 的会话历史桥接到 kernel（billion-context 的 acp-kernel）。

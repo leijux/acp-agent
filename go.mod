@@ -1,4 +1,4 @@
-module gitlab.com/leijux/acp-agent
+module github.com/leijux/acp-agent
 
 go 1.27.3
 

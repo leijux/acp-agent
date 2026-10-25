@@ -5,7 +5,7 @@ package tools
 import (
 	"os/exec"
 
-	"gitlab.com/leijux/acp-agent/internal/proc"
+	"github.com/leijux/acp-agent/internal/proc"
 )
 
 // 进程树管理已抽到 internal/proc（MCP stdio server 也要用）。

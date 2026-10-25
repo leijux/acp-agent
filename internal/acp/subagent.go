@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.com/leijux/acp-agent/internal/proc"
+	"github.com/leijux/acp-agent/internal/proc"
 )
 
 // 子代理相关默认值。
