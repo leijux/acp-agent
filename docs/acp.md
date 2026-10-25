@@ -144,6 +144,18 @@ LLM 往返可以忽略；实测本地假 provider 下 delegate 往返 **19ms**�
 3. 子进程固定 `--no-mcp`，不背主进程的 MCP 工具表；
 4. 子进程 `--root` 继承主 root，不能在任意目录动手。
 
+「主进程的 guard」具体是谁取决于运行方式：
+
+| 主进程模式 | 子代理授权由谁裁决 |
+|---|---|
+| 本地 REPL（stdin 是 TTY） | 终端里问 `[y]/a/n/d` |
+| ACP 模式（stdin 是 JSON-RPC） | 转成 `session/request_permission` 发给客户端弹窗 |
+| stdin 非 TTY 且非 ACP | 直接拒绝（不会去读 stdin） |
+
+第三行是硬约束：ACP 模式下 stdin 属于 JSON-RPC 帧流，从那里读一行 y/n
+不但永远等不到，还会吃掉协议字节。所以 `guard.interactive=false` 时
+`ask` 直接按「否」处理，delegate 拿到的是**快速拒绝**而不是挂死。
+
 `subagentKindMutates` 把未知的 `toolKind` 一律当改动型处理（宁可多问一次）。
 
 ## 已知限制
@@ -159,8 +171,20 @@ LLM 往返可以忽略；实测本地假 provider 下 delegate 往返 **19ms**�
 - **`parallel` 工具的嵌套调用绕过权限门禁**：它内部持有原始 Registry。
   需要严格门禁时把 `parallel` 放进 `AgentConfig.OnlyTools` 之外（或用
   `tools.Options.Disable` 关掉）。
+- **客户端不实现权限 UI 时只能超时**：`PermissionAsk` 下每个改动型工具都要
+  发 `session/request_permission`。客户端不渲染、不应答时，`PermissionGuard`
+  会等 `DefaultPermissionTimeout`（60s，`AgentConfig.PermissionTimeout` 可调）
+  后报 `ErrPermissionTimeout`；一旦超时过一次，本会话后续授权直接快速失败，
+  不再逐个等 60s。delegate 子代理的授权走同一策略（`cmd/acp-agent/acp_perm.go`
+  自己维护一份 `noUI` 标记）。这类客户端请用 `permissions=auto` 或 `readonly`。
 - **单会话单 prompt**：并发 `session/prompt` 会被拒绝（`-32600`），
   而不是排队 —— 两个 turn 交错会写坏同一条消息历史。
+- **REPL 里 Esc 打断权限询问会遗留一次 stdin 读**：`guard.ask` 用 goroutine
+  调 `bufio.Reader.ReadString`（阻塞读本身不可取消），`ctx` 取消只是让调用方
+  先返回，那个 goroutine 仍挂在 `os.Stdin` 上，可能吞掉用户紧接着输入的一行。
+  非交互路径（ACP / `-p` / stdin 不是 TTY）根本不读 stdin，不受影响。
+  根治需要把「stdin 唯一读者」提升为架构约束（单一常驻读循环 + 可取消的
+  请求队列），而不只是给 `ask` 加超时。
 
 ## 测试
 
@@ -181,6 +205,11 @@ go test ./internal/acp/ -race -v
 
 - 子代理固定以 `--permissions ask` 启动，改动型工具会上报回主进程，
   由主进程的权限守卫最终裁决 —— 否则 delegate 就是绕过确认的后门；
+  ACP 模式下这条裁决会转成 `session/request_permission` 发给客户端
+  （`cmd/acp-agent/acp_perm.go`），不会去读 stdin；
+  客户端选「总是允许/总是拒绝」后，本会话内同一 `role: 工具名` 不再询问
+  （记忆按角色隔离：放开 `worker: write` 不等于放开 `reviewer: write`）；
+  客户端对授权请求完全无响应时，超时一次后本会话不再请求它（直接快速拒绝）；
 - 启动参数里带 `--disable-tools delegate`，防止无限递归委派；
 - 握手（`initialize` + `session/new`）受 `HandshakeTimeout`（默认 30s）约束，
   子代理不响应时报「子代理握手超时」而不是无限挂住；

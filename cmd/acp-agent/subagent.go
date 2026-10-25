@@ -97,6 +97,10 @@ func (a *app) buildSpec(role string) (acp.SubagentSpec, error) {
 	}
 	args = append(args, "--permissions", perm)
 	args = append(args, "--disable-tools", "delegate")
+	// 子代理不加载中文分词词典：它只负责干活，不做 BM25 检索（压缩决策由
+	// 主进程的 kernel 做），而词典要占 100+MB 内存 + 450ms 启动。
+	// 主进程的 config.json 里即使设了 segmenter=gse，也会被子代理这里的显式值盖掉。
+	args = append(args, "--segmenter", "rune")
 	// 子代理不背主进程的 MCP server 集合：启动更快、工具表更小、
 	// 权限面更窄。需要时给 SubagentConfig.Args 传 --mcp-config 单独开。
 	args = append(args, "--no-mcp")
@@ -170,6 +174,9 @@ func describeSubagentCommand(spec acp.SubagentSpec) string {
 //
 // 语义与内置工具一致：readonly 拒绝改动、auto 放行、ask 询问用户。
 // 工具名加 [role] 前缀，既让用户看清来源，也让「总是允许」只对这一类请求生效。
+//
+// ACP 模式下本地 guard 没有终端可问（stdin 是 JSON-RPC），所以直接转给
+// 客户端（session/request_permission）；只有非 ACP 模式才落回本地 guard。
 func (a *app) subagentPermission(role string) func(context.Context, acp.RequestPermissionParams) (string, error) {
 	return func(ctx context.Context, p acp.RequestPermissionParams) (string, error) {
 		name := p.ToolCall.Name
@@ -180,7 +187,41 @@ func (a *app) subagentPermission(role string) func(context.Context, acp.RequestP
 			name = "未知工具"
 		}
 		label := fmt.Sprintf("%s: %s", role, name)
-		if err := a.guard.authorize(ctx, label, subagentKindMutates(p.ToolCall.Kind)); err != nil {
+		mutates := subagentKindMutates(p.ToolCall.Kind)
+
+		// 先按主进程自己的权限档位裁决：auto 全放行、readonly 拒改动。
+		// 只有 ask 才需要麻烦用户 —— 否则 permissions=auto 的会话里
+		// 子代理每动一下都要弹窗，甚至不弹（客户端不支持）就一直等到超时。
+		if a.guard != nil {
+			switch a.guard.mode {
+			case modeAuto:
+				return pickOption(p.Options, "allow_once", "allow"), nil
+			case modeReadonly:
+				if mutates {
+					return pickOption(p.Options, "reject_once", "reject"), nil
+				}
+			}
+		}
+
+		allow, handled, err := a.acpAuthorize(ctx, label, mutates)
+		if handled {
+			if err != nil {
+				return "", err
+			}
+			if allow {
+				if id := pickOption(p.Options, "allow_once", "allow"); id != "" {
+					return id, nil
+				}
+				return "", nil
+			}
+			// 拒绝：优先选 reject_once，找不到就直接 cancelled。
+			if id := pickOption(p.Options, "reject_once", "reject"); id != "" {
+				return id, nil
+			}
+			return "", nil
+		}
+
+		if err := a.guard.authorize(ctx, label, mutates); err != nil {
 			// 拒绝：优先选 reject_once，找不到就直接 cancelled。
 			if id := pickOption(p.Options, "reject_once", "reject"); id != "" {
 				return id, nil

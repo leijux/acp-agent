@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/leijux/acp-agent/internal/agent"
 	"github.com/leijux/acp-agent/internal/tools"
@@ -35,6 +36,10 @@ type AgentConfig struct {
 
 	// Permission 控制工具调用是否需要客户端授权。
 	Permission PermissionMode
+	// PermissionTimeout 是等待客户端授权的上限；零值用 DefaultPermissionTimeout。
+	// 客户端不理会 session/request_permission 时，靠它把「永久挂住」
+	// 变成一次明确的超时错误。
+	PermissionTimeout time.Duration
 	// AutoApprove 是无需询问即可执行的工具名（PermissionModeAsk 时生效）。
 	AutoApprove []string
 	// OnlyTools 限制可见工具集合；空表示全部。
@@ -140,7 +145,7 @@ func (h *AgentHandler) setup(ctx context.Context, s *ServerSession, hist *agent.
 		case PermissionAsk:
 			u, _ := s.Sink.(*updates)
 			guard = newAutoApprove(
-				NewPermissionGuard(s.Client(), s.ID, u),
+				NewPermissionGuard(s.Client(), s.ID, u).SetTimeout(h.cfg.PermissionTimeout),
 				h.cfg.AutoApprove...,
 			)
 		case PermissionReadOnly:

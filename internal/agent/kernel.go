@@ -24,11 +24,31 @@ var sharedKernel struct {
 	once sync.Once
 	k    *kernel.Kernel
 	err  error
+
+	// opts 在首次初始化前可被 SetKernelOptions 写入（如分词器）。
+	mu   sync.Mutex
+	opts []kernel.Option
+}
+
+// SetKernelOptions 设置进程级 Kernel 的初始化选项（典型用途：换分词器）。
+//
+// 必须在 Kernel 首次使用（第一个 Agent 创建会话）之前调用；已初始化后调用
+// 会被静默忽略 —— kernel 是进程级共享实例，bundle 只加载一次，选项无法中途改。
+func SetKernelOptions(opts ...kernel.Option) {
+	sharedKernel.mu.Lock()
+	defer sharedKernel.mu.Unlock()
+	if sharedKernel.k != nil || sharedKernel.err != nil {
+		return
+	}
+	sharedKernel.opts = opts
 }
 
 func getKernel() (*kernel.Kernel, error) {
 	sharedKernel.once.Do(func() {
-		sharedKernel.k, sharedKernel.err = kernel.New()
+		sharedKernel.mu.Lock()
+		opts := sharedKernel.opts
+		sharedKernel.mu.Unlock()
+		sharedKernel.k, sharedKernel.err = kernel.New(opts...)
 	})
 	return sharedKernel.k, sharedKernel.err
 }

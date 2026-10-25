@@ -81,7 +81,7 @@ func newTestApp(t *testing.T, cfg Config, baseURL string) (*app, *bytes.Buffer) 
 	buf := &bytes.Buffer{}
 	term := &terminal{out: buf, errOut: buf}
 	in := bufio.NewReader(strings.NewReader(""))
-	a, err := newApp(context.Background(), cfg, prov, model, in, term, false)
+	a, err := newApp(context.Background(), cfg, prov, model, in, term, false, false)
 	if err != nil {
 		t.Fatalf("newApp: %v", err)
 	}

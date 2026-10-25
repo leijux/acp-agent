@@ -314,7 +314,7 @@ const replHelp = `
   /init            生成 AGENTS.md 模板
   /exit 或 Ctrl-D  退出
   其它输入        发送给模型
-（运行中按 Ctrl-C 中断当前任务）
+（运行中按 Esc 中断当前任务，Ctrl-C 退出）
 `
 
 func (a *app) repl(ctx context.Context, cont bool) error {
@@ -331,6 +331,22 @@ func (a *app) repl(ctx context.Context, cont bool) error {
 		a.sessPath = a.store.newPath()
 	}
 
+	// 按键层：让 Esc 能在 turn 执行期间即时生效。
+	//
+	// 非终端（管道/重定向）或平台不支持时它拿不到，退回行模式读取 ——
+	// 此时 Esc 不可用，其余功能不变。
+	if a.keys == nil {
+		if w, err := startKeyWatcher(int(os.Stdin.Fd()), a.term.out); err == nil {
+			a.keys = w
+			a.guard.keys = w
+			defer func() {
+				a.guard.keys = nil
+				a.keys = nil
+				w.Close()
+			}()
+		}
+	}
+
 	a.term.printf("%s %s\n", a.term.paint(cBold, "acp-agent"), a.term.paint(cDim, version))
 	a.term.printf("%s\n", a.term.paint(cDim, fmt.Sprintf(
 		"模型 %s/%s  上下文 %d  权限 %s  工作目录 %s",
@@ -340,10 +356,11 @@ func (a *app) repl(ctx context.Context, cont bool) error {
 
 	for {
 		a.term.printf("%s ", a.term.paint(cBold+cBlue, "›"))
-		line, err := a.in.ReadString('\n')
+		line, err := a.readLine(ctx)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || errors.Is(err, errQuitRequested) {
 				a.term.printf("\n")
+				a.saveSession()
 				return nil
 			}
 			return err
@@ -364,7 +381,16 @@ func (a *app) repl(ctx context.Context, cont bool) error {
 		}
 
 		start := time.Now()
-		res, err := a.agent.Run(ctx, input)
+		// 每次 turn 一个可取消的 ctx：Esc 只取消当前任务，不影响会话。
+		turnCtx, cancelTurn := context.WithCancel(ctx)
+		if a.keys != nil {
+			a.keys.SetCancelTurn(cancelTurn)
+		}
+		res, err := a.agent.Run(turnCtx, input)
+		if a.keys != nil {
+			a.keys.SetCancelTurn(nil)
+		}
+		cancelTurn()
 		a.term.closeDelta()
 		a.term.resetMarkdown()
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -381,6 +407,18 @@ func (a *app) repl(ctx context.Context, cont bool) error {
 		a.saveSession()
 		a.term.printf("\n")
 	}
+}
+
+// readLine 从按键层读一行；没有按键层（非终端/平台不支持）时退回行模式。
+func (a *app) readLine(ctx context.Context) (string, error) {
+	if a.keys != nil {
+		line, err := a.keys.ReadLine(ctx)
+		if err != nil {
+			return "", err
+		}
+		return line + "\n", nil
+	}
+	return a.in.ReadString('\n')
 }
 
 // command 处理斜杠命令，返回是否退出。

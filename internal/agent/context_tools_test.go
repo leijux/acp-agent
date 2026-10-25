@@ -293,6 +293,39 @@ func TestContextNudgeMessageThrottled(t *testing.T) {
 	}
 }
 
+// TestAutoCompactCheckRunsOnPlainTurn 验证「不调工具的纯对话轮也会跑压缩检查」。
+//
+// 旧实现把检查点放在工具结果之后，len(calls)==0 直接 break —— 纯问答的
+// 会话永远不会被提醒或强制压缩，频率明显低于上游（上游每轮 processTurn 都判）。
+//
+// 验证手段：把窗口压到极小，任何历史都超过 HardCompactUsage；强制压缩会因
+// kernel 拿不出可压区间而发出 ErrorEvent。只要收到它，就证明检查点真的跑了。
+func TestAutoCompactCheckRunsOnPlainTurn(t *testing.T) {
+	p := NewScriptedProvider(reply("ok"))
+	a := newTestAgent(t, p, func(o *Options) {
+		o.Registry = tools.NewRegistry()
+		o.ContextWindow = 2_000
+	})
+	var errs int
+	a.On(func(ev Event) {
+		if _, ok := ev.(ErrorEvent); ok {
+			errs++
+		}
+	})
+	fillContext(t, a, 10)
+	if !a.shouldCompact() {
+		t.Skipf("未到强制压缩水位，usage=%.2f", a.contextUsage())
+	}
+
+	before := errs
+	if _, err := a.Run(context.Background(), "继续描述一下"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if errs == before {
+		t.Fatal("纯对话轮没有触发压缩检查（没走到 Compact）")
+	}
+}
+
 // 系统 prompt 应包含上下文管理约定。
 func TestSystemPromptMentionsContextTools(t *testing.T) {
 	p := NewScriptedProvider(reply("x"))

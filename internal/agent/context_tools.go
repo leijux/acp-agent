@@ -64,7 +64,17 @@ func (a *Agent) withKernel(fn func(*kernelEngine) error) error {
 
 // ContextStatus 实现 tools.ContextBackend。
 func (c *contextBackend) ContextStatus(_ context.Context) (tools.ContextStatus, error) {
+	out, _, err := c.contextStatus()
+	return out, err
+}
+
+// contextStatus 与 ContextStatus 相同，但额外返回 kernel 的 ShouldInject ——
+// 它表示「本轮该不该提醒模型压缩」（上游的节流：增长量 / tier 阀值 /
+// 超过 maxContextLimitPct 时无条件）。agent 用它决定是否注入 nudge，
+// 而不是自己拍一个百分比。
+func (c *contextBackend) contextStatus() (tools.ContextStatus, bool, error) {
 	var out tools.ContextStatus
+	var shouldInject bool
 	err := c.a.withKernel(func(ke *kernelEngine) error {
 		branch := c.a.opts.Session.ActiveBranch()
 		km := kernelMessages(branch)
@@ -98,6 +108,7 @@ func (c *contextBackend) ContextStatus(_ context.Context) (tools.ContextStatus, 
 			out.Reason = fmt.Sprintf("占用 %.0f%%，尚未达到 kernel 的压缩水位", out.Usage*100)
 			return nil
 		}
+		shouldInject = res.Nudge.ShouldInject
 		out.Reason = res.Nudge.Reason
 		for _, r := range res.Nudge.CompressibleRanges {
 			sel := selectRefRange(res.Messages, r.StartRef, r.EndRef)
@@ -114,7 +125,7 @@ func (c *contextBackend) ContextStatus(_ context.Context) (tools.ContextStatus, 
 		}
 		return nil
 	})
-	return out, err
+	return out, shouldInject, err
 }
 
 // ContextApply 实现 tools.ContextBackend。
@@ -304,26 +315,24 @@ func contextNudgeText(usage float64, limit int, ranges []tools.ContextRangeInfo)
 
 // contextNudgeMessage 生成一条注入对话的压缩提示。
 //
-// 返回 nil 表示本次不注入（已提示过且上下文没有明显增长，或根本没有可压区间）。
-// 节流阀是必需的：提示本身也占 token，每轮重复只会加剧拥挤。
+// 是否注入交给 kernel 的 ShouldInject，而不是自己拍一个百分比：
+// 它已经综合了增长量（growthFloor）、tier 阀值与「超过 maxContextLimitPct
+// 时无条件提醒」。自己再加一层 20% 增长节流会让频率明显低于上游。
+//
+// 返回 nil 表示本轮不注入（kernel 认为不用提醒，或没有可压区间）。
 func (a *Agent) contextNudgeMessage() *CustomMessage {
-	tokens := a.contextTokens()
-	a.nudgeMu.Lock()
-	prev := a.nudgedAt
-	if prev > 0 && tokens < prev+prev/5 {
-		a.nudgeMu.Unlock()
-		return nil
-	}
-	a.nudgeMu.Unlock()
-
-	st, err := (&contextBackend{a: a}).ContextStatus(context.Background())
+	st, shouldInject, err := (&contextBackend{a: a}).contextStatus()
 	if err != nil || len(st.Ranges) == 0 {
 		// 没有可压区间就不提，避免催模型做无用功。
 		return nil
 	}
+	if !shouldInject {
+		return nil
+	}
 
+	tokens := a.contextTokens()
 	a.nudgeMu.Lock()
-	a.nudgedAt = tokens
+	a.nudgedAt = tokens // 仅用于观测/测试；不再参与节流判断
 	a.nudgeMu.Unlock()
 
 	return &CustomMessage{

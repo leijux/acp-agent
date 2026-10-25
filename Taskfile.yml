@@ -21,6 +21,10 @@ vars:
     sh: git describe --tags --always --dirty 2>/dev/null || echo 0.1.0
   # -s -w 去符号表；-X 注入 cmd/acp-agent 的 version 变量。
   LDFLAGS: -s -w -X main.version={{.VERSION}}
+  # 默认编译进去的可选能力。目前只有中文分词器（gse）需要 build tag：
+  # 它的词典被 go:embed，会让二进制从 20MB 涨到 52MB。
+  # 想构建轻量版：task build TAGS=""
+  TAGS: segmenter
 
 set: [pipefail]
 
@@ -34,32 +38,39 @@ tasks:
   # ── 构建 ────────────────────────────────────────────────────────────────
 
   build:
-    desc: 构建主程序到 bin/（注入 git 版本号）
+    desc: 构建主程序到 bin/（注入 git 版本号 + 默认 tags）
     aliases: [b]
     sources:
       - cmd/**/*.go
       - internal/**/*.go
       - go.mod
       - go.sum
+      # Taskfile 本身也算输入：改 TAGS/LDFLAGS 后必须重新构建。
+      - Taskfile.yml
     generates:
       - '{{.BIN}}/{{.PROG}}{{.EXE}}'
     cmds:
-      - go build -trimpath -ldflags '{{.LDFLAGS}}' -o '{{.BIN}}/{{.PROG}}{{.EXE}}' ./cmd/acp-agent
+      # TAGS 默认 segmenter（中文分词器）。轻量构建：task build TAGS=""
+      - go build -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o '{{.BIN}}/{{.PROG}}{{.EXE}}' ./cmd/acp-agent
+      # Windows 上 go build 覆盖运行中的 exe 时会把旧文件重命名成 xxx~（占 50MB）。
+      # 进程没退出时删不掉，所以忽略错误；下次构建再清。
+      - cmd: rm -f '{{.BIN}}/{{.PROG}}{{.EXE}}~'
+        ignore_error: true
 
   build:all:
     desc: 构建全部 cmd/ 下的程序
     cmds:
       - for: { var: PROGRAMS }
-        cmd: go build -trimpath -o '{{.BIN}}/{{.ITEM}}{{.EXE}}' ./cmd/{{.ITEM}}
+        cmd: go build -tags '{{.TAGS}}' -trimpath -o '{{.BIN}}/{{.ITEM}}{{.EXE}}' ./cmd/{{.ITEM}}
     vars:
       PROGRAMS:
         - acp-agent
         - verify-kernel
 
   install:
-    desc: go install 到 $GOBIN
+    desc: go install 到 $GOBIN（带默认 tags）
     cmds:
-      - go install -trimpath -ldflags '{{.LDFLAGS}}' ./cmd/acp-agent
+      - go install -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' ./cmd/acp-agent
 
   cross:
     desc: 交叉编译发布矩阵到 dist/（纯 Go，无 cgo）
@@ -73,7 +84,7 @@ tasks:
           mkdir -p "$(dirname "$out")"
           echo "→ $out"
           CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
-            go build -trimpath -ldflags '{{.LDFLAGS}}' -o "$out" ./cmd/acp-agent
+            go build -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o "$out" ./cmd/acp-agent
         done
 
   # ── 测试 ────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/leijux/acp-agent/internal/tools"
 )
@@ -31,7 +32,15 @@ var (
 	ErrPermissionDenied = errors.New("用户拒绝了该工具调用")
 	// ErrPermissionCancelled 表示 turn 被取消，权限请求未决。
 	ErrPermissionCancelled = errors.New("turn 已取消，权限请求未决")
+	// ErrPermissionTimeout 表示客户端在超时内没有响应。
+	//
+	// 常见于客户端根本不渲染 session/request_permission：请求发出去无人应答，
+	// 没有超时就是无限挂住（整个 turn 卡死，用户只能取消）。
+	ErrPermissionTimeout = errors.New("客户端未在超时内响应授权请求")
 )
+
+// DefaultPermissionTimeout 是等待客户端授权的默认上限。
+const DefaultPermissionTimeout = 60 * time.Second
 
 // PermissionGuard 把 ACP 的 session/request_permission 接到工具调度上。
 //
@@ -45,6 +54,12 @@ type PermissionGuard struct {
 	mu      sync.Mutex
 	allowed map[string]bool
 	denied  map[string]bool
+
+	// timeout 是单次等待上限；零值用 DefaultPermissionTimeout。
+	timeout time.Duration
+	// unresponsive 为 true 表示曾经超时：客户端不处理权限请求。
+	// 之后不再浪费时间重试，直接快速失败。
+	unresponsive bool
 }
 
 // NewPermissionGuard 创建权限门禁。
@@ -55,7 +70,19 @@ func NewPermissionGuard(client *Client, sessionID string, u *updates) *Permissio
 		updates:   u,
 		allowed:   make(map[string]bool),
 		denied:    make(map[string]bool),
+		timeout:   DefaultPermissionTimeout,
 	}
+}
+
+// SetTimeout 覆盖等待客户端授权的上限（零或负值恢复默认）。
+func (g *PermissionGuard) SetTimeout(d time.Duration) *PermissionGuard {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if d <= 0 {
+		d = DefaultPermissionTimeout
+	}
+	g.timeout = d
+	return g
 }
 
 // Authorize 实现 Guard。
@@ -69,6 +96,14 @@ func (g *PermissionGuard) Authorize(ctx context.Context, toolName string, args m
 		g.mu.Unlock()
 		return fmt.Errorf("%w（%s 已被设为总是拒绝）", ErrPermissionDenied, toolName)
 	}
+	if g.unresponsive {
+		g.mu.Unlock()
+		return fmt.Errorf("%w（%s；该客户端不处理 session/request_permission，请改用 permissions=auto 或 read_only）", ErrPermissionTimeout, toolName)
+	}
+	wait := g.timeout
+	if wait <= 0 {
+		wait = DefaultPermissionTimeout
+	}
 	g.mu.Unlock()
 
 	id := g.updates.takeToolID(toolName)
@@ -81,10 +116,22 @@ func (g *PermissionGuard) Authorize(ctx context.Context, toolName string, args m
 		RawInput:      args,
 	}
 
+	// 关键：请求本身也必须受超时约束。客户端不实现权限 UI 时，
+	// 没有这层 ctx 就是永久挂住（既没有错误也没有结果）。
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+
 	outcome, err := g.client.RequestPermission(ctx, g.sessionID, tc, DefaultPermissionOptions())
 	if err != nil {
-		if ctx.Err() != nil {
+		if parent.Err() != nil {
 			return ErrPermissionCancelled
+		}
+		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			g.mu.Lock()
+			g.unresponsive = true
+			g.mu.Unlock()
+			return fmt.Errorf("%w（%s 等待 %s）", ErrPermissionTimeout, toolName, wait)
 		}
 		return fmt.Errorf("请求权限失败: %w", err)
 	}

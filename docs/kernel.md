@@ -189,9 +189,28 @@ GC 是全局的 —— 8 个 VM 并行跑，GC 成了共同瓶颈。这也意味
 
 ## 三个必须知道的限制
 
-1. **中文分词降级**。上游在**加载期**执行 `new Intl.Segmenter("zh")`（`src/search/tokenizer.ts`），goja 无 Intl。默认用正则在 CJK 边界切「单字 + 连续 ASCII 词」，单字粒度等价于上游对中文的处理，但**词级切分质量低于 Node 的 CLDR**。想对齐 Node：`WithSegmenter(...)` 注入你自己的实现（或用 cgo + ICU，代价是失去纯静态编译）。
+1. **中文分词默认降级**。上游在**加载期**执行 `new Intl.Segmenter("zh")`（`src/search/tokenizer.ts`），goja 无 Intl。默认用无依赖的 `RuneSegmenter` 在 CJK 边界切「单字 + 连续 ASCII 词」，连续 CJK run 再在 kernel 内做 bigram 回退 —— 检索召回够用，但**词级切分质量低于 Node 的 CLDR**。
 
-2. **`processTurn` 比 Node 慢，且随消息数超线性增长**。200 条消息约 60ms（优化前 198ms），
+   想拿回词：repo 已提供两个真词典实现（`internal/segmenter`），`task build` 默认已带 `-tags segmenter`，只要选运行时的值：
+
+   | `-segmenter` | 词典 | 二进制 | 备注 |
+   |---|---|---|---|
+   | `rune`（默认值） | 无 | 20MB | 单字 + bigram 回退（`TAGS=""` 构建时唯一可用） |
+   | `gse` | 内置简体 | 52MB | 加载 453ms；繁体自动退化为 bigram |
+   | `gse_full` | 内置简+繁 | 52MB | 加载 811ms；繁体也有词精度 |
+   | `sego` | 外部文件 | 52MB | 需 `-segmenter-dict`，可加专有名词 |
+
+   ```bash
+   task build                 # 默认带 -tags segmenter
+   acp-agent -segmenter gse
+
+   task build TAGS=""         # 轻量构建（20MB，分词器退化为 rune）
+   ```
+
+   作为库自己接：实现 `kernel.Segmenter` 后 `kernel.New(kernel.WithSegmenter(seg))`。
+   `Segment.Index` 的契约是 **rune 偏移**（不是 JS 的 UTF-16 码元），kernel 自身只用 `Text`。
+
+2. **`processTurn` 比 Node 慢，且随消息数超线性增长**。200 条消息约 68ms（优化前 198ms），
    800 条约 730ms —— 消息翻倍耗时乘 2.6~3.6（详见「性能与并发」）。
    这不是 Go 封装引入的：kernel 对每条消息做多趟全表扫描，而 goja 是单线程解释执行。
    **对策是控制活跃消息数在 200–300 条内并及时 `ApplyCompression`**，

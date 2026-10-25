@@ -451,27 +451,14 @@ func (a *Agent) RunMessages(ctx context.Context, input Message) (*RunResult, err
 				}
 				continue
 			}
+			// 纯对话轮也要给压缩一次机会：否则不调工具的会话永远不会被
+			// 提醒/强制压缩（上游是每轮 processTurn 都判）。
+			a.maybeAutoCompact(runCtx, res)
 			break
 		}
 
 		// 5) 工具结果已追加、下一次 assistant 响应之前 —— 压缩检查点。
-		//
-		// 主动模式：先注入提示让模型自己压（context_apply）；
-		// 只有模型迟迟不动手、占用撞到 HardCompactUsage 时才强制压缩。
-		if !a.opts.DisableAutoCompact {
-			switch {
-			case a.shouldCompact():
-				if _, err := a.Compact(runCtx, "", "threshold"); err != nil {
-					a.emit.Emit(ErrorEvent{Err: err})
-				}
-			case !a.opts.DisableContextTools && a.shouldNudge():
-				if msg := a.contextNudgeMessage(); msg != nil {
-					if _, err := a.opts.Session.Append(msg); err == nil {
-						res.Messages = append(res.Messages, msg)
-					}
-				}
-			}
-		}
+		a.maybeAutoCompact(runCtx, res)
 	}
 
 	if res.Aborted {
@@ -486,6 +473,28 @@ func (a *Agent) RunMessages(ctx context.Context, input Message) (*RunResult, err
 	a.totalMu.Unlock()
 
 	return res, res.Err
+}
+
+// maybeAutoCompact 是每轮末尾的压缩检查点。
+//
+// 主动模式：先注入提示让模型自己压（context_apply）；
+// 只有模型迟迟不动手、占用撞到 HardCompactUsage 时才由宿主强制压缩。
+func (a *Agent) maybeAutoCompact(ctx context.Context, res *RunResult) {
+	if a.opts.DisableAutoCompact {
+		return
+	}
+	switch {
+	case a.shouldCompact():
+		if _, err := a.Compact(ctx, "", "threshold"); err != nil {
+			a.emit.Emit(ErrorEvent{Err: err})
+		}
+	case !a.opts.DisableContextTools && a.shouldNudge():
+		if msg := a.contextNudgeMessage(); msg != nil {
+			if _, err := a.opts.Session.Append(msg); err == nil {
+				res.Messages = append(res.Messages, msg)
+			}
+		}
+	}
 }
 
 // runMessagesSince 取出从 startIdx 起新增的消息。

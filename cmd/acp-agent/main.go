@@ -19,8 +19,11 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	xterm "golang.org/x/term"
 
 	"github.com/leijux/acp-agent/internal/acp"
 	"github.com/leijux/acp-agent/internal/agent"
@@ -86,6 +89,8 @@ type flags struct {
 	webSearch      string
 	webSearchKey   string
 	noWeb          bool
+	segmenter      string
+	segmenterDict  string
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -119,6 +124,8 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.webSearch, "web-search", "", "web_search 后端：duckduckgo/searxng/tavily/brave/exa/off")
 	fs.StringVar(&f.webSearchKey, "web-search-key", "", "web_search 后端的 API key（searxng/duckduckgo 不需要）")
 	fs.BoolVar(&f.noWeb, "no-web", false, "关闭 web_search/web_fetch")
+	fs.StringVar(&f.segmenter, "segmenter", "", "中文分词器：rune（默认，单字+bigram）/gse/sego")
+	fs.StringVar(&f.segmenterDict, "segmenter-dict", "", "sego 的词典文件路径（多个用逗号分隔）")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "acp-agent %s — 终端编码 agent\n\n", resolveVersion())
@@ -211,11 +218,19 @@ func run() error {
 	}
 
 	in := bufio.NewReader(os.Stdin)
-	term := newTerminal(os.Stdout, f.noColor || os.Getenv("NO_COLOR") != "")
+	termOut := newTerminal(os.Stdout, f.noColor || os.Getenv("NO_COLOR") != "")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	app, err := newApp(ctx, cfg, prov, model, in, term, f.cont)
+	// 只有「真终端 + 非 ACP + 非 -p」才能用 stdin 问权限。
+	// ACP 模式下 stdin 属于 JSON-RPC，拿它问 y/n 会卡死并搞乱协议流；
+	// -p 模式是一次性非交互运行，同样不该停下来等人。
+	interactive := !f.acpMode && f.print == "" && xterm.IsTerminal(int(os.Stdin.Fd()))
+
+	// 分词器必须在 kernel 首次初始化前装上（进程级共享，选项只生效一次）。
+	installSegmenter(cfg)
+
+	app, err := newApp(ctx, cfg, prov, model, in, termOut, f.cont, interactive)
 	if err != nil {
 		return err
 	}
@@ -226,7 +241,7 @@ func run() error {
 	// -p 模式：正文只在结束时打印一次（stdout 是结果），
 	// 工具/用量日志走 stderr，便于管道处理。
 	if f.print != "" {
-		term.quiet = true
+		termOut.quiet = true
 	}
 
 	switch {
@@ -288,6 +303,7 @@ type app struct {
 	prov     agent.Provider
 	agent    *agent.Agent
 	reg      *tools.Registry
+	rawReg   *tools.Registry // 未被本地 guard 包裹的原始 registry（ACP 模式用）
 	mcp      *mcp.Manager
 	guard    *guard
 	sess     *agent.Session
@@ -296,15 +312,27 @@ type app struct {
 	in       *bufio.Reader
 	term     *terminal
 	started  time.Time
+
+	// acpCur 是当前活动 ACP 会话。非 ACP 模式下恒为 nil。
+	// 子代理的授权请求靠它转给客户端（session/request_permission）。
+	acpMu  sync.RWMutex
+	acpCur *acp.ServerSession
+
+	// subPerm 记住子代理授权里的「总是允许/总是拒绝」。
+	subPerm subagentPermCache
+
+	// keys 是 REPL 的按键层（仅终端可用）；为 nil 时退回行模式读取。
+	keys *keyWatcher
 }
 
-func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Model, in *bufio.Reader, term *terminal, cont bool) (*app, error) {
+func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Model, in *bufio.Reader, term *terminal, cont bool, interactive bool) (*app, error) {
 	mode, err := parsePermMode(cfg.Permissions)
 	if err != nil {
 		return nil, err
 	}
 
 	g := newGuard(mode, in, term.out)
+	g.interactive = interactive
 
 	// delegate 通过 ACP 驱动另一个 acp-agent 进程（默认就是自身）。
 	// ap 在下面才构造，故用闭包延迟取。
@@ -386,6 +414,7 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 		prov:     prov,
 		agent:    a,
 		reg:      guarded,
+		rawReg:   reg,
 		mcp:      mgr,
 		guard:    g,
 		sess:     sess,
@@ -494,11 +523,19 @@ func (a *app) serveACP(ctx context.Context) error {
 	case permReadonly:
 		perm = acp.PermissionReadOnly
 	}
+	// 关键：用原始 registry，不要用已经包了本地 guard 的 a.reg。
+	// ACP 模式下授权由客户端的 session/request_permission 裁决；再叠一层
+	// cmd 层 guard 的话，它会在 stdin 上问 y/n（没有人答）——
+	// 请求永远挂在半路，客户端弹窗还没机会出现。
+	reg := a.rawReg
+	if reg == nil {
+		reg = a.reg
+	}
 	handler, err := acp.NewAgentHandler(acp.AgentConfig{
 		Provider:   a.prov,
 		Model:      a.agent.Model(),
-		Registry:   a.reg,
-		Executor:   tools.NewExecutor(a.reg, 8),
+		Registry:   reg,
+		Executor:   tools.NewExecutor(reg, 8),
 		Context:    agent.ContextOptions{WorkingDir: a.cfg.Root},
 		MaxTurns:   a.cfg.MaxTurns,
 		Permission: perm,
@@ -508,7 +545,9 @@ func (a *app) serveACP(ctx context.Context) error {
 	}
 	conn := acp.NewConn(os.Stdin, os.Stdout, nil)
 	srv, err := acp.NewServer(conn, acp.ServerOptions{
-		Handler: handler,
+		// 包一层：把「当前会话」记在 app 上，供 delegate 子代理把
+		// 授权请求转给客户端（否则子代理照样卡在本地 guard 上）。
+		Handler: &acpSessionTracker{Handler: handler, onSession: a.setACPSession},
 		Info:    acp.Implementation{Name: "acp-agent", Version: resolveVersion()},
 	})
 	if err != nil {

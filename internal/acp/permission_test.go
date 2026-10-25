@@ -143,6 +143,101 @@ func TestPermissionGuardRemembersAlwaysAllow(t *testing.T) {
 	}
 }
 
+// TestPermissionGuardTimesOutAndStopsAsking 覆盖「客户端收下请求但永不回复」。
+//
+// 这是 --permissions ask 下最常见的卡死形态：请求发出去没人应答，
+// 没有超时整个 turn 就挂在那里。除了超时，还要保证不会每一步都重试 ——
+// 否则用户每调一个工具就得等一个完整超时。
+func TestPermissionGuardTimesOutAndStopsAsking(t *testing.T) {
+	cr, sr := net.Pipe()
+	clientConn := NewConn(cr, cr, nil)
+	var mu sync.Mutex
+	asked := 0
+	clientConn.Handle(MethodSessionRequestPr, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		<-ctx.Done() // 收下，永不回复
+		return nil, ctx.Err()
+	})
+	go clientConn.Serve()
+	defer clientConn.Close()
+
+	serverConn := NewConn(sr, sr, nil)
+	go serverConn.Serve()
+	defer serverConn.Close()
+
+	g := NewPermissionGuard(
+		NewClient(serverConn, ClientCapabilities{}, nil),
+		"s1",
+		newUpdates(serverConn, "s1", ClientCapabilities{}),
+	).SetTimeout(150 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := g.Authorize(ctx, "bash", nil)
+	if !errors.Is(err, ErrPermissionTimeout) {
+		t.Fatalf("期望 ErrPermissionTimeout，得到 %v", err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("超时耗时 %v，没有生效", d)
+	}
+
+	// 第二次必须立刻失败，且不再打扰客户端。
+	mu.Lock()
+	before := asked
+	mu.Unlock()
+	start = time.Now()
+	if err := g.Authorize(ctx, "write", nil); !errors.Is(err, ErrPermissionTimeout) {
+		t.Fatalf("第二次期望 ErrPermissionTimeout，得到 %v", err)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("已判定客户端不响应后仍等待了 %v", d)
+	}
+	mu.Lock()
+	after := asked
+	mu.Unlock()
+	if after != before {
+		t.Fatalf("已判定不响应后仍在请求客户端（%d → %d）", before, after)
+	}
+}
+
+// TestPermissionGuardCancelIsNotTimeout 验证 turn 被取消时仍然是 cancelled。
+func TestPermissionGuardCancelIsNotTimeout(t *testing.T) {
+	cr, sr := net.Pipe()
+	clientConn := NewConn(cr, cr, nil)
+	clientConn.Handle(MethodSessionRequestPr, func(ctx context.Context, _ json.RawMessage) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	go clientConn.Serve()
+	defer clientConn.Close()
+
+	serverConn := NewConn(sr, sr, nil)
+	go serverConn.Serve()
+	defer serverConn.Close()
+
+	g := NewPermissionGuard(
+		NewClient(serverConn, ClientCapabilities{}, nil),
+		"s1",
+		newUpdates(serverConn, "s1", ClientCapabilities{}),
+	).SetTimeout(10 * time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	if err := g.Authorize(ctx, "bash", nil); !errors.Is(err, ErrPermissionCancelled) {
+		t.Fatalf("期望 ErrPermissionCancelled，得到 %v", err)
+	}
+	if g.unresponsive {
+		t.Fatal("取消不应被当成「客户端不响应」")
+	}
+}
+
 // ---------- update.go 的映射 ----------
 
 func TestToolKindAndTitle(t *testing.T) {

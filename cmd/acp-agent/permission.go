@@ -53,6 +53,15 @@ const (
 type guard struct {
 	mode permMode
 
+	// interactive 为 false 时不允许读 stdin 询问（ACP 模式、-p 模式、stdin 不是 TTY）。
+	// 此时 ask 模式下的改动型工具一律直接拒绝：问也没人答，读 stdin 只会把
+	// JSON-RPC 流抢走一半字节，然后永久阻塞（见 ask 的注释）。
+	interactive bool
+
+	// keys 是 REPL 的按键层。非 nil 时权限询问从它取行（cbreak 模式下
+	// stdin 已被它独占），否则退回行模式读 reader。
+	keys *keyWatcher
+
 	mu       sync.Mutex
 	reader   *bufio.Reader
 	out      io.Writer
@@ -63,11 +72,12 @@ type guard struct {
 
 func newGuard(mode permMode, reader *bufio.Reader, out io.Writer) *guard {
 	return &guard{
-		mode:   mode,
-		reader: reader,
-		out:    out,
-		always: map[string]bool{},
-		never:  map[string]bool{},
+		mode:        mode,
+		interactive: true,
+		reader:      reader,
+		out:         out,
+		always:      map[string]bool{},
+		never:       map[string]bool{},
 	}
 }
 
@@ -135,7 +145,24 @@ func (g *guard) ask(ctx context.Context, name string) (choice, error) {
 	if err := ctx.Err(); err != nil {
 		return choiceNo, err
 	}
+	// 非交互时绝不能读 stdin：ACP 模式下 os.Stdin 是 JSON-RPC 帧流，
+	// 用 bufio.Reader 抢读会吃掉协议字节并永久阻塞（一帧没人发的 y/n）。
+	// 直接按「否」处理，让调用方拿到明确的拒绝而不是挂在半路。
+	if !g.interactive {
+		fmt.Fprintf(g.out, "\n非交互模式，自动拒绝 %s（改用 --permissions auto/readonly，或在 ACP 客户端里确认）\n", name)
+		return choiceNo, nil
+	}
 	fmt.Fprintf(g.out, "\n允许执行 %s？[y]是 / [a]总是 / [n]否 / [d]永不 (默认 n) ", name)
+
+	// REPL 的按键层接管了 stdin（cbreak），询问也从它读行。
+	// 这里不再起 goroutine：ReadLine 本身就响应 ctx 取消。
+	if g.keys != nil {
+		line, err := g.keys.ReadLine(ctx)
+		if err != nil {
+			return choiceNo, err
+		}
+		return parseChoice(line), nil
+	}
 
 	type result struct {
 		line string
@@ -154,16 +181,21 @@ func (g *guard) ask(ctx context.Context, name string) (choice, error) {
 		if r.err != nil && r.line == "" {
 			return choiceNo, r.err
 		}
-		switch strings.ToLower(strings.TrimSpace(r.line)) {
-		case "y", "yes", "是":
-			return choiceYes, nil
-		case "a", "always", "总是":
-			return choiceAlways, nil
-		case "d", "never", "永不":
-			return choiceNever, nil
-		default:
-			return choiceNo, nil
-		}
+		return parseChoice(r.line), nil
+	}
+}
+
+// parseChoice 把一行回答翻译成选择；无法识别一律按「否」。
+func parseChoice(line string) choice {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes", "是":
+		return choiceYes
+	case "a", "always", "总是":
+		return choiceAlways
+	case "d", "never", "永不":
+		return choiceNever
+	default:
+		return choiceNo
 	}
 }
 

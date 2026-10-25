@@ -39,6 +39,8 @@ Windows 为 `%AppData%\acp-agent\config.json`；`ACP_AGENT_CONFIG` 可指定其�
 | `apiKey` | `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / … | 也可 `--api-key`；本地端点（localhost）允许为空 |
 | `baseURL` | `ACP_AGENT_BASE_URL` | 覆盖端点 |
 | `permissions` | `ACP_AGENT_PERMISSIONS` | `ask` / `auto` / `readonly` |
+| `segmenter` | `ACP_AGENT_SEGMENTER` | 中文分词器：`rune`（默认）/ `gse` / `gse_full` / `sego`；`task build` 默认已编入 |
+| `segmenterDict` | `ACP_AGENT_SEGMENTER_DICT` | `sego` 的词典文件路径（多个用逗号分隔） |
 | `root` | `ACP_AGENT_ROOT` | 工具可访问范围，默认 cwd，启动时转绝对路径 |
 | `session` | `ACP_AGENT_SESSION` | 显式指定会话文件；不设则按项目目录自动分配（见下） |
 | `maxTurns` | `ACP_AGENT_MAX_TURNS` | 单次 `Run` 的 assistant 轮数上限，默认 100 |
@@ -52,6 +54,11 @@ Windows 为 `%AppData%\acp-agent\config.json`；`ACP_AGENT_CONFIG` 可指定其�
 | — | `ACP_AGENT_API_KEY` | 兜底密钥，优先于端点自己的 `EnvKey` |
 
 > 环境变量只在**对应 flag 未指定**时生效，它本身又会覆盖 `config.json` 里的值。
+
+> `permissions=ask` 只在**交互式终端**里才会真的弹问句。ACP 模式（stdin 是
+> JSON-RPC）和非 TTY 场景下不会去读 stdin：内置工具改为向客户端发
+> `session/request_permission`，子代理的改动请求同样转给客户端，拿不到
+> 交互通道时直接拒绝。
 
 ### web 后端
 
@@ -158,7 +165,13 @@ acp-agent --session ./x.jsonl  # 指定文件
 - 正文流式输出，**边流边做 Markdown 渲染**；`[思考]` 段用暗色实时渲染。
 - 工具调用显示为 `→ name args`，结束补 `✓/✗`、耗时、`[并行]` 标记。
 - 压缩时打印 `⚕ 上下文已压缩：A → B token`。
-- 运行中按 `Ctrl-C` 中断当前 turn（不是退出进程）；再按一次退出。
+- 运行中按 **`Esc` 中断当前 turn**（会话继续，可接着输入）；`Ctrl-C` 退出程序。
+  - Esc 依赖终端按键层（cbreak）：关闭行缓冲才能在中途看到按键。
+    Unix 上只关 `ICANON/ECHO/ISIG/IEXTEN`，保留 `OPOST`（否则流式输出的 `\n` 不会换行）；
+    Windows 用 `x/term.MakeRaw`（只改 stdin 的 console mode）。
+  - 非终端（管道/重定向）或平台不支持时退回行模式：Esc 不可用，其余不变。
+  - 空闲时按 Esc 会清掉当前半截输入（不会提交）。
+  - 权限询问（`ask` 模式）与 Esc 监听共用同一个按键层，不会互相抢 stdin。
 
 #### Markdown 渲染
 

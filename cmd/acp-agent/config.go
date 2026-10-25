@@ -40,6 +40,11 @@ type Config struct {
 	MCPConfig string `json:"mcpConfig,omitempty"`
 	// Web 配置 web_search / web_fetch 的后端（缺省用 DuckDuckGo，无需 key）。
 	Web *web.Config `json:"web,omitempty"`
+	// Segmenter 选中文分词器：空/rune（默认，单字 + bigram 回退）、gse、sego。
+	// 换成真词典分词能提升中文检索召回，代价是二进制体积（gse 约 +15MB）。
+	Segmenter string `json:"segmenter,omitempty"`
+	// SegmenterDict 是 sego 的词典文件路径（多个用逗号分隔，靠前的优先）。
+	SegmenterDict string `json:"segmenterDict,omitempty"`
 }
 
 const (
@@ -124,6 +129,12 @@ func (c *Config) applyEnv() {
 	if f, ok := envFloat("ACP_AGENT_TEMPERATURE"); ok {
 		c.Temperature = f
 	}
+	if v := os.Getenv("ACP_AGENT_SEGMENTER"); v != "" {
+		c.Segmenter = v
+	}
+	if v := os.Getenv("ACP_AGENT_SEGMENTER_DICT"); v != "" {
+		c.SegmenterDict = v
+	}
 	c.applyWebEnv()
 }
 
@@ -197,6 +208,12 @@ func (c *Config) applyFlags(f *flags) {
 	}
 	if f.noMCP {
 		c.NoMCP = true
+	}
+	if f.segmenter != "" {
+		c.Segmenter = f.segmenter
+	}
+	if f.segmenterDict != "" {
+		c.SegmenterDict = f.segmenterDict
 	}
 	if f.webSearch != "" {
 		c.ensureWeb()

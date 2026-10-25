@@ -176,8 +176,22 @@ go run ./cmd/acp-agent -endpoints
 
 ## 已知限制
 
-1. **中文分词降级**：goja 无 `Intl.Segmenter`，默认按「单字 + 连续 ASCII 词」切分，词级质量低于 Node 的 CLDR。可用 `kernel.WithSegmenter` 注入 ICU 实现（代价：失去静态编译）。
-2. **`processTurn` 约 10× 慢于 Node**（200 条消息 90ms vs 8.8ms），O(n)/消息。
+1. **中文分词默认降级**：goja 无 `Intl.Segmenter`，默认按「单字 + 连续 ASCII 词」切分（连续 CJK 段在 kernel 内做 bigram 回退），检索召回够用但词级精度低于 Node 的 CLDR。
+   现在内置两个真词典实现，**`task build` 默认已带 `-tags segmenter`**，通过 `-segmenter gse` 启用：
+   - `gse`（推荐）：内置词典，零外部文件，纯 Go。默认**只加载简体**（453ms / 192MB 分配）；
+     繁体文本会自动退化成单字，kernel 随之回退到 bigram，召回不丢；
+   - `gse_full`：同 gse 但加载简体 + 繁体（811ms / 295MB 分配），繁体也有词级精度；
+   - `sego`：自带词典文件（`-segmenter-dict <path>`），体积小、可加专有名词。
+
+   代价是二进制体积：默认 20MB → 带 tag 52MB（词典被 embed）。所以轻量构建用
+   `task build TAGS=""`（手动 `go build` 时不加 `-tags segmenter` 即可）。
+   用法：`task build` 之后 `acp-agent -segmenter gse`（或配置 `"segmenter": "gse"`）。
+   只影响中文 BM25 召回，**不影响压缩结果的正确性**（hash 仍与 Node 一致）。
+
+2. **`processTurn` 比 Node 慢，且随消息数超线性增长**：200 条消息约 68ms（三次优化前 198ms），
+   400 条 200ms，800 条约 727ms；Node 同 workload 约 8.8ms。原因三层：上游算法对每条消息做多趟全表扫描（O(N²)）、
+   goja 是解释执行、JS↔Go 边界要序列化消息。**对策是把活跃消息控制在 200–300 条并及时压缩**，
+   而不是指望 Go 侧做增量 —— `processTurn` 的语义要求全量历史。详见 `docs/kernel.md`「性能与并发」。
 3. goja 无 `structuredClone` / `TextEncoder` / `queueMicrotask`，kernel 未使用；async 只在脚本边界 drain（kernel 的同步 API 不受影响）。
 
 详见 [`docs/kernel.md`](docs/kernel.md)。
