@@ -80,8 +80,11 @@ tasks:
         for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
           os=${target%/*}; arch=${target#*/}
           ext=""; [ "$os" = windows ] && ext=".exe"
-          out="{{.DIST}}/${os}-${arch}/{{.PROG}}${ext}"
-          mkdir -p "$(dirname "$out")"
+          dir="{{.DIST}}/${os}-${arch}"
+          out="${dir}/{{.PROG}}${ext}"
+          # 直接拼目录，不要用 dirname：Task 的内置 shell 不带 coreutils，
+          # 干净环境下 `$(dirname ...)` 会失败并让整个 cross 中断。
+          mkdir -p "$dir"
           echo "→ $out"
           CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
             go build -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o "$out" ./cmd/acp-agent
