@@ -88,10 +88,13 @@ func NewAgentHandler(cfg AgentConfig) (*AgentHandler, error) {
 	return &AgentHandler{cfg: cfg, sessions: make(map[string]*sessionState)}, nil
 }
 
-// Initialize 声明能力：支持 load、图片输入。
+// Initialize 声明能力：图片输入始终支持；load 仅在有持久化目录时声明。
+//
+// 不能无条件声明 loadSession：客户端会据此在重启后尝试恢复会话，而
+// LoadSession 在 AgentConfig.Dir 为空时必然报错。
 func (h *AgentHandler) Initialize(_ context.Context, p InitializeParams) (AgentCapabilities, error) {
 	caps := AgentCapabilities{
-		LoadSession:        true,
+		LoadSession:        h.cfg.Dir != "",
 		PromptCapabilities: PromptCapabilities{Image: true},
 	}
 	return caps, nil
