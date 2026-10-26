@@ -227,11 +227,21 @@ func TestBashConcurrent(t *testing.T) {
 			t.Fatalf("job%d 输出错误: %q", i, res.Result.Text())
 		}
 	}
-	// 4×400ms 串行 ≈1.6s；并发应显著更快。
-	if elapsed > 1300*time.Millisecond {
-		t.Fatalf("4 个 bash 调用耗时 %v，未并发", elapsed)
+
+	// 串行基线现场测，不用写死的绝对阈值：早先写死 1.3s，而 Windows 上
+	// 一次 sleep 400ms 的命令实际耗时 1.25~1.30s（进程启动 + 内置 shell），
+	// 整套测试并行跑时很容易越过阈值 —— 报「未并发」但代码没问题。
+	// MaxParallel=1 跑同一批调用，把机器负载/进程启动开销都吸收进基线。
+	serialStart := time.Now()
+	if res := NewExecutor(r, 1).Execute(context.Background(), calls); len(res) != len(calls) {
+		t.Fatalf("串行基线返回 %d 个结果", len(res))
 	}
-	t.Logf("4 个 bash 并发耗时 %v", elapsed)
+	serial := time.Since(serialStart)
+
+	if elapsed > serial*3/5 {
+		t.Fatalf("4 个 bash 调用耗时 %v，串行基线 %v，未并发", elapsed, serial)
+	}
+	t.Logf("4 个 bash 并发耗时 %v（串行基线 %v）", elapsed, serial)
 }
 
 func TestBashUnknownSession(t *testing.T) {
