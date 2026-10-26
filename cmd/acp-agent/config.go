@@ -28,7 +28,7 @@ type Config struct {
 	Root        string  `json:"root,omitempty"`
 	Session     string  `json:"session,omitempty"`
 	Temperature float64 `json:"temperature,omitempty"`
-	// ThinkingLevel: off | minimal | low | medium | high
+	// ThinkingLevel: off | minimal | low | medium | high | max；空 = medium（默认）
 	ThinkingLevel string `json:"thinkingLevel,omitempty"`
 	// DisableTools 不注册的工具名。
 	DisableTools []string `json:"disableTools,omitempty"`
@@ -37,14 +37,20 @@ type Config struct {
 	// NoMCP 为真时不连接任何 MCP server（子代理默认开启，避免背着主进程的远程工具）。
 	NoMCP bool `json:"noMCP,omitempty"`
 	// MCPConfig 是 MCP server 配置文件的路径；为空时按默认位置查找。
+	// 也接受内联 JSON 字符串（以 { 开头）—— 语义与路径一致：只用它，不合并默认文件。
 	MCPConfig string `json:"mcpConfig,omitempty"`
+	// MCPJSON 是内联 MCP 配置 JSON，叠加在上面那层配置之上（同名 server 覆盖）。
+	// 主要用于临时注入：不改 .mcp.json 也能多挂一个 server。
+	MCPJSON string `json:"mcpJSON,omitempty"`
 	// Web 配置 web_search / web_fetch 的后端（缺省用 DuckDuckGo，无需 key）。
 	Web *web.Config `json:"web,omitempty"`
-	// Segmenter 选中文分词器：空/rune（默认，单字 + bigram 回退）、gse、sego。
-	// 换成真词典分词能提升中文检索召回，代价是二进制体积（gse 约 +15MB）。
+	// Segmenter 选中文分词器：空/gse（默认，真词典）/ rune（单字 + bigram 回退）。
+	// gse 只带简体词表，需要带 `segmenter ne` tag 的构建（`task build:full`），
+	// 二进制比轻量版多约 1.4MB。没有命令行开关：默认就是 gse，要降级只能靠这里。
 	Segmenter string `json:"segmenter,omitempty"`
-	// SegmenterDict 是 sego 的词典文件路径（多个用逗号分隔，靠前的优先）。
-	SegmenterDict string `json:"segmenterDict,omitempty"`
+	// SegmenterExpand 控制 gse 是否额外输出 CJK run 内的 bigram（默认开）。
+	// off 会让 kernel 的 cjkRunTokens 丢掉单字与跨词边界的召回。
+	SegmenterExpand string `json:"segmenterExpand,omitempty"` // "" | on | off
 }
 
 const (
@@ -121,6 +127,9 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("ACP_AGENT_THINKING"); v != "" {
 		c.ThinkingLevel = v
 	}
+	if v := os.Getenv("ACP_AGENT_MCP_JSON"); v != "" {
+		c.MCPJSON = v
+	}
 	if v := os.Getenv("ACP_AGENT_MAX_TURNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.MaxTurns = n
@@ -132,8 +141,8 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("ACP_AGENT_SEGMENTER"); v != "" {
 		c.Segmenter = v
 	}
-	if v := os.Getenv("ACP_AGENT_SEGMENTER_DICT"); v != "" {
-		c.SegmenterDict = v
+	if v := os.Getenv("ACP_AGENT_SEGMENTER_EXPAND"); v != "" {
+		c.SegmenterExpand = v
 	}
 	c.applyWebEnv()
 }
@@ -206,14 +215,11 @@ func (c *Config) applyFlags(f *flags) {
 	if f.mcpConfig != "" {
 		c.MCPConfig = f.mcpConfig
 	}
+	if f.mcpJSON != "" {
+		c.MCPJSON = f.mcpJSON
+	}
 	if f.noMCP {
 		c.NoMCP = true
-	}
-	if f.segmenter != "" {
-		c.Segmenter = f.segmenter
-	}
-	if f.segmenterDict != "" {
-		c.SegmenterDict = f.segmenterDict
 	}
 	if f.webSearch != "" {
 		c.ensureWeb()
@@ -272,7 +278,15 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	if c.ThinkingLevel == "" {
-		c.ThinkingLevel = "off"
+		// 默认 medium，而不是 off：这是个编码 agent，大多数改动都需要先想清楚再
+		// 动手，静默关闭推理是反直觉的。取 medium 而不是 high：DeepSeek 侧
+		// medium/high 映射到同一个 reasoning_effort=high（服务端默认也是 high），
+		// medium 与你今后上调时保持单调。
+		//
+		// 不留给空串（= 不干预，交给服务端默认）：那可依赖端点默认值，
+		// DeepSeek 现在默认开、以后不一定；显式给值才可控。
+		// 想关掉仍然是 --thinking off / thinkingLevel=off。
+		c.ThinkingLevel = "medium"
 	}
 	c.ensureWeb()
 	if c.Web.Search.Provider == "" {

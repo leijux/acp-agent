@@ -82,6 +82,7 @@ type flags struct {
 	showVersion    bool
 	noColor        bool
 	mcpConfig      string
+	mcpJSON        string
 	disableTools   string
 	noSubagent     bool
 	subagentCmd    string
@@ -89,8 +90,6 @@ type flags struct {
 	webSearch      string
 	webSearchKey   string
 	noWeb          bool
-	segmenter      string
-	segmenterDict  string
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -109,14 +108,15 @@ func parseFlags(args []string) (*flags, error) {
 	fs.BoolVar(&f.cont, "c", false, "继续最近一次会话")
 	fs.BoolVar(&f.cont, "continue", false, "继续最近一次会话（同 -c）")
 	fs.IntVar(&f.maxTurns, "max-turns", 0, "单次运行的最大轮数")
-	fs.StringVar(&f.thinking, "thinking", "", "思考等级：off/minimal/low/medium/high")
+	fs.StringVar(&f.thinking, "thinking", "", "思考等级：off/minimal/low/medium/high/max（默认 medium）")
 	fs.Float64Var(&f.temperature, "temperature", 0, "采样温度（推理模型自动忽略）")
 	fs.BoolVar(&f.acpMode, "acp", false, "以 ACP agent 模式运行（stdio JSON-RPC）")
 	fs.BoolVar(&f.listEndpoints, "endpoints", false, "列出内置服务端点后退出")
 	fs.BoolVar(&f.mcpStatus, "mcp-status", false, "连接 MCP server 并打印状态后退出")
 	fs.BoolVar(&f.showVersion, "version", false, "打印版本后退出")
 	fs.BoolVar(&f.noColor, "no-color", false, "禁用 ANSI 颜色")
-	fs.StringVar(&f.mcpConfig, "mcp-config", "", "MCP server 配置文件路径（默认查 <工作目录>/.mcp.json 与 <配置目录>/.mcp.json）")
+	fs.StringVar(&f.mcpConfig, "mcp-config", "", "MCP server 配置文件路径；也可直接传 JSON 字符串（默认查 <工作目录>/.mcp.json 与 <配置目录>/.mcp.json）")
+	fs.StringVar(&f.mcpJSON, "mcp-json", "", "内联 MCP 配置 JSON，叠加在配置文件之上（同名 server 覆盖），用于临时注入")
 	fs.StringVar(&f.disableTools, "disable-tools", "", "不注册的工具名（逗号分隔）")
 	fs.BoolVar(&f.noSubagent, "no-subagent", false, "禁用 delegate（不启动 ACP 子代理）")
 	fs.StringVar(&f.subagentCmd, "subagent", "", "子代理可执行文件（默认 self：自身以 --acp 模式启动）")
@@ -124,8 +124,6 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.webSearch, "web-search", "", "web_search 后端：duckduckgo/searxng/tavily/brave/exa/off")
 	fs.StringVar(&f.webSearchKey, "web-search-key", "", "web_search 后端的 API key（searxng/duckduckgo 不需要）")
 	fs.BoolVar(&f.noWeb, "no-web", false, "关闭 web_search/web_fetch")
-	fs.StringVar(&f.segmenter, "segmenter", "", "中文分词器：rune（默认，单字+bigram）/gse/sego")
-	fs.StringVar(&f.segmenterDict, "segmenter-dict", "", "sego 的词典文件路径（多个用逗号分隔）")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "acp-agent %s — 终端编码 agent\n\n", resolveVersion())
@@ -306,6 +304,10 @@ type app struct {
 	rawReg   *tools.Registry // 未被本地 guard 包裹的原始 registry（ACP 模式用）
 	mcp      *mcp.Manager
 	guard    *guard
+	// ACP 会话按 cwd 重建工具集时复用的进程级能力。
+	search    tools.SearchProvider
+	fetch     tools.FetchProvider
+	webUsable bool
 	sess     *agent.Session
 	sessPath string
 	store    sessionStore
@@ -349,12 +351,15 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 	searchProvider, fetchProvider, webUsable := buildWebProviders(cfg, term.out)
 
 	reg, bashMgr := tools.DefaultRegistry(tools.Options{
-		Policy:      tools.Policy{Root: cfg.Root, MaxReadBytes: 2 << 20},
-		MaxParallel: 8,
-		Disable:     registryDisable(cfg, webUsable),
-		Subagent:    runner,
-		Search:      searchProvider,
-		Fetch:       fetchProvider,
+		Policy: tools.Policy{Root: cfg.Root, MaxReadBytes: 2 << 20},
+		// auto 模式已全部放行，root 边界只会让模型绕道 bash（bash 的命令
+		// 本身不受 Root 约束）；ask/readonly 保留边界。
+		AllowOutside: mode == modeAuto,
+		MaxParallel:  8,
+		Disable:      registryDisable(cfg, webUsable),
+		Subagent:     runner,
+		Search:       searchProvider,
+		Fetch:        fetchProvider,
 	})
 	// 保证子进程在退出时被回收。
 	_ = bashMgr
@@ -410,19 +415,22 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 	}
 
 	ap = &app{
-		cfg:      cfg,
-		prov:     prov,
-		agent:    a,
-		reg:      guarded,
-		rawReg:   reg,
-		mcp:      mgr,
-		guard:    g,
-		sess:     sess,
-		sessPath: sessPath,
-		store:    newSessionStore(cfg.Root),
-		in:       in,
-		term:     term,
-		started:  time.Now(),
+		cfg:       cfg,
+		prov:      prov,
+		agent:     a,
+		reg:       guarded,
+		rawReg:    reg,
+		mcp:       mgr,
+		guard:     g,
+		search:    searchProvider,
+		fetch:     fetchProvider,
+		webUsable: webUsable,
+		sess:      sess,
+		sessPath:  sessPath,
+		store:     newSessionStore(cfg.Root),
+		in:        in,
+		term:      term,
+		started:   time.Now(),
 	}
 	a.On(ap.renderHandler())
 	return ap, nil
@@ -523,20 +531,15 @@ func (a *app) serveACP(ctx context.Context) error {
 	case permReadonly:
 		perm = acp.PermissionReadOnly
 	}
-	// 关键：用原始 registry，不要用已经包了本地 guard 的 a.reg。
-	// ACP 模式下授权由客户端的 session/request_permission 裁决；再叠一层
-	// cmd 层 guard 的话，它会在 stdin 上问 y/n（没有人答）——
-	// 请求永远挂在半路，客户端弹窗还没机会出现。
-	reg := a.rawReg
-	if reg == nil {
-		reg = a.reg
-	}
+	// 工具集必须按会话的 cwd 重建，不能用进程级 registry：工具在构造时就把
+	// Policy.Root（相对路径解析 / bash 默认 cwd / js 的 fs 根）固化了，共享
+	// 一份等于让所有会话都用进程启动目录（客户端切项目时 cwd 会变）。
+	// 权限门禁仍由 ACP 层的 PermissionGuard 接管，不要再叠 cmd 层 guard：
+	// 那会在 stdin 上问 y/n（ACP 模式下 stdin 是 JSON-RPC），请求永远挂住。
 	handler, err := acp.NewAgentHandler(acp.AgentConfig{
 		Provider:   a.prov,
 		Model:      a.agent.Model(),
-		Registry:   reg,
-		Executor:   tools.NewExecutor(reg, 8),
-		Context:    agent.ContextOptions{WorkingDir: a.cfg.Root},
+		SessionFor: a.newACPSession,
 		MaxTurns:   a.cfg.MaxTurns,
 		Permission: perm,
 	})

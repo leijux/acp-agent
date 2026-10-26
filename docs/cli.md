@@ -39,13 +39,15 @@ Windows 为 `%AppData%\acp-agent\config.json`；`ACP_AGENT_CONFIG` 可指定其�
 | `apiKey` | `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / … | 也可 `--api-key`；本地端点（localhost）允许为空 |
 | `baseURL` | `ACP_AGENT_BASE_URL` | 覆盖端点 |
 | `permissions` | `ACP_AGENT_PERMISSIONS` | `ask` / `auto` / `readonly` |
-| `segmenter` | `ACP_AGENT_SEGMENTER` | 中文分词器：`rune`（默认）/ `gse` / `gse_full` / `sego`；`task build` 默认已编入 |
-| `segmenterDict` | `ACP_AGENT_SEGMENTER_DICT` | `sego` 的词典文件路径（多个用逗号分隔） |
-| `root` | `ACP_AGENT_ROOT` | 工具可访问范围，默认 cwd，启动时转绝对路径 |
+| `mcpConfig` | — | MCP 配置文件路径，或直接一段 JSON；不设则按默认位置查找（见 [mcp.md](mcp.md)） |
+| `mcpJSON` | `ACP_AGENT_MCP_JSON` | 内联 MCP 配置，叠加在 `mcpConfig` 之上（同名 server 覆盖），便于临时注入 |
+| `segmenter` | `ACP_AGENT_SEGMENTER` | 中文分词器：空/`gse`（默认，自带简体词表）/ `rune`（降级）；轻量构建里只有 `rune` |
+| `segmenterExpand` | `ACP_AGENT_SEGMENTER_EXPAND` | gse 是否额外输出 CJK bigram，`on`（默认）/ `off`；关掉会丢跨词边界召回 |
+| `root` | `ACP_AGENT_ROOT` | 工具可访问范围，默认 cwd，启动时转绝对路径；`permissions=auto` 下不生效（无边界） |
 | `session` | `ACP_AGENT_SESSION` | 显式指定会话文件；不设则按项目目录自动分配（见下） |
 | `maxTurns` | `ACP_AGENT_MAX_TURNS` | 单次 `Run` 的 assistant 轮数上限，默认 100 |
 | `temperature` | `ACP_AGENT_TEMPERATURE` | 非法值静默忽略 |
-| `thinkingLevel` | `ACP_AGENT_THINKING` | `off` / `minimal` / `low` / `medium` / `high` |
+| `thinkingLevel` | `ACP_AGENT_THINKING` | `off` / `minimal` / `low` / `medium`（默认）/ `high` / `max`；DeepSeek 侧 `off`→`thinking.type=disabled`、`minimal|low`→`effort=low`、`medium|high`→`effort=high`、`max`→`effort=max`；其他端点不注入该字段 |
 | `disableTools` | — | 不注册的工具名数组 |
 | `noMCP` | — | `true` 时不连接任何 MCP server（子代理默认开启） |
 | `subagent` | — | 子代理启动方式，见下表；缺省用自身 + `--acp` |
@@ -229,11 +231,11 @@ stdout 只走协议帧。permissions 映射到 `acp.PermissionAllowAll / Ask / R
 `internal/tools` 用 `Mutation` 接口区分「只读」与「改动型」工具，另用
 `PermissionMutation` 区分「调度上可并行、但权限上算改动」的工具（`bash` 就是）：
 
-| 模式 | 只读工具 | 改动工具（write/edit/bash/patch…） |
-|---|---|---|
-| `ask`（默认） | 直接执行 | 先问：`y` 一次 / `a` 本会话内总是允许 / `N`（默认）/ `d` 本会话内永不 |
-| `auto` | 直接执行 | 直接执行 |
-| `readonly` | 直接执行 | 立即拒绝——**不是**提示后继续，而是把拒绝作为 `IsError` 结果交给模型 |
+| 模式 | 只读工具 | 改动工具（write/edit/bash/patch…） | `--root` 边界 |
+|---|---|---|---|
+| `ask`（默认） | 直接执行 | 先问：`y` 一次 / `a` 本会话内总是允许 / `N`（默认）/ `d` 本会话内永不 | 强制 |
+| `auto` | 直接执行 | 直接执行 | **不限制**（可读写 root 外的绝对路径，也能把 bash 的 `cwd` 切出去） |
+| `readonly` | 直接执行 | 立即拒绝——**不是**提示后继续，而是把拒绝作为 `IsError` 结果交给模型 | 强制 |
 
 注意 `bash` 必须算改动型：它只声明了 `ConcurrencySafe()==true`（让只读命令能并行），
 若门禁只看 `Mutation.Mutates()`，`readonly` 下 `bash: rm -rf` / `python -c 'open(...,"w")'`
@@ -242,6 +244,14 @@ stdout 只走协议帧。permissions 映射到 `acp.PermissionAllowAll / Ask / R
 
 `ask` 的决策按工具名缓存，`a`/`d` 对本进程内后续所有同名调用生效。
 非 TTY（管道、CI）下 `ask` 仍会读 stdin；自动化场景请显式给 `auto` 或 `readonly`。
+
+`auto` 下内置工具不再受 `--root` 约束（`tools.Options.AllowOutside`）：read/write/edit/
+ls/glob/grep/js 的路径解析与 bash 的 `cwd` 都可以指向 root 外。守着 root 意义不大——
+`bash` 的命令本身从来不受 Root 约束，只会逼模型绕道 shell。回归测试
+`TestAutoModeIgnoresRoot`、`TestAllowOutside`。
+
+注意子代理不受影响：它固定以 `--permissions ask` 启动（`subagent.go`），所以子代理里
+仍然守 root。
 
 拒绝的面板里会展示参数的键值摘要（`content` 等长字段截断），让你在被问之前
 就知道要写什么。

@@ -64,6 +64,17 @@ func execSelfName() string {
 //   - --disable-tools delegate：禁止子代理再委派，防无限递归
 //   - --root：与主进程同一个工作目录根，避免子代理在别处动手
 func (a *app) buildSpec(role string) (acp.SubagentSpec, error) {
+	return a.buildSpecIn(a.cfg.Root, role)
+}
+
+// buildSpecIn 用指定的工作目录构造子代理启动参数。
+//
+// ACP 模式下会话的 cwd 不一定是进程启动目录（多项目客户端会切项目），
+// 子代理必须落在「这个会话」的目录里，否则它会在另一个项目里动手。
+func (a *app) buildSpecIn(root, role string) (acp.SubagentSpec, error) {
+	if strings.TrimSpace(root) == "" {
+		root = a.cfg.Root
+	}
 	cfg := SubagentConfig{}
 	if a.cfg.Subagent != nil {
 		cfg = *a.cfg.Subagent
@@ -79,7 +90,7 @@ func (a *app) buildSpec(role string) (acp.SubagentSpec, error) {
 		command = exe
 	}
 
-	args := []string{"--acp", "--no-color", "--root", a.cfg.Root}
+	args := []string{"--acp", "--no-color", "--root", root}
 	// 子代理只用 kernel 的压缩与 provider，不落主会话文件。
 	if a.cfg.Provider != "" {
 		args = append(args, "--provider", a.cfg.Provider)
@@ -98,9 +109,11 @@ func (a *app) buildSpec(role string) (acp.SubagentSpec, error) {
 	args = append(args, "--permissions", perm)
 	args = append(args, "--disable-tools", "delegate")
 	// 子代理不加载中文分词词典：它只负责干活，不做 BM25 检索（压缩决策由
-	// 主进程的 kernel 做），而词典要占 100+MB 内存 + 450ms 启动。
-	// 主进程的 config.json 里即使设了 segmenter=gse，也会被子代理这里的显式值盖掉。
-	args = append(args, "--segmenter", "rune")
+	// 主进程的 kernel 做），而词典要占 ~30MB 内存 + ~50ms 启动。
+	// 分词器已经没有命令行开关，所以用环境变量关：优先级是 flag > env > 配置文件，
+	// 所以即使是子代理自己的 config.json 写了 segmenter=gse，也会被这里盖掉。
+	// 子进程会继承主进程环境，重复的 key 以追加在后面的为准（os/exec 语义）。
+	env := append(append([]string{}, cfg.Env...), "ACP_AGENT_SEGMENTER=rune")
 	// 子代理不背主进程的 MCP server 集合：启动更快、工具表更小、
 	// 权限面更窄。需要时给 SubagentConfig.Args 传 --mcp-config 单独开。
 	args = append(args, "--no-mcp")
@@ -113,8 +126,8 @@ func (a *app) buildSpec(role string) (acp.SubagentSpec, error) {
 	return acp.SubagentSpec{
 		Command: command,
 		Args:    args,
-		Env:     cfg.Env,
-		Dir:     a.cfg.Root,
+		Env:     env,
+		Dir:     root,
 	}, nil
 }
 
@@ -129,7 +142,12 @@ func (a *app) resolveModelID() string {
 
 // runSubagent 实现 tools.SubagentRunner：起一个 ACP 子代理，跑一轮，返回文本。
 func (a *app) runSubagent(ctx context.Context, role, task string) (string, error) {
-	spec, err := a.buildSpec(role)
+	return a.runSubagentIn(ctx, a.cfg.Root, role, task)
+}
+
+// runSubagentIn 让子代理在指定工作目录里跑（ACP 会话用会话自己的 cwd）。
+func (a *app) runSubagentIn(ctx context.Context, root, role, task string) (string, error) {
+	spec, err := a.buildSpecIn(root, role)
 	if err != nil {
 		return "", err
 	}

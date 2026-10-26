@@ -101,11 +101,14 @@ acp-agent --acp                      # 作为 ACP agent 服务（stdio JSON-RPC�
 acp-agent --provider ollama --model qwen3-coder
 acp-agent -endpoints                 # 内置端点与默认模型
 acp-agent -mcp-status                # 连接 MCP server 并列出工具
+acp-agent --mcp-json '{"fs":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}}'  # 临时注入 MCP server
 ```
 
 MCP 工具从工作目录的 `.mcp.json` 与 acp-agent 配置目录（`%AppData%\acp-agent` 或 `~/.config/acp-agent`）
 下的 `.mcp.json` 自动加载（Claude Desktop 兼容格式，后者覆盖前者同名 server），
-也可以用 `--mcp-config` 指定单个文件。远程工具统一以 `mcp__<server>__<tool>` 命名，
+也可以用 `--mcp-config` 指定单个文件，或直接传一段 JSON 字符串；
+`--mcp-json` 则是在已加载配置之上叠加（同名 server 覆盖）—— 不改任何文件就能临时多挂一个 server。
+远程工具统一以 `mcp__<server>__<tool>` 命名，
 并和内建工具共享同一套权限门禁 —— 只有声明了 `readOnlyHint` 的才免确认。
 详见 [docs/mcp.md](docs/mcp.md)。
 
@@ -176,16 +179,20 @@ go run ./cmd/acp-agent -endpoints
 
 ## 已知限制
 
-1. **中文分词默认降级**：goja 无 `Intl.Segmenter`，默认按「单字 + 连续 ASCII 词」切分（连续 CJK 段在 kernel 内做 bigram 回退），检索召回够用但词级精度低于 Node 的 CLDR。
-   现在内置两个真词典实现，**`task build` 默认已带 `-tags segmenter`**，通过 `-segmenter gse` 启用：
-   - `gse`（推荐）：内置词典，零外部文件，纯 Go。默认**只加载简体**（453ms / 192MB 分配）；
-     繁体文本会自动退化成单字，kernel 随之回退到 bigram，召回不丢；
-   - `gse_full`：同 gse 但加载简体 + 繁体（811ms / 295MB 分配），繁体也有词级精度；
-   - `sego`：自带词典文件（`-segmenter-dict <path>`），体积小、可加专有名词。
+1. **中文分词依赖构建 tag**：goja 无 `Intl.Segmenter`。带 `segmenter ne` tag 构建（`task build:full`，发布矩阵用的就是它）时
+   **默认就用真词典 gse**；轻量构建（`task build`，无 tag）里只有 `RuneSegmenter`（「单字 + 连续 ASCII 词」切分，
+   CJK 段在 kernel 内做 bigram 回退），检索召回够用但词级精度低于 Node 的 CLDR。
+   `gse` 自带高频**简体**词表（10 万条，1.3MB），纯 Go、零外部文件，加载约 50ms / 29MB 分配。
+   只认简体：繁体文本退化成单字，靠 bigram 兜底。
 
-   代价是二进制体积：默认 20MB → 带 tag 52MB（词典被 embed）。所以轻量构建用
-   `task build TAGS=""`（手动 `go build` 时不加 `-tags segmenter` 即可）。
-   用法：`task build` 之后 `acp-agent -segmenter gse`（或配置 `"segmenter": "gse"`）。
+   默认会**额外输出 CJK bigram**：kernel 的 `cjkRunTokens` 只要 run 内有多字词就会丢掉全部单字段，
+   直通分词结果会让 `壓縮引擎` 只剩 `[引擎]`、查询 `缩引` 命中 0 —— 补上 bigram 后词给精度、
+   bigram 保召回。（要关掉只能用 config.json 的 `"segmenterExpand": "off"`，命令行没有开关。）
+
+   体积：轻量版 20MB → full 版 22MB（`task build:full`，即 `-tags "segmenter ne"`）。
+   `ne` 不能漏：没有它 gse 自己 embed 的简/繁/日词典（~31MB）会被 linker 保留，
+   体积直接飙到 52MB。要回退到 `rune`（例如子代理这种不做检索的场景），
+   用 config.json / `ACP_AGENT_SEGMENTER=rune` —— 分词器没有命令行开关。
    只影响中文 BM25 召回，**不影响压缩结果的正确性**（hash 仍与 Node 一致）。
 
 2. **`processTurn` 比 Node 慢，且随消息数超线性增长**：200 条消息约 68ms（三次优化前 198ms），

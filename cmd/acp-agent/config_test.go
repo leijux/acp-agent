@@ -129,7 +129,7 @@ func TestConfigDefaultsWhenNothingSet(t *testing.T) {
 	if cfg.Provider != "deepseek" {
 		t.Fatalf("默认 provider = %q", cfg.Provider)
 	}
-	if cfg.Permissions != permAsk || cfg.MaxTurns != 100 || cfg.ThinkingLevel != "off" {
+	if cfg.Permissions != permAsk || cfg.MaxTurns != 100 || cfg.ThinkingLevel != "medium" {
 		t.Fatalf("默认值不对: %+v", cfg)
 	}
 	if cfg.Root == "" {

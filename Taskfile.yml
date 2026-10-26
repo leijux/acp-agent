@@ -21,10 +21,13 @@ vars:
     sh: git describe --tags --always --dirty 2>/dev/null || echo 0.1.0
   # -s -w 去符号表；-X 注入 cmd/acp-agent 的 version 变量。
   LDFLAGS: -s -w -X main.version={{.VERSION}}
-  # 默认编译进去的可选能力。目前只有中文分词器（gse）需要 build tag：
-  # 它的词典被 go:embed，会让二进制从 20MB 涨到 52MB。
-  # 想构建轻量版：task build TAGS=""
-  TAGS: segmenter
+  # 默认构建的 build tag：**空** = 轻量版（约 20MB，中文分词器退化为
+  # kernel.RuneSegmenter 的单字 + bigram）。
+  TAGS: ''
+  # 中文分词器（gse）的 build tag。`ne` 不能漏：没有它，gse 自己 embed 的
+  # 简/繁/日词典与 idf 表（约 31MB）会被 linker 全部保留，二进制会是 52MB
+  # 而不是 22MB。用 `task build:full` 构建。
+  SEG_TAGS: 'segmenter ne'
 
 set: [pipefail]
 
@@ -38,11 +41,16 @@ tasks:
   # ── 构建 ────────────────────────────────────────────────────────────────
 
   build:
-    desc: 构建主程序到 bin/（注入 git 版本号 + 默认 tags）
+    desc: 构建主程序到 bin/（轻量版，约 20MB，未链接分词词典 → 检索走单字 + bigram）
     aliases: [b]
+    # build 与 build:full 写同一个产物路径，各自的 checksum 会互相“以为已最新”，
+    # 导致切回去时拿到另一个变体。用 method: none 每次都调 go build
+    # （编译缓存命中时不到 3s）。
+    method: none
     sources:
       - cmd/**/*.go
       - internal/**/*.go
+      - internal/segmenter/dict_*.txt
       - go.mod
       - go.sum
       # Taskfile 本身也算输入：改 TAGS/LDFLAGS 后必须重新构建。
@@ -50,10 +58,28 @@ tasks:
     generates:
       - '{{.BIN}}/{{.PROG}}{{.EXE}}'
     cmds:
-      # TAGS 默认 segmenter（中文分词器）。轻量构建：task build TAGS=""
       - go build -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o '{{.BIN}}/{{.PROG}}{{.EXE}}' ./cmd/acp-agent
       # Windows 上 go build 覆盖运行中的 exe 时会把旧文件重命名成 xxx~（占 50MB）。
       # 进程没退出时删不掉，所以忽略错误；下次构建再清。
+      - cmd: rm -f '{{.BIN}}/{{.PROG}}{{.EXE}}~'
+        ignore_error: true
+
+  build:full:
+    desc: 构建带中文分词器的版本到 bin/（约 22MB，启动即默认用 gse，无需任何开关）
+    aliases: [bf]
+    method: none
+    sources:
+      - cmd/**/*.go
+      - internal/**/*.go
+      - internal/segmenter/dict_*.txt
+      - go.mod
+      - go.sum
+      - Taskfile.yml
+    generates:
+      - '{{.BIN}}/{{.PROG}}{{.EXE}}'
+    cmds:
+      # -tags "segmenter ne"：segmenter 启用 gse，ne 关掉 gse 自带的 31MB embed。
+      - go build -tags '{{.SEG_TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o '{{.BIN}}/{{.PROG}}{{.EXE}}' ./cmd/acp-agent
       - cmd: rm -f '{{.BIN}}/{{.PROG}}{{.EXE}}~'
         ignore_error: true
 
@@ -68,12 +94,12 @@ tasks:
         - verify-kernel
 
   install:
-    desc: go install 到 $GOBIN（带默认 tags）
+    desc: go install 到 $GOBIN（默认轻量版；带分词器：task install TAGS="segmenter ne"）
     cmds:
       - go install -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' ./cmd/acp-agent
 
   cross:
-    desc: 交叉编译发布矩阵到 dist/（纯 Go，无 cgo）
+    desc: 交叉编译发布矩阵到 dist/（带中文分词器，纯 Go 无 cgo）
     cmds:
       - |
         set -e
@@ -87,7 +113,7 @@ tasks:
           mkdir -p "$dir"
           echo "→ $out"
           CGO_ENABLED=0 GOOS=$os GOARCH=$arch \
-            go build -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o "$out" ./cmd/acp-agent
+            go build -tags '{{.SEG_TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o "$out" ./cmd/acp-agent
         done
 
   # ── 测试 ────────────────────────────────────────────────────────────────
@@ -177,6 +203,9 @@ tasks:
       - '{{.TASK_EXE}} test:race'
       - '{{.TASK_EXE}} test:native'
       - '{{.TASK_EXE}} build'
+      # full 版走另一套 tag，必须单独验一遍能编过（含 gse 的 ne 组合）。
+      - '{{.TASK_EXE}} build:full'
+      - go test -tags '{{.SEG_TAGS}}' ./internal/segmenter ./cmd/acp-agent -count=1
 
   # ── 运行 ────────────────────────────────────────────────────────────────
 
@@ -208,6 +237,12 @@ tasks:
       - go run ./cmd/verify-kernel
 
   # ── 资源 ────────────────────────────────────────────────────────────────
+
+  dict:
+    desc: 重新生成中文分词词表（从 gse 自带词典按词频裁剪）
+    cmds:
+      - go generate ./internal/segmenter
+      - echo "词表已更新（跑 task test:pkg -- segmenter 确认切分 golden）"
 
   cjs:
     desc: 重新打包上游 ESM → internal/kernel/kernel.dist.cjs（需 node）

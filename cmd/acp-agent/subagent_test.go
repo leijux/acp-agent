@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,13 @@ func TestBuildSpecSelfDefaults(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("参数缺少 %q，实际: %s", want, joined)
 		}
+	}
+	// 子代理不加载分词词典：分词器没有命令行开关了，改用环境变量降级。
+	if strings.Contains(joined, "--segmenter") {
+		t.Errorf("分词器 flag 已移除，不该再传给子代理: %s", joined)
+	}
+	if !slices.Contains(spec.Env, "ACP_AGENT_SEGMENTER=rune") {
+		t.Errorf("子代理应通过环境变量降级到 rune，实际 Env: %v", spec.Env)
 	}
 }
 
