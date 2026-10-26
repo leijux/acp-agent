@@ -113,25 +113,75 @@ func validServerName(name string) bool {
 
 // Load 从文件读取配置。文件不存在时返回空配置（不报错）。
 func Load(path string) (*Config, error) {
-	cfg := &Config{MCPServers: map[string]ServerConfig{}}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return cfg, nil
+			return &Config{MCPServers: map[string]ServerConfig{}}, nil
 		}
 		return nil, fmt.Errorf("mcp: 读取 %s: %w", path, err)
 	}
+	cfg, err := parseJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: 解析 %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// LoadJSON 解析内联配置字符串，格式与 mcp.json 完全一致。
+//
+// 额外放宽一处：允许省略外层的 {"mcpServers": {...}} 包装，直接给出
+// server 名到配置的映射（{"fs":{"command":"npx"}}）。命令行临时注入时
+// 少两层括号，写错的概率也低。
+func LoadJSON(data []byte) (*Config, error) {
+	cfg, err := parseJSON(data)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: 解析内联配置: %w", err)
+	}
+	return cfg, nil
+}
+
+// parseJSON 解析配置 JSON。错误不带来源前缀，由调用方补齐（文件名 / 内联）。
+func parseJSON(data []byte) (*Config, error) {
+	cfg := &Config{MCPServers: map[string]ServerConfig{}}
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return cfg, nil
 	}
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("mcp: 解析 %s: %w", path, err)
+
+	// 有 mcpServers 键就按完整文件解析，否则按裸映射解析。
+	// 不能只看「解析成 Config 后是否为空」：{"fs":{...}} 解析成 Config 会
+	// 静默丢掉 fs（未知字段），看起来像是配置没生效。
+	var probe map[string]json.RawMessage
+	wrapped := false
+	if err := json.Unmarshal(data, &probe); err == nil {
+		_, wrapped = probe["mcpServers"]
+	}
+
+	if wrapped {
+		if err := json.Unmarshal(data, cfg); err != nil {
+			return nil, err
+		}
+	} else if err := json.Unmarshal(data, &cfg.MCPServers); err != nil {
+		return nil, fmt.Errorf("%w（应为 {\"mcpServers\":{...}} 或 {\"<server 名>\":{...}}）", err)
 	}
 	if cfg.MCPServers == nil {
 		cfg.MCPServers = map[string]ServerConfig{}
 	}
 	cfg.expand()
 	return cfg, nil
+}
+
+// Merge 把 other 的 server 并入 c，同名覆盖（与 LoadFiles 的后者优先一致）。
+// SourceFiles 不合并：调用方通常只关心文件来源。
+func (c *Config) Merge(other *Config) {
+	if other == nil {
+		return
+	}
+	if c.MCPServers == nil {
+		c.MCPServers = map[string]ServerConfig{}
+	}
+	for name, sc := range other.MCPServers {
+		c.MCPServers[name] = sc
+	}
 }
 
 // LoadFiles 依次读取多个文件，后面的覆盖前面的同名 server。
@@ -153,9 +203,7 @@ func LoadFiles(paths ...string) (*Config, error) {
 			return nil, err
 		}
 		merged.SourceFiles = append(merged.SourceFiles, p)
-		for name, sc := range cfg.MCPServers {
-			merged.MCPServers[name] = sc
-		}
+		merged.Merge(cfg)
 	}
 	return merged, nil
 }

@@ -69,17 +69,33 @@ func connectMCP(ctx context.Context, cfg Config, reg *tools.Registry, term *term
 			}
 		}
 		term.logf("MCP: %d 个 server，%d 个工具（%s）\n",
-			connected, len(mgr.Tools()), describeSources(mcpCfg))
+			connected, len(mgr.Tools()), describeSources(cfg, mcpCfg))
 	}
 	return mgr, nil
 }
 
-// describeSources 把加载的配置文件拼成一行，没有时返回 "无配置文件"。
-func describeSources(cfg *mcp.Config) string {
-	if len(cfg.SourceFiles) == 0 {
+// describeSources 把加载来源拼成一行，没有时返回 "无配置文件"。
+func describeSources(cfg Config, mc *mcp.Config) string {
+	var parts []string
+	if mc != nil {
+		parts = append(parts, mc.SourceFiles...)
+	}
+	if looksLikeJSON(cfg.MCPConfig) {
+		parts = append(parts, "内联 JSON（--mcp-config）")
+	}
+	if strings.TrimSpace(cfg.MCPJSON) != "" {
+		parts = append(parts, "内联 JSON（--mcp-json）")
+	}
+	if len(parts) == 0 {
 		return "无配置文件"
 	}
-	return strings.Join(cfg.SourceFiles, ", ")
+	return strings.Join(parts, " + ")
+}
+
+// looksLikeJSON 报告配置字符串是不是内联 JSON 而不是文件路径。
+// 路径几乎不可能以 { 开头（Windows 盘符肯定不是），所以这个判别足够稳。
+func looksLikeJSON(s string) bool {
+	return strings.HasPrefix(strings.TrimSpace(s), "{")
 }
 
 // closeMCP 结束所有 MCP 会话（含 stdio 子进程树）。
@@ -101,11 +117,17 @@ func runMCPStatus(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("MCP 配置来源:", describeSources(mcpCfg))
-	if cfg.MCPConfig != "" {
+	fmt.Println("MCP 配置来源:", describeSources(cfg, mcpCfg))
+	switch {
+	case looksLikeJSON(cfg.MCPConfig):
+		fmt.Println("（--mcp-config 内联 JSON，未读任何配置文件）")
+	case cfg.MCPConfig != "":
 		fmt.Println("（由 --mcp-config 指定）")
-	} else {
+	default:
 		fmt.Printf("搜索顺序: %s\n", strings.Join(mcp.DefaultPaths(cfg.Root), "  →  "))
+	}
+	if strings.TrimSpace(cfg.MCPJSON) != "" {
+		fmt.Println("（并叠加了 --mcp-json 内联配置）")
 	}
 	if len(mcpCfg.MCPServers) == 0 {
 		fmt.Println("未配置任何 MCP server。")
@@ -151,9 +173,33 @@ func runMCPStatus(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+// loadMCPConfig 把 Config 里的几种来源组装成最终配置：
+//
+//	基础层：--mcp-config（路径或内联 JSON）> 默认位置的文件
+//	叠加层：--mcp-json 内联 JSON（同名 server 覆盖，方便临时注入）
 func loadMCPConfig(cfg Config) (*mcp.Config, error) {
-	if cfg.MCPConfig != "" {
-		return mcp.Load(cfg.MCPConfig)
+	var (
+		base *mcp.Config
+		err  error
+	)
+	switch {
+	case looksLikeJSON(cfg.MCPConfig):
+		base, err = mcp.LoadJSON([]byte(cfg.MCPConfig))
+	case cfg.MCPConfig != "":
+		base, err = mcp.Load(cfg.MCPConfig)
+	default:
+		base, err = mcp.LoadFiles(mcp.DefaultPaths(cfg.Root)...)
 	}
-	return mcp.LoadFiles(mcp.DefaultPaths(cfg.Root)...)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(cfg.MCPJSON) == "" {
+		return base, nil
+	}
+	inline, err := mcp.LoadJSON([]byte(cfg.MCPJSON))
+	if err != nil {
+		return nil, err
+	}
+	base.Merge(inline)
+	return base, nil
 }

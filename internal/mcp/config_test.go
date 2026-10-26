@@ -143,6 +143,69 @@ func TestRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadJSONWrappedAndBare(t *testing.T) {
+	wrapped, err := LoadJSON([]byte(`{"mcpServers":{"a":{"command":"x"}}}`))
+	if err != nil {
+		t.Fatalf("LoadJSON: %v", err)
+	}
+	if wrapped.MCPServers["a"].Command != "x" {
+		t.Errorf("完整格式未解析: %v", wrapped.Names())
+	}
+
+	// 允许省略 mcpServers 包装。
+	bare, err := LoadJSON([]byte(`{"a":{"command":"x"}}`))
+	if err != nil {
+		t.Fatalf("LoadJSON(bare): %v", err)
+	}
+	if bare.MCPServers["a"].Command != "x" {
+		t.Errorf("裸映射未解析: %v", bare.Names())
+	}
+
+	// 空 mcpServers 不能被当成一个叫 mcpServers 的 server。
+	empty, err := LoadJSON([]byte(`{"mcpServers":{}}`))
+	if err != nil {
+		t.Fatalf("LoadJSON(empty): %v", err)
+	}
+	if len(empty.MCPServers) != 0 {
+		t.Errorf("空配置应无 server: %v", empty.Names())
+	}
+}
+
+func TestLoadJSONExpandsEnv(t *testing.T) {
+	t.Setenv("MCP_JSON_TOKEN", "tk")
+	cfg, err := LoadJSON([]byte(`{"h":{"url":"https://x.example/mcp","headers":{"Authorization":"Bearer ${MCP_JSON_TOKEN}"}}}`))
+	if err != nil {
+		t.Fatalf("LoadJSON: %v", err)
+	}
+	if got := cfg.MCPServers["h"].Headers["Authorization"]; got != "Bearer tk" {
+		t.Errorf("headers = %q，内联配置也要展开环境变量", got)
+	}
+}
+
+func TestLoadJSONInvalid(t *testing.T) {
+	if _, err := LoadJSON([]byte(`{"a":`)); err == nil {
+		t.Fatal("非法 JSON 应报错")
+	} else if !strings.Contains(err.Error(), "内联配置") {
+		t.Errorf("错误信息应指明来源: %v", err)
+	}
+}
+
+func TestMergeOverrides(t *testing.T) {
+	base, _ := LoadJSON([]byte(`{"a":{"command":"old"},"b":{"command":"keep"}}`))
+	over, _ := LoadJSON([]byte(`{"a":{"command":"new"}}`))
+	base.Merge(over)
+	if got := base.MCPServers["a"].Command; got != "new" {
+		t.Errorf("同名应覆盖: %q", got)
+	}
+	if _, ok := base.MCPServers["b"]; !ok {
+		t.Error("未被覆盖的条目丢失")
+	}
+	base.Merge(nil)
+	if len(base.MCPServers) != 2 {
+		t.Errorf("Merge(nil) 不该改动配置: %v", base.Names())
+	}
+}
+
 func TestManagerStatusForDisabledServer(t *testing.T) {
 	off := false
 	cfg := &Config{MCPServers: map[string]ServerConfig{

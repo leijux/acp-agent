@@ -29,6 +29,31 @@ Windows `%AppData%\acp-agent`、Linux/macOS `~/.config/acp-agent`。
 用 `--mcp-config <path>` 可跳过自动加载，只读指定文件（不与其他文件合并）。
 想复用于其他客户端的配置时用它 —— 例如 `--mcp-config ~/.pi/agent/mcp.json`。
 
+### 命令行直接给配置
+
+不想动文件时，两种内联写法：
+
+```bash
+# 1. 完全取代配置文件（与传路径语义一致，不读默认位置）
+acp-agent --mcp-config '{"mcpServers":{"playwright":{"command":"npx","args":["-y","@playwright/mcp"]}}}'
+
+# 2. 在已加载配置之上叠加，同名 server 覆盖（"临时注入" 的常规做法）
+acp-agent --mcp-json '{"playwright":{"command":"npx","args":["-y","@playwright/mcp"]}}'
+```
+
+两个 flag 都认两种 JSON 形状：完整格式 `{"mcpServers":{...}}`，以及省略包装的
+`{"<server 名>": {...}}`（后者少一层括号，适合手敲）。`${VAR}` 照常展开，
+也能用环境变量 `ACP_AGENT_MCP_JSON` 传 —— 便于脚本/CI 里按需求注入。
+
+`--mcp-config` 以 `{` 开头就按内联 JSON 处理（路径不会以 `{` 开头），
+所以不需要为「路径还是字符串」换 flag。
+
+两点限制：
+
+- `--no-mcp` 优先：两者同时给时不连任何 server。
+- 内联配置不会被 `delegate` 子代理继承 —— 子代理一律以 `--no-mcp` 启动；
+  需要子代理也用某个 server 时，在 `subagent.args` 里显式加 `--mcp-json`。
+
 ```json
 {
   "mcpServers": {
