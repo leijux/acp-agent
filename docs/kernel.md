@@ -189,26 +189,40 @@ GC 是全局的 —— 8 个 VM 并行跑，GC 成了共同瓶颈。这也意味
 
 ## 三个必须知道的限制
 
-1. **中文分词默认降级**。上游在**加载期**执行 `new Intl.Segmenter("zh")`（`src/search/tokenizer.ts`），goja 无 Intl。默认用无依赖的 `RuneSegmenter` 在 CJK 边界切「单字 + 连续 ASCII 词」，连续 CJK run 再在 kernel 内做 bigram 回退 —— 检索召回够用，但**词级切分质量低于 Node 的 CLDR**。
+1. **中文分词取决于构建 tag**。上游在**加载期**执行 `new Intl.Segmenter("zh")`（`src/search/tokenizer.ts`），goja 无 Intl。
 
-   想拿回词：repo 已提供两个真词典实现（`internal/segmenter`），`task build` 默认已带 `-tags segmenter`，只要选运行时的值：
+   带 `segmenter ne` tag 的构建（`task build:full` 与发布矩阵）里**默认就是 gse 真词典**，
+   不需要任何开关；轻量构建（`task build`，无 tag）里只有无依赖的 `RuneSegmenter`：
+   在 CJK 边界切「单字 + 连续 ASCII 词」，连续 CJK run 再在 kernel 内做 bigram 回退
+   —— 检索召回够用，但**词级切分质量低于 Node 的 CLDR**。
 
-   | `-segmenter` | 词典 | 二进制 | 备注 |
+   | 运行时值 | 词表 | 加载 | 备注 |
    |---|---|---|---|
-   | `rune`（默认值） | 无 | 20MB | 单字 + bigram 回退（`TAGS=""` 构建时唯一可用） |
-   | `gse` | 内置简体 | 52MB | 加载 453ms；繁体自动退化为 bigram |
-   | `gse_full` | 内置简+繁 | 52MB | 加载 811ms；繁体也有词精度 |
-   | `sego` | 外部文件 | 52MB | 需 `-segmenter-dict`，可加专有名词 |
+   | 空 / `gse`（默认） | 简体 10 万词（1.3MB） | ~50ms / 29MB | 只认简体；繁体退化为单字，由 bigram 兜底；轻量构建里静默降级为 rune |
+   | `rune` | 无 | 0 | 单字 + bigram 回退；子代理就是用这个值 |
+
+   命令行**没有** `-segmenter` / `-segmenter-expand` 开关，要改只能靠 `config.json` 或
+   `ACP_AGENT_SEGMENTER` / `ACP_AGENT_SEGMENTER_EXPAND`（优先级：env > 配置文件）。
 
    ```bash
-   task build                 # 默认带 -tags segmenter
-   acp-agent -segmenter gse
-
-   task build TAGS=""         # 轻量构建（20MB，分词器退化为 rune）
+   task build:full          # -tags "segmenter ne" → 23MB，启动即用 gse
+   task build               # 轻量构建（20MB，分词器退化为 rune）
+   ACP_AGENT_SEGMENTER=rune acp-agent   # 显式降级
    ```
+
+   **`ne` 不能漏**：没有它，gse 自己 embed 的简/繁/日词典与 idf 表（约 31MB）会被
+   linker 全部保留，二进制从 23MB 变成 52MB。词表由 `task dict`（`go generate`）从
+   gse 自带词典按词频裁剪，生成物在 `internal/segmenter/dict_zh_s.txt`。
+
+   gse **默认带 `WithExpandBigram`**：kernel 的 `cjkRunTokens` 只要 run 内
+   有多字词就只返回词、丢掉全部单字段（`segs.filter(w => w.length >= 2)`），直通
+   分词结果会丢召回 —— `壓縮引擎` 只剩 `[引擎]`，查询 `缩引` BM25 命中 0 篇。
+   补 bigram 后词给精度、bigram 保召回；`"segmenterExpand": "off"` 可关。
+   代价：BM25 的 token 集合同时含词与 bigram（doc 长度变大），排序分数会整体重标定。
 
    作为库自己接：实现 `kernel.Segmenter` 后 `kernel.New(kernel.WithSegmenter(seg))`。
    `Segment.Index` 的契约是 **rune 偏移**（不是 JS 的 UTF-16 码元），kernel 自身只用 `Text`。
+   gse 实例可跨会话共享（Segment 只读词典，`go test -race` 16 goroutine × 200 次干净）。
 
 2. **`processTurn` 比 Node 慢，且随消息数超线性增长**。200 条消息约 68ms（优化前 198ms），
    800 条约 730ms —— 消息翻倍耗时乘 2.6~3.6（详见「性能与并发」）。

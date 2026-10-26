@@ -5,7 +5,6 @@ go 1.27.3
 require (
 	github.com/dop251/goja v0.0.0-20261024144015-2a9269b6b6de
 	github.com/go-ego/gse v1.1.0
-	github.com/huichen/sego v0.0.0-20210824061530-c87651ea5c76
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
@@ -14,7 +13,6 @@ require (
 )
 
 require (
-	github.com/adamzy/cedar-go v0.0.0-20170805034717-80a9c64b256d // indirect
 	github.com/dlclark/regexp2/v2 v2.8.1 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect

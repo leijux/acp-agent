@@ -12,15 +12,21 @@
 // 与 cmd/acp-agent 的接线见 agent.SetKernelOptions。
 //
 // 代价（选之前先看清楚）：
-//   - 二进制体积：gse 把简体/繁体/日文词典 + idf 表 embed 进包，约 +15MB；
-//   - 启动开销：首次加载词典约几百毫秒（只加载一次，进程级共享）；
-//   - 结果依赖词典版本：分词结果会随库升级变化，进而影响检索召回，
-//     但**不影响上下文压缩的正确性**（压缩切点/渲染视图不依赖分词）。
+//   - 二进制体积：自带高频简体词表被 go:embed，+1.34MB。
+//     **构建必须同时带 gse 的 `ne` tag**（`task build:full`），否则 gse 自己的
+//     embed（简/繁/日词典 + idf，共 ~31MB）仍会被 linker 保留，二进制会是
+//     52MB 而不是 22MB；
+//   - 启动开销：简体词表约 50ms / 29MB 分配（只加载一次，进程级共享）；
+//   - 结果依赖词表版本：分词结果会随 gse 升级或词表重新裁剪而变，进而影响
+//     检索召回，但**不影响上下文压缩的正确性**（压缩切点/渲染视图不依赖分词）；
+//   - 召回陷阱：kernel 的 cjkRunTokens 只要 run 内有多字词就丢弃全部单字段，
+//     直通分词结果会丢跨词边界/繁体的召回。用 WithExpandBigram() 补 bigram
+//     （cmd 默认接线就是这么做的），详见 gse.go。
 //
 // Index 语义：kernel.Segment.Index 是 **rune 偏移**（与 kernel.RuneSegmenter 一致），
 // 不是 JS Intl.Segmenter 的 UTF-16 码元偏移。kernel 自身只用 Segment.Text，
-// 不用 Index；自定义实现时请保持 rune 偏移，否则星平面字符（emoji、CJK Ext B）
-// 上会与 RuneSegmenter 不一致。
+// 不用 Index；自定义实现时请保持 rune 偏移且非递减，否则星平面字符（emoji、
+// CJK Ext B）上会与 RuneSegmenter 不一致。
 package segmenter
 
 import (
@@ -57,4 +63,3 @@ func (r *runeIndex) at(bytePos int) int {
 func runeLen(s string) int { return utf8.RuneCountInString(s) }
 
 var _ kernel.Segmenter = (*GSE)(nil)
-var _ kernel.Segmenter = (*Sego)(nil)

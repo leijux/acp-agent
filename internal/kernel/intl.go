@@ -19,7 +19,7 @@ type Segment struct {
 // 聚成 run，再在 run 内做 OOV bigram 回退。因此“每个汉字一段”的实现与
 // Node + CLDR 的结果在检索语义上等价（实测 messagesHash / blocksHash 一致）。
 //
-// 接入真正的分词器（例如 gojieba、sego）能进一步改善中文检索召回，只需实现
+// 接入真正的分词器（例如 go-ego/gse）能进一步改善中文检索召回，只需实现
 // 本接口并通过 WithSegmenter 注入。
 type Segmenter interface {
 	Segment(text string) []Segment
