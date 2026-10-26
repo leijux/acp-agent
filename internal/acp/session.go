@@ -34,6 +34,18 @@ type AgentConfig struct {
 	// Dir 为空则不持久化。
 	Dir string
 
+	// SessionFor 可选：按会话的工作目录构造该会话专属的工具、执行器、
+	// 上下文与持久化目录。
+	//
+	// ACP 里 session/new 的 cwd 就是「这个会话在哪个项目里干活」，工作目录
+	// 必须跟着会话走。而 AgentConfig 上的 Registry/Executor/Context/Dir 是
+	// 进程级的：客户端一旦支持切换项目（acp-chat 这类多项目客户端），它们
+	// 会把所有会话都指到进程启动目录。提供 SessionFor 后，每个会话拿到
+	// 自己的 Policy.Root / WorkingDir / 上下文文件目录。
+	//
+	// 返回的字段为零值时沿用 AgentConfig 上的对应值（见 mergeSessionConfig）。
+	SessionFor func(cwd string) (SessionConfig, error)
+
 	// Permission 控制工具调用是否需要客户端授权。
 	Permission PermissionMode
 	// PermissionTimeout 是等待客户端授权的上限；零值用 DefaultPermissionTimeout。
@@ -44,6 +56,22 @@ type AgentConfig struct {
 	AutoApprove []string
 	// OnlyTools 限制可见工具集合；空表示全部。
 	OnlyTools []string
+}
+
+// SessionConfig 是一个会话专属的运行时资源。
+//
+// 会话之间不能共享 Registry：工具（read/write/bash/js）在构造时就把
+// Policy.Root 固化下来，共享意味着所有会话都按同一个目录解析相对路径。
+// Provider 可以共享，工具与工作目录不行。
+type SessionConfig struct {
+	Registry *tools.Registry
+	Executor *tools.Executor
+	Context  agent.ContextOptions
+	// Dir 是该会话的持久化目录；空表示不落盘。
+	Dir string
+	// Close 可选：会话关闭时调用，用来回收该会话独占的资源
+	// （典型是 bash 后台进程管理器）。
+	Close func()
 }
 
 // PermissionMode 决定工具权限门禁策略。
@@ -64,6 +92,10 @@ type sessionState struct {
 	history *agent.Session
 	sink    *updates
 	guard   Guard
+	// dir 是该会话的持久化目录；空表示不落盘。
+	dir string
+	// close 回收该会话独占的资源（可能为 nil）。
+	close func()
 
 	mu     sync.Mutex
 	mode   string
@@ -99,7 +131,9 @@ func NewAgentHandler(cfg AgentConfig) (*AgentHandler, error) {
 // LoadSession 在 AgentConfig.Dir 为空时必然报错。
 func (h *AgentHandler) Initialize(_ context.Context, p InitializeParams) (AgentCapabilities, error) {
 	caps := AgentCapabilities{
-		LoadSession:        h.cfg.Dir != "",
+		// SessionFor 会按会话 cwd 给出持久化目录，此时会话级目录非空，
+		// 与 cfg.Dir 的语义一致。
+		LoadSession:        h.cfg.Dir != "" || h.cfg.SessionFor != nil,
 		PromptCapabilities: PromptCapabilities{Image: true},
 	}
 	return caps, nil
@@ -107,18 +141,24 @@ func (h *AgentHandler) Initialize(_ context.Context, p InitializeParams) (AgentC
 
 // NewSession 新建会话。
 func (h *AgentHandler) NewSession(ctx context.Context, s *ServerSession, p SessionNewParams) (SessionSetup, error) {
-	hist := agent.NewSession()
-	return h.setup(ctx, s, hist)
+	sc, err := h.sessionConfig(s)
+	if err != nil {
+		return SessionSetup{}, err
+	}
+	return h.setup(ctx, s, agent.NewSession(), sc)
 }
 
 // LoadSession 从磁盘恢复会话。
 func (h *AgentHandler) LoadSession(ctx context.Context, s *ServerSession, p SessionLoadParams) (SessionSetup, error) {
-	if h.cfg.Dir == "" {
+	sc, err := h.sessionConfig(s)
+	if err != nil {
+		return SessionSetup{}, err
+	}
+	if sc.Dir == "" {
 		return SessionSetup{}, NewRPCError(CodeInvalidRequest,
 			"本 agent 未配置会话持久化目录，无法 session/load", nil)
 	}
-	path := h.sessionPath(p.SessionID)
-	hist, err := agent.LoadSession(path)
+	hist, err := agent.LoadSession(sessionPathIn(sc.Dir, p.SessionID))
 	if err != nil {
 		return SessionSetup{}, NewRPCError(CodeResourceNotFound,
 			fmt.Sprintf("无法加载会话 %s: %v", p.SessionID, err), nil)
@@ -127,11 +167,76 @@ func (h *AgentHandler) LoadSession(ctx context.Context, s *ServerSession, p Sess
 	if u, ok := s.Sink.(*updates); ok {
 		replayHistory(u, hist.Messages())
 	}
-	return h.setup(ctx, s, hist)
+	return h.setup(ctx, s, hist, sc)
 }
 
-func (h *AgentHandler) setup(ctx context.Context, s *ServerSession, hist *agent.Session) (SessionSetup, error) {
-	registry := h.cfg.Registry
+// sessionConfig 解析某个会话该用的运行时资源。
+//
+// 没有 SessionFor 时就是 AgentConfig 上的全局值（旧行为）；有则按会话 cwd
+// 构造，cwd 为空时退回 cfg.Context.WorkingDir（进程启动目录）。
+func (h *AgentHandler) sessionConfig(s *ServerSession) (SessionConfig, error) {
+	base := SessionConfig{
+		Registry: h.cfg.Registry,
+		Executor: h.cfg.Executor,
+		Context:  h.cfg.Context,
+		Dir:      h.cfg.Dir,
+	}
+	if h.cfg.SessionFor == nil {
+		return base, nil
+	}
+	cwd := ""
+	if s != nil {
+		cwd = strings.TrimSpace(s.Cwd)
+	}
+	if cwd == "" {
+		cwd = h.cfg.Context.WorkingDir
+	}
+	got, err := h.cfg.SessionFor(cwd)
+	if err != nil {
+		return SessionConfig{}, err
+	}
+	return mergeSessionConfig(base, got), nil
+}
+
+// mergeSessionConfig 用会话级配置覆盖全局配置；零值字段保留全局值。
+func mergeSessionConfig(base, over SessionConfig) SessionConfig {
+	if over.Registry != nil {
+		base.Registry = over.Registry
+	}
+	if over.Executor != nil {
+		base.Executor = over.Executor
+	}
+	if over.Dir != "" {
+		base.Dir = over.Dir
+	}
+	if over.Close != nil {
+		base.Close = over.Close
+	}
+	base.Context = mergeContextOptions(base.Context, over.Context)
+	return base
+}
+
+func mergeContextOptions(base, over agent.ContextOptions) agent.ContextOptions {
+	if over.BasePrompt != "" {
+		base.BasePrompt = over.BasePrompt
+	}
+	if over.Sections != nil {
+		base.Sections = over.Sections
+	}
+	if over.ContextFiles != nil {
+		base.ContextFiles = over.ContextFiles
+	}
+	if over.WorkingDir != "" {
+		base.WorkingDir = over.WorkingDir
+	}
+	if over.ExtraInstructions != "" {
+		base.ExtraInstructions = over.ExtraInstructions
+	}
+	return base
+}
+
+func (h *AgentHandler) setup(ctx context.Context, s *ServerSession, hist *agent.Session, sc SessionConfig) (SessionSetup, error) {
+	registry := sc.Registry
 	if registry != nil {
 		if len(h.cfg.OnlyTools) > 0 {
 			sub, err := subsetRegistry(registry, h.cfg.OnlyTools)
@@ -165,8 +270,8 @@ func (h *AgentHandler) setup(ctx context.Context, s *ServerSession, hist *agent.
 		Model:              h.cfg.Model,
 		Session:            hist,
 		Registry:           registry,
-		Executor:           h.executorFor(registry),
-		Context:            h.cfg.Context,
+		Executor:           h.executorFor(sc.Executor, registry),
+		Context:            sc.Context,
 		MaxTurns:           h.cfg.MaxTurns,
 		ContextWindow:      h.cfg.ContextWindow,
 		DisableAutoCompact: h.cfg.DisableCompact,
@@ -175,7 +280,7 @@ func (h *AgentHandler) setup(ctx context.Context, s *ServerSession, hist *agent.
 		return SessionSetup{}, err
 	}
 
-	st := &sessionState{agent: ag, history: hist}
+	st := &sessionState{agent: ag, history: hist, dir: sc.Dir, close: sc.Close}
 	if u, ok := s.Sink.(*updates); ok {
 		st.sink = u
 		ag.On(u.Handle)
@@ -215,8 +320,8 @@ func (h *AgentHandler) Prompt(ctx context.Context, s *ServerSession, prompt []Co
 		}
 		return PromptResult{}, err
 	}
-	if h.cfg.Dir != "" {
-		if err := st.history.Save(h.sessionPath(s.ID)); err != nil {
+	if st.dir != "" {
+		if err := st.history.Save(sessionPathIn(st.dir, s.ID)); err != nil {
 			// 持久化失败不应让 turn 失败，但要让调用方知道。
 			return PromptResult{StopReason: mapStopReason(res), Usage: toUsage(res)}, nil
 		}
@@ -242,6 +347,9 @@ func (h *AgentHandler) Close(_ context.Context, s *ServerSession) error {
 		st.closed = true
 		st.mu.Unlock()
 		st.agent.Abort()
+		if st.close != nil {
+			st.close()
+		}
 	}
 	return nil
 }
@@ -256,20 +364,22 @@ func (h *AgentHandler) state(id string) *sessionState {
 //
 // 这一点很关键：Executor 自己持有 registry，若仍指向未包装的 registry，
 // 权限门禁就会被静默绕过（工具照常执行，客户端收不到任何 request_permission）。
-func (h *AgentHandler) executorFor(registry *tools.Registry) *tools.Executor {
+func (h *AgentHandler) executorFor(base *tools.Executor, registry *tools.Registry) *tools.Executor {
 	if registry == nil {
 		return nil
 	}
-	if h.cfg.Executor != nil {
-		cp := *h.cfg.Executor
+	if base != nil {
+		cp := *base
 		cp.Registry = registry
 		return &cp
 	}
 	return tools.NewExecutor(registry, 0)
 }
 
-func (h *AgentHandler) sessionPath(id string) string {
-	return strings.TrimRight(h.cfg.Dir, "/\\") + string('/') + id + ".json"
+// sessionPathIn 拼出会话文件路径。目录由会话级配置决定（见 SessionConfig.Dir），
+// 不再是进程级的 AgentConfig.Dir。
+func sessionPathIn(dir, id string) string {
+	return strings.TrimRight(dir, "/\\") + string('/') + id + ".json"
 }
 
 // ---------- 转换 ----------

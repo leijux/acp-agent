@@ -468,6 +468,27 @@ func (m *BashManager) Kill(id string) error {
 	return nil
 }
 
+// KillAll 终止所有后台会话并清空管理器。
+//
+// 会话关闭时调用。以前 bash manager 是进程级单例，后台进程跟着 agent 进程
+// 一起被 OS 收掉；按会话隔离后每个会话有自己的 manager，不主动清就会一直
+// 挂到 agent 退出 —— 对长期开着的 ACP 客户端是明确的泄漏。
+func (m *BashManager) KillAll() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	list := make([]*bashSession, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		list = append(list, s)
+	}
+	m.sessions = make(map[string]*bashSession)
+	m.mu.Unlock()
+	for _, s := range list {
+		s.proc.Kill()
+	}
+}
+
 // List 列出后台会话。
 func (m *BashManager) List() []map[string]any {
 	m.mu.Lock()

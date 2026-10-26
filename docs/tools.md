@@ -355,6 +355,12 @@ func (t *MyTool) Execute(ctx context.Context, a tools.Args) (tools.Result, error
 `ReadOnly=true` 时 `write`/`edit` 直接返回错误。`CheckCommand` 拦 `rm -rf /`、`mkfs`
 等明显破坏性命令，这是 best effort 的防手滑，**不是安全边界**。
 
+`--permissions auto` 下整个 `Policy` 都置 `AllowOutside=true`
+（`tools.Options.AllowOutside`，作用于 read/write/edit/ls/glob/grep/js 与 bash 的 `cwd`）。
+理由：`auto` 已经放行所有改动型工具，而与 `bash` 相比 root 从来不是真边界
+（`bash` 的命令与内建 `cat/ls/rm` 都不查路径，只查 `cwd`）；守住它只会逼模型绕道 shell。
+`ask`/`readonly` 不放开——否则一次不经询问的越界读写就成了绕过确认的捷径。
+
 ## 截断预算
 
 大输出不静默丢弃，而是保留头尾 + 明确标记（`truncate.go`）：

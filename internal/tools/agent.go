@@ -174,6 +174,12 @@ type Options struct {
 	Subagent    SubagentRunner
 	Agents      []string
 	MaxParallel int
+	// AllowOutside 让内置工具允许访问 Policy.Root 之外的路径（置位 Policy.AllowOutside）。
+	//
+	// 作用于 read/write/edit/ls/glob/grep/js 的路径解析，以及 bash 的 cwd。
+	// 用途是 --permissions auto：那里连改动型工具都不用确认，守着 root 只会
+	// 让模型绕道 bash（bash 的命令本身从来不受 Root 约束）。ask/readonly 保留边界。
+	AllowOutside bool
 	// Disable 指定不注册的工具名。
 	Disable []string
 }
@@ -188,6 +194,9 @@ func DefaultRegistry(o Options) (*Registry, *BashManager) {
 	}
 	if o.Policy.Root == "" {
 		o.Policy = DefaultPolicy()
+	}
+	if o.AllowOutside {
+		o.Policy.AllowOutside = true
 	}
 	disable := make(map[string]bool, len(o.Disable))
 	for _, d := range o.Disable {
