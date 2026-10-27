@@ -1,0 +1,161 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// pasteMsg 构造一次括号粘贴（bubbletea 用 Paste 标记整段输入）。
+func pasteMsg(s string) tea.Msg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s), Paste: true}
+}
+
+// 多行粘贴折叠成 [txt×N行]，提交时展开成原文。
+func TestPasteMultilineFoldsAndExpands(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	src := "第一行\n第二行\n第三行"
+
+	send(m, pasteMsg(src))
+
+	if got := string(m.in.buf); got != "[txt×3行]" {
+		t.Fatalf("输入框显示 = %q，期望 [txt×3行]", got)
+	}
+	if got := m.in.text(); got != src {
+		t.Fatalf("展开结果 = %q，期望原文", got)
+	}
+	// 视图里不能出现裸换行，否则输入行会顶成两行、整屏错位。
+	if got := m.in.view(prompt, 80); strings.Contains(got, "\n") {
+		t.Fatalf("输入行渲染含换行: %q", got)
+	}
+}
+
+// CRLF（Windows 复制的文本）也要按 3 行算。
+func TestPasteCRLFLines(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, pasteMsg("a\r\nb\r\nc"))
+	if got := string(m.in.buf); got != "[txt×3行]" {
+		t.Fatalf("输入框显示 = %q，期望 [txt×3行]", got)
+	}
+	if got := m.in.text(); got != "a\nb\nc" {
+		t.Fatalf("展开结果 = %q，期望 a\\nb\\nc", got)
+	}
+}
+
+// 单行过长也折叠，标注字符数；短的单行粘贴保持原样。
+func TestPasteLongSingleLineFolds(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	long := strings.Repeat("字", pasteFoldRunes+1)
+	send(m, pasteMsg(long))
+	if got := string(m.in.buf); got != fmt.Sprintf("[txt×%d字]", len([]rune(long))) {
+		t.Fatalf("输入框显示 = %q", got)
+	}
+	if got := m.in.text(); got != long {
+		t.Fatal("展开结果与原文不一致")
+	}
+
+	m2, _ := newTestModel(80, 20)
+	send(m2, pasteMsg("普通的短文本"))
+	if got := string(m2.in.buf); got != "普通的短文本" {
+		t.Fatalf("短粘贴不该折叠: %q", got)
+	}
+}
+
+// 两个内容不同但行数相同的粘贴不能共用一个占位符（否则展开会串）。
+func TestPasteTokensAreDistinct(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, pasteMsg("a\nb"))
+	send(m, pasteMsg("c\nd"))
+
+	if got := string(m.in.buf); got != "[txt×2行][txt×2行·2]" {
+		t.Fatalf("输入框显示 = %q，期望两个不同占位符", got)
+	}
+	// 第二个 token 不能把第一个当前缀，否则展开会串（这正是序号放括号里的原因）。
+	if got := m.in.text(); got != "a\nbc\nd" {
+		t.Fatalf("展开结果 = %q，期望 \"a\\nbc\\nd\"", got)
+	}
+}
+
+// 退格/删除把占位符当一个整体删，不会留下半个 [txt×…]。
+func TestPasteTokenDeletedAsOneUnit(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, pasteMsg("a\nb\nc"))
+	send(m, key(tea.KeyBackspace))
+
+	if got := string(m.in.buf); got != "" {
+		t.Fatalf("退格后 = %q，期望清空", got)
+	}
+	if got := m.in.text(); got != "" {
+		t.Fatalf("退格后展开 = %q，期望空", got)
+	}
+
+	// 光标在占位符左侧时 Delete 也整体删。
+	m2, _ := newTestModel(80, 20)
+	send(m2, pasteMsg("a\nb"))
+	send(m2, key(tea.KeyHome))
+	send(m2, key(tea.KeyDelete))
+	if got := string(m2.in.buf); got != "" {
+		t.Fatalf("Delete 后 = %q，期望清空", got)
+	}
+}
+
+// 方向键整体跨过占位符，而不是停在 token 中间。
+func TestPasteTokenNavigation(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, pasteMsg("a\nb"))
+	send(m, key(tea.KeyHome))
+	send(m, key(tea.KeyRight))
+	if m.in.cur != len("[txt×2行]") {
+		t.Fatalf("右移后光标 = %d，期望跳到占位符末尾 %d", m.in.cur, len("[txt×2行]"))
+	}
+	send(m, key(tea.KeyLeft))
+	if m.in.cur != 0 {
+		t.Fatalf("左移后光标 = %d，期望 0", m.in.cur)
+	}
+}
+
+// 粘贴 + 手打混排，提交时按出现位置展开。
+func TestPasteMixedWithTyping(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, runes("请分析："))
+	send(m, pasteMsg("行1\n行2"))
+	if got := m.in.text(); got != "请分析：行1\n行2" {
+		t.Fatalf("展开 = %q", got)
+	}
+}
+
+// Alt+Enter 手动换行：真实换行留在 buf（提交时是多行），但画出来是 ⏎。
+func TestAltEnterNewlineRendersAsSymbol(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, runes("第一行"))
+	send(m, tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	send(m, runes("第二行"))
+
+	if got := m.in.text(); got != "第一行\n第二行" {
+		t.Fatalf("提交文本 = %q，期望含真实换行", got)
+	}
+	view := m.in.view(prompt, 80)
+	if strings.Contains(view, "\n") {
+		t.Fatalf("渲染不应含换行: %q", view)
+	}
+	if !strings.Contains(view, "⏎") {
+		t.Fatalf("渲染应显示 ⏎: %q", view)
+	}
+}
+
+// 提交后占位符状态要清干净（否则下一行会带着上一行的展开表）。
+func TestPasteStateClearedOnSubmit(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, pasteMsg("a\nb"))
+	send(m, key(tea.KeyEnter))
+
+	if len(m.in.pastes) != 0 || len(m.in.buf) != 0 {
+		t.Fatalf("提交后残留: buf=%q pastes=%v", m.in.buf, m.in.pastes)
+	}
+	// 用户块应该是展开后的多行内容
+	if got := m.blocks[0].Lines; len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("用户块 = %q，期望两行 a/b", got)
+	}
+}

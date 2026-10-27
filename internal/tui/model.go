@@ -354,8 +354,8 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case tea.KeyRunes:
-		if msg.Paste { // 括号粘贴：整段塞进去，别当按键处理
-			m.in.insertString(cleanLine(string(msg.Runes)))
+		if msg.Paste { // 括号粘贴：整段交给输入行（多行/过长会自动折叠成 [txt×N行]）
+			m.in.paste(string(msg.Runes))
 			return nil
 		}
 		for _, r := range string(msg.Runes) {
@@ -741,7 +741,7 @@ func (m *Model) permView() string {
 }
 
 func (m *Model) statusView() string {
-	left := escDim + "⌃↑/↓ 跳消息 · ⌃T 折叠思考 · 拖选复制 · PgUp/PgDn 滚动 · /help" + escReset
+	left := escDim + "⌃↑/↓ 跳消息 · ⌃T 折叠思考 · PgUp/PgDn 滚动 · /help" + escReset
 	right := ""
 	if m.running {
 		parts := []string{"● 运行中"}
