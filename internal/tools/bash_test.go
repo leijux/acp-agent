@@ -179,6 +179,41 @@ func TestBashBackgroundAndKill(t *testing.T) {
 	t.Fatalf("kill 后进程未结束: %q", out.Text())
 }
 
+// TestBashBackgroundHugeLine 单行超过 scanner 的 1MB 上限时，读端必须记录中断
+// 而不是静默当读完：否则后半段输出丢失，且管道没人消费会把进程卡死（会话永远 running）。
+func TestBashBackgroundHugeLine(t *testing.T) {
+	bt, _ := newBash(t)
+	// 一个 1.1MB 的单行（超上限）后面再跟一行标记，验证会话能结束。
+	cmd := "i=0; while [ $i -lt 1100 ]; do printf '%01000d' 0; i=$((i+1)); done; echo; echo AFTER-OK"
+	res, err := bt.Execute(ctx_(), Args{"command": cmd, "background": true})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	d, _ := res.Details.(map[string]any)
+	id, _ := d["sessionId"].(string)
+	if id == "" {
+		t.Fatalf("缺少 sessionId: %s", res.Text())
+	}
+	out := NewBashOutputTool(bt.Manager)
+	deadline := time.Now().Add(20 * time.Second)
+	var last Result
+	for time.Now().Before(deadline) {
+		last, _ = out.Execute(ctx_(), Args{"sessionId": id})
+		if strings.Contains(last.Text(), "done(") {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	text := last.Text()
+	short, _ := Truncate(text, 0, 400)
+	if !strings.Contains(text, "读取输出中断") {
+		t.Fatalf("超长行未报告读取中断: %q", short)
+	}
+	if !strings.Contains(text, "done(") {
+		t.Fatalf("超长行后会话未结束（管道很可能无人消费）: %q", short)
+	}
+}
+
 func TestBashOutputFilter(t *testing.T) {
 	bt, _ := newBash(t)
 	res, _ := bt.Execute(ctx_(), Args{

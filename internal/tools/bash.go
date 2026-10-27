@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -300,6 +303,14 @@ func (s *bashSession) textLocked() string {
 	return s.buf.String()
 }
 
+// isPipeClosed 判断读端错误是否只是「我们自己把管道关了」造成的。
+//
+// Wait 之后仍读不完时（孙进程持着管道）会主动 Close 读端：默认解释器引擎下是
+// io.ErrClosedPipe，os/exec 引擎下是 os.ErrClosed。这属于正常收尾，不算读失败。
+func isPipeClosed(err error) bool {
+	return errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed)
+}
+
 // sizeLocked 返回已捕获输出的字节数（调用方需持 s.mu）。
 func (s *bashSession) sizeLocked() int {
 	if s.src != nil {
@@ -363,6 +374,19 @@ func (m *BashManager) Start(command, dir string, env map[string]string) (string,
 				}
 				s.mu.Unlock()
 				time.Sleep(time.Millisecond)
+			}
+			// Scan 返回 false 既可能是读完（EOF），也可能是出错：单行超过 1MB 的
+			// 缓冲上限（bufio.ErrTooLong）、管道读失败等。以前把两种情况都当读完，
+			// 后半段输出静默丢弃，且没人再消费管道 —— 仍在写输出的进程会卡死，
+			// 会话永远停在 running。
+			if err := sc.Err(); err != nil && !isPipeClosed(err) {
+				s.mu.Lock()
+				if s.buf.Len() < 4<<20 {
+					fmt.Fprintf(&s.buf, "[读取输出中断：%v]\n", err)
+				}
+				s.mu.Unlock()
+				// 继续丢掉剩余输出：写端写不进去就会一直阻塞，进程也就永远不结束。
+				_, _ = io.Copy(io.Discard, pipe)
 			}
 		}()
 
@@ -448,7 +472,8 @@ func (m *BashManager) Read(id string, filter string) (text string, done bool, ex
 		var b strings.Builder
 		for _, ln := range strings.Split(text, "\n") {
 			if re.MatchString(ln) {
-				b.WriteString(ln + "\n")
+				b.WriteString(ln)
+				b.WriteString("\n")
 			}
 		}
 		text = b.String()
