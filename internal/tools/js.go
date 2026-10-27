@@ -19,9 +19,11 @@ import (
 //
 // 用途：计算、JSON 变换、正则处理、日期换算这类「不值得起一个进程」的活；
 // 另外提供**只读**的 fs 桥（readFile/readDir/stat/exists/glob），
-// 让「扫一批文件再统计」不用先把内容读进 args。
+// 让「扫一批文件再统计」不用先把内容读进 args；以及同步的 fetch（见 js_http.go）。
 //
-// 沙箱约束：没有网络、没有 require、没有文件写入；只有 JS 标准库 + console + args + 只读 fs。
+// 沙箱约束：没有 require、没有文件写入、没有 import；只有 JS 标准库 + console
+// + args + 只读 fs + crypto + fetch（fetch 的次数/字节/超时都受预算约束，
+// 只读模式只放行 GET/HEAD）。
 // 并发安全：每次 Execute 新建一个 runtime，互不共享状态。
 type JSTool struct {
 	// Policy 限定 fs 能读的范围（零值时按 cwd）。
@@ -42,7 +44,10 @@ func (*JSTool) Description() string {
 		"可用 console.log/info/warn/error 输出（会被收集）；脚本最后一个表达式的值作为结果返回。" +
 		"只读文件系统可用：fs.readFile(path)、fs.readDir(path)、fs.stat(path)、fs.exists(path)、" +
 		"fs.glob(pattern)（pattern 相对 fs.root，**不能写文件**，写盘请用 write/edit）。" +
-		"沙箱没有网络与 require 权限；仅支持同步代码（无 Promise 事件循环）；超时会被中断。"
+		"网络请求用同步的 fetch(url, {method, headers, body|json, timeout, maxBytes})，" +
+		"返回 {status, ok, url, headers, text, json, size, truncated}（不是 Promise，不能 await；" +
+		"非 2xx 不抛错，看 ok/status）。非 GET/HEAD 请求需要 permissions=auto；" +
+		"没有 require；仅支持同步代码；超时会被中断。"
 }
 
 func (*JSTool) Parameters() map[string]any {
@@ -93,6 +98,14 @@ func (t *JSTool) Execute(ctx context.Context, a Args) (Result, error) {
 	if err := installCrypto(vm); err != nil {
 		return ErrorResult("初始化 crypto 失败: %v", err), nil
 	}
+	deadline := time.Duration(timeout) * time.Millisecond
+	// fetch 需要知道脚本的截止时间：vm.Interrupt 打不断阻塞在 socket 上的 Go
+	// 调用，单请求超时只能由 http 层按「剩余时间」兜住（见 js_http.go）。
+	scriptCtx, cancelScript := context.WithTimeout(ctx, deadline)
+	defer cancelScript()
+	if err := installFetch(vm, t.Policy, &jsHTTP{policy: t.Policy, ctx: scriptCtx}); err != nil {
+		return ErrorResult("初始化 fetch 失败: %v", err), nil
+	}
 	// args 必须先变成真正的 JS 值：直接 Set Go map/slice 时，goja 每次访问
 	// 子属性都会包一层新的 Go 值，`args.a.push(x)` 的修改会丢掉
 	// （args.a === args.a 会是 false）。走一趟 JSON.parse 之后就正常了。
@@ -107,7 +120,6 @@ func (t *JSTool) Execute(ctx context.Context, a Args) (Result, error) {
 	}
 
 	// 超时与取消都通过 vm.Interrupt 打断解释器（goja 支持跨 goroutine 调用）。
-	deadline := time.Duration(timeout) * time.Millisecond
 	timer := time.AfterFunc(deadline, func() { vm.Interrupt("timeout") })
 	defer timer.Stop()
 	stopWatch := make(chan struct{})

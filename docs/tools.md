@@ -31,7 +31,7 @@ results := ex.Execute(ctx, []tools.Call{
 | `bash` | ✅ | 执行命令；超时或 `background:true` 转后台，返回 `sessionId` |
 | `bash_output` | ✅ | 读后台输出，支持正则 `filter` 轮询 |
 | `bash_kill` | ❌ | 杀整个进程组 / 进程树 |
-| `js` | ✅ | 内置 goja 执行 JavaScript：纯计算、JSON 变换、字符串/正则处理 |
+| `js` | ✅ | 内置 goja 执行 JavaScript：纯计算、JSON 变换、字符串/正则处理，只读 `fs`，同步 `fetch`（出网受超时/次数/字节预算约束） |
 | `todo` | ❌ | 内存态任务清单（replace/add/update/list） |
 | `web_search` | ✅ | 多 query 并发检索；后端在 `internal/web`（duckduckgo 免 key / searxng / tavily / brave / exa） |
 | `web_fetch` | ✅ | 抓正文：HTML→纯文本（去 nav/footer/script，代码块保留围栏）、GB18030/UTF-16 自动解码、字节+字符双上限 |
@@ -220,7 +220,7 @@ HTTP 400: Invalid schema for function 'context_check': null is not of type "obje
 
 模型需要算数（`86243 秒是几小时几分`）、改一段 JSON、写个正则验证时，调 `bash` + `python`
 要么没装、要么起进程 20ms 起步、要么跨平台不一致。`js` 直接跑在进程内的 goja 上：
-**零外部依赖、跨平台一致、启动 <1ms、无文件系统权限**。
+**零外部依赖、跨平台一致、启动 <1ms、无写权限**。
 
 ```json
 {"script": "args.rows.filter(r => r.n > 3).map(r => r.name).join(',')", "args": {"rows": [{"name":"a","n":1},{"name":"b","n":5}]}}
@@ -260,7 +260,27 @@ js(script="({a:1,b:[1,2]}).b.length", )
   - 单次执行有预算：最多 512 个文件 / 16MB，单文件上限取 `Policy.MaxReadBytes`；
   - **没有写接口**（`writeFile`/`unlink`/`mkdir` 都是 `undefined`）——写盘继续走
     `write`/`edit`，那两条路有权限门禁和 diff；
-- **没有 `require`/`process`/`fetch`** —— 除只读 fs 外不存在宿主能力；
+- **同步 `fetch`**（`internal/tools/js_http.go`）：`fetch(url[, options])` →
+  `{status, ok, url, contentType, headers, size, truncated, text, json}`。
+  - options：`method`（默认 GET，自动大写）、`headers`（对象）、`body`（字符串）、
+    `json`（任意值 → 自动 `JSON.stringify` 并补 `Content-Type: application/json`）、
+    `timeout`（毫秒，默认 15s、上限 60s）、`maxBytes`（响应体上限，默认 1MB、上限 8MB）；
+  - **不是 Promise**：没有事件循环，`r.json` 是属性而不是方法，`await` 不存在；
+  - 响应体是合法 JSON 时才有 `json` 字段，否则是 `undefined`；`headers` 的键统一小写；
+  - **非 2xx 不抛错**（HTTP 语义）：脚本自己判 `ok`/`status`；抛错的只有传输层失败、
+    URL 非法、超预算、超时；
+  - 预算：单次脚本最多 **16 次请求 / 累计 8MB**。单请求上限挡不住
+    `for (const id of ids) fetch(...)`，所以次数单独记账；
+  - 超时取 `min(options.timeout, 脚本剩余时间)`。`vm.Interrupt` 打不断阻塞在 socket 上的
+    Go 调用，所以这个超时必须由 http 层自己兜住，不能指望解释器；
+  - **写网络需要 `permissions=auto`**：GET/HEAD 任何时候都放行（与 `web_fetch`
+    一致），非 GET/HEAD 需要 `Policy.AllowNetworkWrite`（只有 `auto` 打开）。
+    理由：`js` 的 `Mutates()` 是 `false`（模型正常拿它算数），放行写就等于绕过了
+    确认弹窗——同一件事走 `bash` 会弹、走 `js` 不弹，那就是后门。被拒时的报错
+    会把模型引到 `bash` 那条需要确认的路上；`readonly` 另外全部拦掉；
+  - **不做 SSRF 过滤**（不拦 localhost/内网）：`bash` 本来就能 `curl`，在 js 上单独
+    设域名白名单只会把模型赶回 shell，是「看着安全」的假边界；
+- **没有 `require`/`process`**，也没有 `import`；除只读 fs + crypto + fetch 外不存在宿主能力；
 - `args` 经 `JSON.parse` 注入：`args.list.push(x)` 能写回（早先直接塞 Go map，
   `args.a === args.a` 会是 `false`，修改静默丢失）；
 - `console` 累计输出上限 1MB，超出后追加一行提示并丢弃，避免死循环式打印吃内存；
@@ -288,10 +308,12 @@ goja -t 200ms -e 'while(true){}' || echo TIMEOUT # 超时打断
 | `--` | 之后全部当作脚本参数 |
 | `-h, --help` | 用法 |
 
-脚本内可用能力与 `js` 工具**一致**：`console.*`、只读 `fs.*`（`readFile` /
+脚本内可用能力基本与 `js` 工具**一致**：`console.*`、只读 `fs.*`（`readFile` /
 `readFileBytes` / `readFileBase64` / `readDir` / `stat` / `exists` / `glob`）、
 `crypto.sha256`，另有 `argv`。差异：
 
+- **没有 `fetch`**：这条路径定位是管道里的纯计算；出网直接用 `curl` 更自然，
+  也不用再为它维护一套超时/预算语义；
 - 输出直接写终端：`console.log/info/debug` → stdout，`warn/error` → stderr；
 - `fs` 同样受 `Policy.Root` 约束（越界直接抛异常，非零退出）；
 - 未捕获异常 → stderr + 退出码 1（不打印 `=> ` 前缀，方便接管道）。
@@ -352,7 +374,8 @@ func (t *MyTool) Execute(ctx context.Context, a tools.Args) (tools.Result, error
 2. `AllowOutside=false` 时拒绝逃逸 `Root` 的路径（`../` 与绝对路径都检查）；
 3. **对解析符号链接后的真实路径再检查一次** —— `root/link -> /etc` 这种绕过会被拦住。
 
-`ReadOnly=true` 时 `write`/`edit` 直接返回错误。`CheckCommand` 拦 `rm -rf /`、`mkfs`
+`ReadOnly=true` 时 `write`/`edit` 直接返回错误；`js` 的 `fetch` 也只放行
+GET/HEAD（GET 算读网，与 `web_fetch` 一致）。`CheckCommand` 拦 `rm -rf /`、`mkfs`
 等明显破坏性命令，这是 best effort 的防手滑，**不是安全边界**。
 
 `--permissions auto` 下整个 `Policy` 都置 `AllowOutside=true`

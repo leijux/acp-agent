@@ -13,12 +13,19 @@ import (
 // AllowOutside 时才允许 root 之外的绝对路径。
 type Policy struct {
 	Root string
-	// ReadOnly 禁止写入类工具（write/edit/bash 写操作）。
+	// ReadOnly 禁止写入类工具（write/edit/bash 写操作）；js 的 fetch 也只允许 GET/HEAD。
 	ReadOnly bool
 	// AllowOutside 允许访问 Root 之外的路径（谨慎）。
 	AllowOutside bool
 	// MaxReadBytes 单次读取上限（0 表示用默认值）。
 	MaxReadBytes int64
+	// AllowNetworkWrite 允许 js 的 fetch 发非 GET/HEAD 请求（即向外写）。
+	//
+	// 只有 `permissions=auto`（已全放行、不询问）打开。ask 必须关：js 不是
+	// 改动型工具（Mutation=false），开了就直接绕过了确认弹窗——同样一件事走
+	// bash 会弹窗，走 js 却不弹，那就是个后门。关掉时 fetch 的报错会把模型
+	// 引到 bash 那条需要确认的路上。
+	AllowNetworkWrite bool
 }
 
 // DefaultPolicy 以 cwd 为根。
