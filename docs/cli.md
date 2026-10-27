@@ -46,7 +46,7 @@ Windows 为 `%AppData%\acp-agent\config.json`；`ACP_AGENT_CONFIG` 可指定其�
 | `segmenterExpand` | `ACP_AGENT_SEGMENTER_EXPAND` | gse 是否额外输出 CJK bigram，`on`（默认）/ `off`；关掉会丢跨词边界召回 |
 | `root` | `ACP_AGENT_ROOT` | 工具可访问范围，默认 cwd，启动时转绝对路径；`permissions=auto` 下不生效（无边界） |
 | `session` | `ACP_AGENT_SESSION` | 显式指定会话文件；不设则按项目目录自动分配（见下） |
-| `maxTurns` | `ACP_AGENT_MAX_TURNS` | 单次 `Run` 的 assistant 轮数上限，默认 500（上游 Pi 本身无轮数上限，只靠模型不再调工具自然终止；这里是移植时加的兜底） |
+| `maxTurns` | `ACP_AGENT_MAX_TURNS` | 单次 `Run` 的 assistant 轮数上限，默认 500；写 `0` / 负数（或 `--max-turns -1`）= **不限制**（与上游 Pi 一致：它的 agent loop 本来就没有轮数上限） |
 | `temperature` | `ACP_AGENT_TEMPERATURE` | 非法值静默忽略 |
 | `thinkingLevel` | `ACP_AGENT_THINKING` | `off` / `minimal` / `low` / `medium`（默认）/ `high` / `max`；DeepSeek 侧 `off`→`thinking.type=disabled`、`minimal|low`→`effort=low`、`medium|high`→`effort=high`、`max`→`effort=max`；其他端点不注入该字段 |
 | `disableTools` | — | 不注册的工具名数组 |

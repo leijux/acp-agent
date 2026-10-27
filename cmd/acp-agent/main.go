@@ -74,6 +74,7 @@ type flags struct {
 	session        string
 	cont           bool
 	maxTurns       int
+	maxTurnsSet    bool // --max-turns 被显式给出（含 0 / 负数 = 不限制）
 	thinking       string
 	temperature    float64
 	temperatureSet bool
@@ -118,7 +119,7 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.StringVar(&f.session, "session", "", "会话文件路径（JSONL）")
 	fs.BoolVar(&f.cont, "c", false, "继续最近一次会话")
 	fs.BoolVar(&f.cont, "continue", false, "继续最近一次会话（同 -c）")
-	fs.IntVar(&f.maxTurns, "max-turns", 0, "单次运行的最大轮数")
+	fs.IntVar(&f.maxTurns, "max-turns", 0, "单次运行的最大轮数；0 或负数 = 不限制（默认 500）")
 	fs.StringVar(&f.thinking, "thinking", "", "思考等级：off/minimal/low/medium/high/max（默认 medium）")
 	fs.Float64Var(&f.temperature, "temperature", 0, "采样温度（推理模型自动忽略）")
 	fs.BoolVar(&f.acpMode, "acp", false, "以 ACP agent 模式运行（stdio JSON-RPC）")
@@ -201,9 +202,15 @@ func parseFlags(args []string) (*flags, error) {
 	}
 
 	f.temperatureSet = false
+	f.maxTurnsSet = false
 	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "temperature" {
+		switch fl.Name {
+		case "temperature":
 			f.temperatureSet = true
+		case "max-turns":
+			// 只看值区分不了「没给」与「显式不限」：两者都是 0 附近的值，
+			// 而语义相反（一个用默认兜底、一个完全不管）。必须问 flag 包。
+			f.maxTurnsSet = true
 		}
 	})
 	return f, nil

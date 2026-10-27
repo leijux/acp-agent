@@ -47,7 +47,7 @@ func TestConfigPriorityFileEnvFlag(t *testing.T) {
 	}
 
 	// flag 覆盖环境变量
-	f := &flags{model: "from-flag", permissions: "readonly", root: "/flag/root", maxTurns: 3}
+	f := &flags{model: "from-flag", permissions: "readonly", root: "/flag/root", maxTurns: 3, maxTurnsSet: true}
 	cfg.applyFlags(f)
 	if cfg.Model != "from-flag" || cfg.Permissions != "readonly" ||
 		cfg.Root != "/flag/root" || cfg.MaxTurns != 3 {
@@ -137,6 +137,48 @@ func TestConfigDefaultsWhenNothingSet(t *testing.T) {
 	}
 	if cfg.Web == nil || cfg.Web.Search.Provider != web.ProviderDuckDuckGo {
 		t.Fatalf("web 后端应默认 duckduckgo：%+v", cfg.Web)
+	}
+}
+
+// 轮数上限：默认 500 兜底，但 0 / 负数表示「不限制」。
+//
+// 只看值区分不了「没给」与「显式不限」（两者都是 0 附近的值），
+// 所以 flag/env 另外记了一个「显式设置」标记，这里是那个约定的回归点。
+func TestConfigMaxTurnsUnlimited(t *testing.T) {
+	cases := []struct {
+		name string
+		file string
+		env  string
+		fl   *flags
+		want int
+	}{
+		{"未设置", `{}`, "", nil, defaultMaxTurns},
+		{"flag 正数", `{}`, "", &flags{maxTurns: 20, maxTurnsSet: true}, 20},
+		{"flag 0", `{}`, "", &flags{maxTurns: 0, maxTurnsSet: true}, 0},
+		{"flag 负数", `{}`, "", &flags{maxTurns: -1, maxTurnsSet: true}, 0},
+		{"env 正数", `{}`, "50", nil, 50},
+		{"env 负数", `{}`, "-1", nil, 0},
+		{"文件正数", `{"maxTurns": 20}`, "", nil, 20},
+		{"文件负数", `{"maxTurns": -1}`, "", nil, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useConfigFile(t, tc.file)
+			t.Setenv("ACP_AGENT_MAX_TURNS", tc.env)
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.applyEnv()
+			if tc.fl != nil {
+				cfg.applyFlags(tc.fl)
+			}
+			cfg.applyDefaults()
+			if cfg.MaxTurns != tc.want {
+				t.Fatalf("MaxTurns = %d, want %d", cfg.MaxTurns, tc.want)
+			}
+		})
 	}
 }
 

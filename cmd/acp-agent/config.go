@@ -26,6 +26,10 @@ type Config struct {
 	APIKey      string  `json:"apiKey,omitempty"`
 	Permissions string  `json:"permissions,omitempty"` // ask | auto | readonly
 	MaxTurns    int     `json:"maxTurns,omitempty"`
+	// maxTurnsSet 记录轮数上限是否由调用方显式指定（flag / env）。
+	// 区分「没给」（补默认 500）与「显式 0/负数」（不限制）——光看值区分不了，
+	// 而这两种语义相反。非导出字段，不参与 JSON 解码。
+	maxTurnsSet bool
 	Root        string  `json:"root,omitempty"`
 	Session     string  `json:"session,omitempty"`
 	Temperature float64 `json:"temperature,omitempty"`
@@ -69,10 +73,11 @@ const (
 	permAuto     = "auto"
 	permReadonly = "readonly"
 
-	// defaultMaxTurns 与 internal/agent 的默认轮数保持一致（那里是
-	// defaultMaxTurns=500）。两边各自一份常量是因为 agent 包不能反向依赖 cmd；
-	// 改一个必须同时改另一个，
-	// internal/agent/agent_test.go 的默认值断言会拦住单独改一侧的提交。
+	// defaultMaxTurns 是 CLI 层的默认轮数兜底。
+	//
+	// agent 包本身不设上限（internal/agent 的 MaxTurns<=0 = 不限制，与上游 Pi
+	// 的 agent loop 一致）；这里是产品默认：交互/编排场景没人看着时不能让它
+	// 无限跑。想彻底不限就显式给 0 或负数（见 applyDefaults）。
 	defaultMaxTurns = 500
 )
 
@@ -148,8 +153,10 @@ func (c *Config) applyEnv() {
 		c.MCPJSON = v
 	}
 	if v := os.Getenv("ACP_AGENT_MAX_TURNS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		// 0 / 负数表示不限制，所以要接 != 0 而不仅是 > 0。
+		if n, err := strconv.Atoi(v); err == nil && n != 0 {
 			c.MaxTurns = n
+			c.maxTurnsSet = true
 		}
 	}
 	if f, ok := envFloat("ACP_AGENT_TEMPERATURE"); ok {
@@ -220,8 +227,9 @@ func (c *Config) applyFlags(f *flags) {
 	if f.session != "" {
 		c.Session = f.session
 	}
-	if f.maxTurns > 0 {
+	if f.maxTurnsSet {
 		c.MaxTurns = f.maxTurns
+		c.maxTurnsSet = true
 	}
 	if f.thinking != "" {
 		c.ThinkingLevel = f.thinking
@@ -279,7 +287,11 @@ func (c *Config) applyDefaults() {
 	if c.Permissions == "" {
 		c.Permissions = permAsk
 	}
-	if c.MaxTurns <= 0 {
+	if c.MaxTurns < 0 {
+		// 负数 = 不限制（文件里写 "maxTurns": -1；flag/env 用 -1）。
+		// 规整成 0 交给 agent：agent 包的 <=0 就是不限。
+		c.MaxTurns = 0
+	} else if c.MaxTurns == 0 && !c.maxTurnsSet {
 		c.MaxTurns = defaultMaxTurns
 	}
 	if c.Root == "" {

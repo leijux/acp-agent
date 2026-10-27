@@ -619,12 +619,43 @@ func TestMaxTurnsLimit(t *testing.T) {
 	}
 }
 
+// TestMaxTurnsZeroMeansUnlimited 默认（0）= 不限制。
+//
+// 上游 Pi 的 agent loop 本来就没有轮数上限，只靠「模型不再调工具」自然终止；
+// 这里不允许再把 0 静默改写成某个默认值（以前先是 100，后来是 500），
+// 否则「不限制」根本没有表达方式。
+func TestMaxTurnsZeroMeansUnlimited(t *testing.T) {
+	a := newTestAgent(t, NewScriptedProvider(reply("ok")))
+	if a.opts.MaxTurns != 0 || a.opts.MaxSteps != 0 {
+		t.Fatalf("未指定时不该补默认上限：MaxTurns=%d MaxSteps=%d", a.opts.MaxTurns, a.opts.MaxSteps)
+	}
+	// 0 不能触发「达到最大轮数限制」。
+	res, err := a.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Turns != 1 {
+		t.Fatalf("Turns = %d, want 1", res.Turns)
+	}
+
+	// 负数同样归零（不限制），不能变成个负的上限让第一轮就撞线。
+	neg := newTestAgent(t, NewScriptedProvider(reply("ok")), func(o *Options) {
+		o.MaxTurns = -1
+		o.MaxSteps = -2
+	})
+	if neg.opts.MaxTurns != 0 || neg.opts.MaxSteps != 0 {
+		t.Fatalf("负数应规整为 0：MaxTurns=%d MaxSteps=%d", neg.opts.MaxTurns, neg.opts.MaxSteps)
+	}
+	if _, err := neg.Run(context.Background(), "hi"); err != nil {
+		t.Fatalf("负数上限不应报错: %v", err)
+	}
+}
+
 func TestNoProviderError(t *testing.T) {
 	if _, err := New(Options{}); !errors.Is(err, ErrNoProvider) {
 		t.Fatalf("err = %v, want ErrNoProvider", err)
 	}
 }
-
 // ---------- 7. 上下文组装 ----------
 
 func TestBuildSystemPromptOrder(t *testing.T) {

@@ -11,17 +11,6 @@ import (
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
-// defaultMaxTurns 是单次 Run 的默认轮数上限。
-//
-// 上限本身是移植时加的防守：上游 Pi 的 agent loop 没有轮数上限，只靠
-// 「模型不再调工具」自然终止（见 @earendil-works/pi-agent-core 的
-// agent-loop.ts runLoop）。这里给一个足够大的值，让长任务不会因为
-// 正常的多轮工具执行被截断，又保留一层「彻底失控」的兜底。
-//
-// 改这里必须同步 cmd/acp-agent/config.go 的 defaultMaxTurns
-// （两个包互相不依赖，各自一份）。
-const defaultMaxTurns = 500
-
 // Options 配置 Agent。
 type Options struct {
 	Provider Provider
@@ -35,9 +24,14 @@ type Options struct {
 	// Context 控制 system prompt 组装。
 	Context ContextOptions
 
-	// MaxTurns 单次 Run 的最大轮数（含工具执行）。0 = 默认 defaultMaxTurns（500）。
+	// MaxTurns 单次 Run 的最大轮数（含工具执行）。0（或负数）= 不限制。
+	//
+	// 默认不限制：上游 Pi 的 agent loop 就没有轮数上限，只靠「模型不再调
+	// 工具」自然终止（@earendil-works/pi-agent-core 的 agent-loop.ts
+	// runLoop）。需要兜底就由调用方显式给值（CLI 默认 500，见
+	// cmd/acp-agent）。
 	MaxTurns int
-	// MaxSteps 单次 Run 的最大模型调用次数。0 = MaxTurns。
+	// MaxSteps 单次 Run 的最大模型调用次数。0（或负数）= 不限制。
 	MaxSteps int
 
 	// 上下文预算。ContextWindow 为 0 时用 Model.ContextWindow。
@@ -81,12 +75,9 @@ func (o *Options) normalize() error {
 	if o.Session == nil {
 		o.Session = NewSession()
 	}
-	if o.MaxTurns <= 0 {
-		o.MaxTurns = defaultMaxTurns
-	}
-	if o.MaxSteps <= 0 {
-		o.MaxSteps = o.MaxTurns
-	}
+	// 轮数/步数上限：<= 0 一律规整为 0，表示不限制（判定时只看 > 0）。
+	o.MaxTurns = max(o.MaxTurns, 0)
+	o.MaxSteps = max(o.MaxSteps, 0)
 	if o.ContextWindow <= 0 {
 		o.ContextWindow = o.Model.ContextWindow
 	}
@@ -382,7 +373,8 @@ func (a *Agent) RunMessages(ctx context.Context, input Message) (*RunResult, err
 			res.Aborted = true
 			break
 		}
-		if steps >= a.opts.MaxSteps || assistantCount >= a.opts.MaxTurns {
+		// 只有显式给了正数才算上限；0 = 不限制（与上游 Pi 一致）。
+		if hitTurnLimit(steps, assistantCount, a.opts) {
 			res.Err = fmt.Errorf("agent: 达到最大轮数限制（turns=%d steps=%d）", assistantCount, steps)
 			break
 		}
@@ -484,6 +476,17 @@ func (a *Agent) RunMessages(ctx context.Context, input Message) (*RunResult, err
 	a.totalMu.Unlock()
 
 	return res, res.Err
+}
+
+// hitTurnLimit 判断本次 run 是否撞到轮数/步数上限。
+//
+// 两个都是 0 时永远返回 false —— 「不限制」必须是一个真实可用的状态：
+// 上游 Pi 的 agent loop 本身没有轮数上限，只靠模型不再调工具自然终止。
+func hitTurnLimit(steps, turns int, opts Options) bool {
+	if opts.MaxSteps > 0 && steps >= opts.MaxSteps {
+		return true
+	}
+	return opts.MaxTurns > 0 && turns >= opts.MaxTurns
 }
 
 // maybeAutoCompact 是每轮末尾的压缩检查点。
