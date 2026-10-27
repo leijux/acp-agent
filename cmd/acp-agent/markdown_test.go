@@ -136,7 +136,8 @@ func renderMDColor(t *testing.T, chunks ...string) string {
 func renderMDColorCols(t *testing.T, cols int, chunks ...string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	term := &terminal{out: &buf, errOut: &buf, color: true, cols: cols}
+	term := &terminal{out: &buf, errOut: &buf, color: true}
+	term.setCols(cols)
 	md := newMDRenderer(term)
 	for _, c := range chunks {
 		md.Write(c)

@@ -83,6 +83,27 @@ tasks:
       - cmd: rm -f '{{.BIN}}/{{.PROG}}{{.EXE}}~'
         ignore_error: true
 
+  # 系统里的 `pi` 命令指向 bin/pi.exe（bin/ 已在用户 PATH 首位）。
+  # 单独一个任务：`go build` 的产物名是 acp-agent.exe，直接用它的话
+  # bin/pi.exe 会一直是旧版本，`pi` 跑起来看不出问题却已经不是最新代码。
+  build:pi:
+    desc: 构建到 bin/pi.exe（系统 pi 命令指向这个文件）
+    aliases: [bp]
+    method: none
+    sources:
+      - cmd/**/*.go
+      - internal/**/*.go
+      - internal/segmenter/dict_*.txt
+      - go.mod
+      - go.sum
+      - Taskfile.yml
+    generates:
+      - '{{.BIN}}/pi{{.EXE}}'
+    cmds:
+      - go build -tags '{{.TAGS}}' -trimpath -ldflags '{{.LDFLAGS}}' -o '{{.BIN}}/pi{{.EXE}}' ./cmd/acp-agent
+      - cmd: rm -f '{{.BIN}}/pi{{.EXE}}~'
+        ignore_error: true
+
   build:all:
     desc: 构建全部 cmd/ 下的程序
     cmds:

@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/leijux/acp-agent/internal/acp"
 )
@@ -152,8 +152,16 @@ func (a *app) runSubagentIn(ctx context.Context, root, role, task string) (strin
 		return "", err
 	}
 
+	started := time.Now()
 	if a.term != nil {
-		a.term.logf("↳ 子代理 %s 启动（%s）\n", role, describeSubagentCommand(spec))
+		// 不再重复 task：上面那行「→ delegate agent=… task=…」已经打过了。
+		line := "启动"
+		if hint := subagentCmdHint(spec); hint != "" {
+			line += " · " + hint
+		}
+		a.subagentLine("%s %s %s",
+			a.term.paint(cDim, "↳ 子代理"), a.term.paint(cBold, role),
+			a.term.paint(cDim, line))
 	}
 
 	stderr := a.subagentStderr(role)
@@ -167,25 +175,50 @@ func (a *app) runSubagentIn(ctx context.Context, root, role, task string) (strin
 		Stderr:       stderr,
 	})
 	if err != nil {
+		a.subagentDone(role, started, 0, "", fmt.Errorf("启动失败: %w", err))
 		return "", fmt.Errorf("子代理启动失败: %w", err)
 	}
 	defer sub.Close()
 
 	res, err := sub.Prompt(ctx, task)
 	if err != nil {
+		a.subagentDone(role, started, 0, "", err)
 		return "", err
 	}
+	a.subagentDone(role, started, res.ToolCalls, res.Text, nil)
 	return formatSubagentResult(role, res), nil
 }
 
-// describeSubagentCommand 把启动命令压缩成一行日志。
-func describeSubagentCommand(spec acp.SubagentSpec) string {
-	name := spec.Command
-	if exe, err := os.Executable(); err == nil && exe == name {
-		name = "self"
+// subagentDone 收尾一行：成功报工具次数/耗时并预览结论，失败报原因。
+func (a *app) subagentDone(role string, started time.Time, tools int, text string, err error) {
+	if a.term == nil {
+		return
 	}
-	parts := append([]string{name}, spec.Args...)
-	return strings.Join(parts, " ")
+	took := time.Since(started).Round(100 * time.Millisecond)
+	if err != nil {
+		a.subagentLine("%s %s %s", a.term.paint(cRed, "↳ 子代理"),
+			a.term.paint(cBold, role), a.term.paint(cRed, err.Error()))
+		return
+	}
+	a.subagentLine("%s %s %s", a.term.paint(cDim, "↳ 子代理"),
+		a.term.paint(cBold, role),
+		a.term.paint(cDim, fmt.Sprintf("完成 · %d 次工具 · %s", tools, fmtDuration(took))))
+	// 结论文本会作为工具结果交给主模型，这里只给一眼预览，
+	// 否则用户要等主模型复述才知道子代理干了什么。
+	if p := firstLine(strings.TrimSpace(text), 96); p != "" {
+		a.subagentLine("    %s %s", a.term.paint(cDim, "⋯"), a.term.paint(cDim, p))
+	}
+}
+
+// subagentCmdHint 返回一行启动命令提示。
+//
+// 常见情形是「自身 + --acp」那一串，全是噪声，直接不显示；
+// 只有配置了第三方 ACP agent（SubagentConfig.Command）时才值得看一眼。
+func subagentCmdHint(spec acp.SubagentSpec) string {
+	if exe, err := os.Executable(); err == nil && exe == spec.Command {
+		return ""
+	}
+	return truncRunes(strings.Join(append([]string{spec.Command}, spec.Args...), " "), 60)
 }
 
 // subagentPermission 把子代理的授权请求交给主进程的权限守卫裁决。
@@ -277,8 +310,30 @@ func pickOption(opts []acp.PermissionOption, kinds ...string) string {
 	return ""
 }
 
-// subagentUpdate 把子代理的活动以低调方式回显到 stderr，
-// 让用户能看出「现在跑到子代理里了」而不是主代理卡住。
+// subagentLine 输出一行子代理活动。
+//
+// 为什么不能直接写 stderr：TUI 下屏幕归 bubbletea 独占，往 stderr 写会
+// 把正在重绘的界面搅成乱码（而且这些行不进块视图，滚一下就没了）。
+// 所以交互界面里走 term.printf → 行缓冲 → 工具块；-p / --no-tui 仍走 stderr，
+// 因为 -p 的 stdout 是「结果」，不能掺日志。
+func (a *app) subagentLine(format string, args ...any) {
+	if a.term == nil {
+		return
+	}
+	if a.ui == nil {
+		a.term.logf(format+"\n", args...)
+		return
+	}
+	a.setKind(kindTool)
+	a.endPendingLine() // 别粘到流式半行上
+	a.term.printf(format+"\n", args...)
+}
+
+// subagentUpdate 把子代理的活动回显出来，让用户看出「现在跑到子代理里了」，
+// 而不是以为主代理卡死。
+//
+// 只画两层：启动/结束各一行，中间的工具调用缩进一级；子代理自己的回复
+// 不往主视图里灌（那是给主模型看的，刷屏只会盖掉主对话）。
 func (a *app) subagentUpdate(role string) func(acp.SubagentUpdate) {
 	return func(u acp.SubagentUpdate) {
 		if a.term == nil {
@@ -286,17 +341,57 @@ func (a *app) subagentUpdate(role string) func(acp.SubagentUpdate) {
 		}
 		switch u.Kind {
 		case acp.SessionUpdateToolCall:
-			if u.ToolCall != nil {
-				a.term.logf("  [%s] ⚙ %s\n", role, firstNonBlank(u.ToolCall.Title, u.ToolCall.Name))
+			if u.ToolCall == nil {
+				return
 			}
+			title := firstNonBlank(u.ToolCall.Title, u.ToolCall.Name)
+			if strings.TrimSpace(title) == "" {
+				title = u.ToolCall.Kind
+			}
+			a.subagentLine("    %s %s", a.term.paint(cDim, "⚙"),
+				a.term.paint(cDim, truncRunes(firstLine(title, 78), 78)))
+		case acp.SessionUpdateToolCallUpdate:
+			// 失败的工具调用单独报一行；成功的不报，避免一步两行。
+			if u.ToolCall == nil || !isFailedStatus(u.ToolCall.Status) {
+				return
+			}
+			a.subagentLine("    %s %s", a.term.paint(cRed, "✗"),
+				a.term.paint(cRed, truncRunes(firstLine(firstNonBlank(u.ToolCall.Title, u.ToolCall.Name), 78), 78)))
 		}
 	}
 }
 
-// subagentStderr 把子代理的 stderr 转发出来，便于定位它为什么失败。
-func (a *app) subagentStderr(role string) *prefixWriter {
-	return &prefixWriter{w: os.Stderr, prefix: "[" + role + "] "}
+// isFailedStatus 判断 ACP 工具状态是否是失败终态。
+func isFailedStatus(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "failed", "error", "rejected", "cancelled":
+		return true
+	}
+	return false
 }
+
+// subagentStderr 把子代理的 stderr 转发出来，便于定位它为什么失败。
+//
+// 不再直接写 os.Stderr：TUI 下那会把界面搅乱。交汇一行由 subagentLine 决定去向
+// （界面块 or stderr）。上限两个：单行长度 + 总行数 —— 子代理吐一个超大 JSON 或
+// panic 堆栈时，不兜住就会把主对话刷没。
+func (a *app) subagentStderr(role string) *prefixWriter {
+	return &prefixWriter{
+		prefix:   "[" + role + "] ",
+		maxLines: subagentStderrMaxLines,
+		emit: func(line string) {
+			a.subagentLine("    %s %s", a.term.paint(cYellow, "!"),
+				a.term.paint(cDim, truncRunes(line, 160)))
+		},
+		emitDropped: func(n int) {
+			a.subagentLine("    %s", a.term.paint(cDim,
+				fmt.Sprintf("…（子代理还有 %d 行输出未显示）", n)))
+		},
+	}
+}
+
+// subagentStderrMaxLines 是单个子代理最多回显的 stderr 行数。
+const subagentStderrMaxLines = 24
 
 func firstNonBlank(vals ...string) string {
 	for _, v := range vals {
@@ -305,6 +400,18 @@ func firstNonBlank(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// fmtDuration 把耗时写成 3s / 1m05s（与状态行计时同一个口径）。
+func fmtDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	case d < time.Hour:
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	default:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	}
 }
 
 // formatSubagentResult 把子代理结论组装成给主模型看的文本。
@@ -351,12 +458,18 @@ func formatSubagentResult(role string, res *acp.SubagentResult) string {
 	return b.String()
 }
 
-// prefixWriter 给每行加前缀后写到 w（子代理的 stderr 归并到主进程）。
+// prefixWriter 给每行加前缀后交给 emit（子代理的 stderr 归并到主视图）。
 type prefixWriter struct {
-	w      io.Writer
 	prefix string
-	mu     sync.Mutex
-	line   []byte // 按字节累积，不转 rune
+	emit   func(string)
+	// emitDropped 在超过 maxLines 时被调一次，说明还有多少行没显示。
+	emitDropped func(int)
+	maxLines    int
+
+	mu      sync.Mutex
+	line    []byte // 按字节累积，不转 rune
+	written int
+	dropped int
 }
 
 // prefixMaxLine 是单行缓冲上限。子代理可能输出一整行超大 JSON；不设上限会无界增长。
@@ -388,7 +501,13 @@ func (p *prefixWriter) flushLocked() {
 	if len(p.line) == 0 {
 		return
 	}
-	_, _ = fmt.Fprintf(p.w, "%s%s\n", p.prefix, p.line)
+	if p.maxLines > 0 && p.written >= p.maxLines {
+		p.dropped++
+		p.line = p.line[:0]
+		return
+	}
+	p.written++
+	p.emit(p.prefix + string(p.line))
 	p.line = p.line[:0]
 }
 
@@ -397,4 +516,9 @@ func (p *prefixWriter) Flush() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.flushLocked()
+	if p.dropped > 0 && p.emitDropped != nil {
+		n := p.dropped
+		p.dropped = 0
+		p.emitDropped(n)
+	}
 }

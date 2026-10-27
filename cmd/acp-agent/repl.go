@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/leijux/acp-agent/internal/agent"
@@ -26,7 +27,9 @@ type terminal struct {
 	color  bool
 	quiet  bool // -p 模式：正文不流式重复输出，日志走 stderr
 	// cols 非 0 时直接当作终端列数（测试或已知宽度）。
-	cols     int
+	// 用 atomic：界面 goroutine 在 resize 时写，渲染侧算表格宽度时读，
+	// 后者只在持 t.mu 时调用，所以不能靠 t.mu 保护（会自锁）。
+	cols     atomic.Int64
 	mu       sync.Mutex
 	thinking bool        // 正在输出思考内容（用于换行收尾）
 	inDelta  bool        // 正在流式输出正文
@@ -56,8 +59,8 @@ func isTTY(w io.Writer) bool {
 //
 // 表格要靠它决定要不要截断列：80 列的终端里一张 130 列的表格会折行，边框全乱。
 func (t *terminal) width() int {
-	if t.cols > 0 {
-		return t.cols
+	if w := int(t.cols.Load()); w > 0 {
+		return w
 	}
 	f, ok := t.out.(*os.File)
 	if !ok {
@@ -92,6 +95,9 @@ func (t *terminal) paint(code, s string) string {
 
 // writeRaw 直接写 stdout，不加锁（调用方须已持有 t.mu）。
 func (t *terminal) writeRaw(s string) { fmt.Fprint(t.out, s) }
+
+// setCols 记录终端列数（可由任意 goroutine 调用）。
+func (t *terminal) setCols(w int) { t.cols.Store(int64(w)) }
 
 // markdown 返回流式 Markdown 渲染器（调用方须已持有 t.mu）。
 func (t *terminal) markdown() *mdRenderer {
@@ -139,19 +145,39 @@ func (t *terminal) closeDelta() {
 	}
 }
 
+// fmtTokens 把 token 数写成人类可读的短形式：567 / 1.2k / 12.3k / 123k / 1.2M。
+// 原始数字位数多、秒级变化，看的人反而要多位数才能判断量级。
+func fmtTokens(n int) string {
+	switch {
+	case n < 1000:
+		return strconv.Itoa(n)
+	case n < 999_500:
+		if n < 100_000 {
+			return trimZero(fmt.Sprintf("%.1f", float64(n)/1000)) + "k"
+		}
+		return fmt.Sprintf("%.0fk", float64(n)/1000)
+	default:
+		return trimZero(fmt.Sprintf("%.1f", float64(n)/1_000_000)) + "M"
+	}
+}
+
+// trimZero 去掉 "1.0" 里的 ".0"，避免 "1.0k" 这种冗余写法。
+func trimZero(s string) string { return strings.TrimSuffix(s, ".0") }
+
 func (t *terminal) printUsage(u agent.Usage, elapsed time.Duration) {
 	if u.TotalTokens == 0 && u.Input == 0 {
 		return
 	}
 	t.closeDelta()
+	// 数字都带人类可读单位（1.2k 而不是 1234），量级一眼看得出。
 	parts := []string{
-		fmt.Sprintf("in %d / out %d", u.Input, u.Output),
+		fmt.Sprintf("tokens  in %s / out %s", fmtTokens(u.Input), fmtTokens(u.Output)),
 	}
 	if u.CacheRead > 0 {
-		parts = append(parts, fmt.Sprintf("cache_read %d", u.CacheRead))
+		parts = append(parts, fmt.Sprintf("cache_read %s", fmtTokens(u.CacheRead)))
 	}
 	if u.Reasoning > 0 {
-		parts = append(parts, fmt.Sprintf("reasoning %d", u.Reasoning))
+		parts = append(parts, fmt.Sprintf("reasoning %s", fmtTokens(u.Reasoning)))
 	}
 	if u.Cost.Total > 0 {
 		sym := "$"
@@ -194,17 +220,24 @@ func (a *app) renderHandler() agent.EventHandler {
 			}
 			switch e.Kind {
 			case "thinking":
+				a.setKind(kindThinking)
 				t.mu.Lock()
 				if !t.thinking {
 					if t.md != nil {
 						t.md.Flush() // 收掉正文可能的半行
 					}
-					fmt.Fprint(t.out, t.paint(cDim, "\n[思考] "))
+					if a.ui != nil {
+						// TUI 已有「▾ 思考」块标题，不要再打 [思考] 前缀。
+						fmt.Fprint(t.out, t.paint(cDim, "\n"))
+					} else {
+						fmt.Fprint(t.out, t.paint(cDim, "\n[思考] "))
+					}
 					t.thinking = true
 				}
 				fmt.Fprint(t.out, t.paint(cDim, e.Delta))
 				t.mu.Unlock()
 			case "text":
+				a.setKind(kindText)
 				t.mu.Lock()
 				if t.thinking {
 					fmt.Fprintln(t.out, t.paint(cReset, ""))
@@ -217,6 +250,7 @@ func (a *app) renderHandler() agent.EventHandler {
 
 		case agent.ToolExecutionStartEvent:
 			t.closeDelta()
+			a.setKind(kindTool)
 			arg := summarizeArgs(e.Call.Arguments)
 			quiet("%s %s %s\n", t.paint(cCyan, "→"), t.paint(cBold, e.Call.Name), t.paint(cDim, arg))
 
@@ -237,11 +271,13 @@ func (a *app) renderHandler() agent.EventHandler {
 			quiet("%s %s%s\n", status, t.paint(cBold, e.Call.Name), detail)
 
 		case agent.CompactionEndEvent:
+			a.setKind(kindSystem)
 			quiet("%s\n", t.paint(cYellow,
 				fmt.Sprintf("⚕ 上下文已压缩：%d → %d token", e.TokensBefore, e.TokensAfter)))
 
 		case agent.AgentEndEvent:
 			if e.Err != nil && !errors.Is(e.Err, context.Canceled) {
+				a.setKind(kindSystem)
 				t.closeDelta()
 				t.printf("%s %v\n", t.paint(cRed, "错误:"), e.Err)
 			}
@@ -309,34 +345,33 @@ const replHelp = `
   /model [id]      查看或切换模型
   /tools           列出可用工具
   /cost            本次会话累计用量
+  /copy [n]        复制倒数第 n 条回复（默认 1）到剪贴板
   /save [path]     保存会话
   /session         显示会话文件路径与消息数
   /init            生成 AGENTS.md 模板
+  /mouse [on|off]  开关鼠标（开着才能点折叠与拖选复制，但会抢终端原生拖选）
+  /freeze          把当前内容写进终端 scrollback（之后可用终端滚动回看）
   /exit 或 Ctrl-D  退出
   其它输入        发送给模型
 （运行中按 Esc 中断当前任务，Ctrl-C 退出）
+
+交互界面（默认，Bubble Tea）额外键位：
+  Ctrl-Y          复制最近一条回复到剪贴板
+  鼠标左键拖选     松开即复制选中文本（已带反显高亮）
+  Ctrl-↑/Ctrl-↓   在上一条/下一条提问与回答之间跳转
+  Ctrl-T          折叠/展开思考（也可鼠标点击思考块）
+  PgUp/PgDn 滚轮  滚动查看历史
 `
 
 func (a *app) repl(ctx context.Context, cont bool) error {
-	if cont && a.sessPath == "" {
-		if p := a.store.latest(); p != "" {
-			if s, err := agent.LoadSession(p); err == nil {
-				a.sess = s
-				a.sessPath = p
-				a.agent.SetSession(s)
-			}
-		}
-	}
-	if a.sessPath == "" {
-		a.sessPath = a.store.newPath()
-	}
+	a.ensureSession(cont)
 
 	// 按键层：让 Esc 能在 turn 执行期间即时生效。
 	//
 	// 非终端（管道/重定向）或平台不支持时它拿不到，退回行模式读取 ——
 	// 此时 Esc 不可用，其余功能不变。
 	if a.keys == nil {
-		if w, err := startKeyWatcher(int(os.Stdin.Fd()), a.term.out); err == nil {
+		if w, err := startKeyWatcher(int(os.Stdin.Fd()), a.term.out, &a.term.mu, a.term.width()); err == nil {
 			a.keys = w
 			a.guard.keys = w
 			defer func() {
@@ -355,7 +390,7 @@ func (a *app) repl(ctx context.Context, cont bool) error {
 	a.term.printf("%s\n\n", a.term.paint(cDim, "输入 /help 查看命令，Ctrl-D 退出"))
 
 	for {
-		a.term.printf("%s ", a.term.paint(cBold+cBlue, "›"))
+		a.printPrompt()
 		line, err := a.readLine(ctx)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, errQuitRequested) {
@@ -409,6 +444,15 @@ func (a *app) repl(ctx context.Context, cont bool) error {
 	}
 }
 
+// printPrompt 打印 REPL 提示符，并把它记到按键层（重画整行时要一起写回去）。
+func (a *app) printPrompt() {
+	p := a.term.paint(cBold+cBlue, "›") + " "
+	a.term.printf("%s", p)
+	if a.keys != nil {
+		a.keys.SetPrompt(p)
+	}
+}
+
 // readLine 从按键层读一行；没有按键层（非终端/平台不支持）时退回行模式。
 func (a *app) readLine(ctx context.Context) (string, error) {
 	if a.keys != nil {
@@ -445,6 +489,9 @@ func (a *app) command(ctx context.Context, input string) (bool, error) {
 		a.sess = s
 		a.sessPath = a.store.newPath()
 		a.agent.SetSession(s)
+		if a.ui != nil {
+			a.ui.Reset() // 视图跟着清空，否则旧对话还挂在屏上
+		}
 		a.term.printf("%s\n", a.term.paint(cDim, "已开始新会话 "+a.sessPath))
 		return false, nil
 
@@ -521,6 +568,17 @@ func (a *app) command(ctx context.Context, input string) (bool, error) {
 			u.Input, u.Output, u.CacheRead, u.Reasoning, sym, u.Cost.Total, a.agent.Turns())))
 		return false, nil
 
+	case "/copy":
+		n := 1
+		if arg != "" {
+			v, err := strconv.Atoi(arg)
+			if err != nil || v <= 0 {
+				return false, fmt.Errorf("/copy [n]：n 是倒数第几条回复，默认 1")
+			}
+			n = v
+		}
+		return false, a.copyReply(n)
+
 	case "/save":
 		path := arg
 		if path == "" {
@@ -544,6 +602,26 @@ func (a *app) command(ctx context.Context, input string) (bool, error) {
 
 	case "/init":
 		return false, a.writeAgentsTemplate(arg)
+
+	case "/mouse":
+		if a.ui == nil {
+			return false, fmt.Errorf("鼠标开关只在交互界面（默认）下有效")
+		}
+		on := strings.ToLower(arg) != "off"
+		a.ui.SetMouse(on)
+		if on {
+			a.term.printf("%s\n", a.term.paint(cDim, "已开启鼠标（点击思考块折叠；左键拖选松开即复制）"))
+		} else {
+			a.term.printf("%s\n", a.term.paint(cDim, "已关闭鼠标（/mouse on 恢复）"))
+		}
+		return false, nil
+
+	case "/freeze":
+		if a.ui == nil {
+			return false, fmt.Errorf("/freeze 只在交互界面（默认）下有效")
+		}
+		a.ui.Freeze()
+		return false, nil
 
 	default:
 		return false, fmt.Errorf("未知命令 %s（/help 查看）", cmd)

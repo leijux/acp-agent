@@ -2,14 +2,18 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/leijux/acp-agent/internal/acp"
+	"github.com/leijux/acp-agent/internal/tui"
 )
 
 // buildSpec 决定子代理进程的全部启动参数，错了就是「子代理跑起来不是自己」，
@@ -160,6 +164,11 @@ func TestFormatSubagentResult(t *testing.T) {
 	})
 }
 
+// bufEmitter 把 prefixWriter 的每行输出写进 buffer（带换行，和真实去向一致）。
+func bufEmitter(buf *bytes.Buffer) func(string) {
+	return func(line string) { buf.WriteString(line + "\n") }
+}
+
 func TestPrefixWriter(t *testing.T) {
 	f, err := os.Create(filepath.Join(t.TempDir(), "out.log"))
 	if err != nil {
@@ -167,7 +176,11 @@ func TestPrefixWriter(t *testing.T) {
 	}
 	defer f.Close()
 
-	w := &prefixWriter{w: f, prefix: "[w] "}
+	w := &prefixWriter{prefix: "[w] ", emit: func(s string) {
+		if _, err := fmt.Fprintf(f, "%s\n", s); err != nil {
+			t.Error(err)
+		}
+	}}
 	if _, err := w.Write([]byte("a\nb")); err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +200,7 @@ func TestPrefixWriter(t *testing.T) {
 // 多字节字符不能被转成 U+FFFD（早先按 rune 遍历 string(b) 就会）。
 func TestPrefixWriterKeepsMultibyteChars(t *testing.T) {
 	var buf bytes.Buffer
-	p := &prefixWriter{w: &buf, prefix: "[w] "}
+	p := &prefixWriter{prefix: "[w] ", emit: bufEmitter(&buf)}
 
 	// 把「中文」两个字节能切开：e4 b8 ad | e6 96 87
 	p.Write([]byte{'e', '4', ' ', 0xe4})
@@ -206,7 +219,7 @@ func TestPrefixWriterKeepsMultibyteChars(t *testing.T) {
 // TestPrefixWriterFlushTail 没有结尾换行的内容要靠 Flush 输出。
 func TestPrefixWriterFlushTail(t *testing.T) {
 	var buf bytes.Buffer
-	p := &prefixWriter{w: &buf, prefix: "[w] "}
+	p := &prefixWriter{prefix: "[w] ", emit: bufEmitter(&buf)}
 	p.Write([]byte("没有换行的尾巴"))
 	if buf.Len() != 0 {
 		t.Fatalf("未换行时不应输出: %q", buf.String())
@@ -220,7 +233,7 @@ func TestPrefixWriterFlushTail(t *testing.T) {
 // TestPrefixWriterLineCap 超长单行必须被强制断行，不能无界缓冲。
 func TestPrefixWriterLineCap(t *testing.T) {
 	var buf bytes.Buffer
-	p := &prefixWriter{w: &buf, prefix: "[w] "}
+	p := &prefixWriter{prefix: "[w] ", emit: bufEmitter(&buf)}
 	p.Write(bytes.Repeat([]byte("x"), prefixMaxLine*3))
 	p.Write([]byte("\n"))
 
@@ -236,7 +249,7 @@ func TestPrefixWriterLineCap(t *testing.T) {
 // TestPrefixWriterConcurrentWrites 并发写入不能触发 race（原实现用 lazy chan 做锁）。
 func TestPrefixWriterConcurrentWrites(t *testing.T) {
 	var buf bytes.Buffer
-	p := &prefixWriter{w: &buf, prefix: "[w] "}
+	p := &prefixWriter{prefix: "[w] ", emit: bufEmitter(&buf)}
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -250,5 +263,99 @@ func TestPrefixWriterConcurrentWrites(t *testing.T) {
 	wg.Wait()
 	if got := strings.Count(buf.String(), "\n"); got != 400 {
 		t.Fatalf("输出 %d 行，期望 400", got)
+	}
+}
+
+// 子代理的 stderr 可能很长（panic 堆栈、超长 JSON）：超过上限只报一次“还有 N 行”。
+func TestPrefixWriterMaxLinesCapsOutput(t *testing.T) {
+	var buf bytes.Buffer
+	dropped := 0
+	p := &prefixWriter{
+		prefix:      "[w] ",
+		maxLines:    2,
+		emit:        bufEmitter(&buf),
+		emitDropped: func(n int) { dropped += n },
+	}
+	for i := 0; i < 5; i++ {
+		p.Write([]byte("行\n"))
+	}
+	p.Flush()
+
+	if got := strings.Count(buf.String(), "\n"); got != 2 {
+		t.Fatalf("输出 %d 行，期望被截到 2 行: %q", got, buf.String())
+	}
+	if dropped != 3 {
+		t.Fatalf("dropped = %d，期望 3", dropped)
+	}
+}
+
+// TUI 下子代理活动必须进工具块，不能写 stderr（那会搅乱界面）。
+func TestSubagentLineGoesToToolBlock(t *testing.T) {
+	ui := tui.New(tui.Options{Header: "h"})
+	var stderr bytes.Buffer
+	term := &terminal{out: ui.Sink(), errOut: &stderr}
+	a := &app{ui: ui, term: term}
+
+	a.subagentLine("%s %s", "↳ 子代理", "worker")
+
+	var lines []tui.LineMsg
+	for _, msg := range ui.Pending() {
+		if lm, ok := msg.(tui.LineMsg); ok {
+			lines = append(lines, lm)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("应产生 1 行，实际 %d 行: %+v", len(lines), lines)
+	}
+	if lines[0].Kind != tui.KindTool {
+		t.Fatalf("块类型 = %v，期望 KindTool", lines[0].Kind)
+	}
+	if !strings.Contains(lines[0].Text, "子代理") {
+		t.Fatalf("内容 = %q", lines[0].Text)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("TUI 下不该写 stderr: %q", stderr.String())
+	}
+}
+
+// 非 TUI（-p / --no-tui）仍走 stderr：stdout 是「结果」，不能掺日志。
+func TestSubagentLineUsesStderrWithoutUI(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	term := &terminal{out: &out, errOut: &errBuf}
+	a := &app{term: term}
+
+	a.subagentLine("↳ 子代理 %s 启动", "worker")
+
+	if out.Len() != 0 {
+		t.Fatalf("stdout 不该有子代理日志: %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "子代理") {
+		t.Fatalf("stderr = %q", errBuf.String())
+	}
+}
+
+// 收尾行要报工具次数、耗时和结论预览，否则用户不知道子代理干了什么。
+func TestSubagentDoneShowsSummary(t *testing.T) {
+	ui := tui.New(tui.Options{Header: "h"})
+	term := &terminal{out: ui.Sink(), errOut: io.Discard}
+	a := &app{ui: ui, term: term}
+
+	a.subagentDone("worker", time.Now().Add(-3*time.Second), 4,
+		"改了三个文件\n第二行不该出现", nil)
+
+	var text string
+	for _, msg := range ui.Pending() {
+		if lm, ok := msg.(tui.LineMsg); ok {
+			text += lm.Text + "\n"
+		}
+	}
+	for _, want := range []string{"完成", "4 次工具", "改了三个文件"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("收尾行缺少 %q:\n%s", want, text)
+		}
+	}
+	// 预览只取第一行：整段结论灌进工具块会把主对话刷没。
+	if strings.Contains(text, "第二行不该出现") {
+		t.Fatalf("预览不应包含第二行:\n%s", text)
 	}
 }

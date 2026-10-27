@@ -62,6 +62,9 @@ type guard struct {
 	// stdin 已被它独占），否则退回行模式读 reader。
 	keys *keyWatcher
 
+	// askTUI 非空时把询问交给 Bubble Tea 界面（TUI 模式下 keys 为 nil）。
+	askTUI func(ctx context.Context, name string) (string, error)
+
 	mu       sync.Mutex
 	reader   *bufio.Reader
 	out      io.Writer
@@ -152,11 +155,23 @@ func (g *guard) ask(ctx context.Context, name string) (choice, error) {
 		fmt.Fprintf(g.out, "\n非交互模式，自动拒绝 %s（改用 --permissions auto/readonly，或在 ACP 客户端里确认）\n", name)
 		return choiceNo, nil
 	}
-	fmt.Fprintf(g.out, "\n允许执行 %s？[y]是 / [a]总是 / [n]否 / [d]永不 (默认 n) ", name)
+	if g.askTUI != nil {
+		// TUI 模式：界面自己显示确认行，这里只把答案翻译成选择。
+		ans, err := g.askTUI(ctx, name)
+		if err != nil {
+			return choiceNo, err
+		}
+		return parseChoice(ans), nil
+	}
+
+	q := fmt.Sprintf("\n允许执行 %s？[y]是 / [a]总是 / [n]否 / [d]永不 (默认 n) ", name)
+	fmt.Fprint(g.out, q)
 
 	// REPL 的按键层接管了 stdin（cbreak），询问也从它读行。
 	// 这里不再起 goroutine：ReadLine 本身就响应 ctx 取消。
 	if g.keys != nil {
+		// 记住问句：编辑时要重画「问句 + 输入」，否则会把问句擦掉。
+		g.keys.SetPrompt(q)
 		line, err := g.keys.ReadLine(ctx)
 		if err != nil {
 			return choiceNo, err

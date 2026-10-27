@@ -81,6 +81,10 @@ func (m *mdRenderer) Flush() {
 	m.wrotePartial = false
 }
 
+// pending 报告是否还有「未以换行结尾」的残余。
+// 围栏内的残余不在此列：Flush 会用 codeLine 给它补上换行。
+func (m *mdRenderer) pending() bool { return !m.inFence && m.buf.Len() > 0 }
+
 // Reset 为下一轮对话清状态。
 func (m *mdRenderer) Reset() {
 	m.buf.Reset()

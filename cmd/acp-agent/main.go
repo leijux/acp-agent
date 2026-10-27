@@ -30,6 +30,7 @@ import (
 	"github.com/leijux/acp-agent/internal/mcp"
 	"github.com/leijux/acp-agent/internal/provider"
 	"github.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/tui"
 )
 
 // defaultVersion 是未被 -X 注入时的值，同时充当「是否已注入」的哨兵。
@@ -90,6 +91,7 @@ type flags struct {
 	webSearch      string
 	webSearchKey   string
 	noWeb          bool
+	noTUI          bool
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -124,6 +126,7 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.webSearch, "web-search", "", "web_search 后端：duckduckgo/searxng/tavily/brave/exa/off")
 	fs.StringVar(&f.webSearchKey, "web-search-key", "", "web_search 后端的 API key（searxng/duckduckgo 不需要）")
 	fs.BoolVar(&f.noWeb, "no-web", false, "关闭 web_search/web_fetch")
+	fs.BoolVar(&f.noTUI, "no-tui", false, "用旧版行式 REPL（不用 Bubble Tea 界面）")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "acp-agent %s — 终端编码 agent\n\n", resolveVersion())
@@ -256,6 +259,11 @@ func run() error {
 		}
 		return app.runOnce(ctx, prompt)
 	default:
+		// 真终端默认走 Bubble Tea 界面；stdout 被重定向时退回行式 REPL，
+		// 否则整屏重绘的 ANSI 会把管道/文件写花。
+		if interactive && !f.noTUI && xterm.IsTerminal(int(os.Stdout.Fd())) {
+			return app.tuiRepl(ctx, f.cont)
+		}
 		return app.repl(ctx, f.cont)
 	}
 }
@@ -325,6 +333,9 @@ type app struct {
 
 	// keys 是 REPL 的按键层（仅终端可用）；为 nil 时退回行模式读取。
 	keys *keyWatcher
+
+	// ui 是 Bubble Tea 界面句柄；非 TUI 模式（--no-tui、非终端）下为 nil。
+	ui *tui.UI
 }
 
 func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Model, in *bufio.Reader, term *terminal, cont bool, interactive bool) (*app, error) {
