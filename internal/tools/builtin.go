@@ -695,7 +695,8 @@ func (t *GlobTool) Execute(ctx context.Context, a Args) (Result, error) {
 	}
 	var b strings.Builder
 	for _, m := range matches {
-		b.WriteString(t.Policy.Rel(m) + "\n")
+		b.WriteString(t.Policy.Rel(m))
+		b.WriteString("\n")
 	}
 	if truncated {
 		fmt.Fprintf(&b, "[结果超过 %d 条，已截断]\n", limit)

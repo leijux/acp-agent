@@ -98,7 +98,7 @@ func sortedKeys(m map[string]string) []string {
 
 // ContextFileNames 是自动发现的上下文文件名，按优先级排序。
 // 这与 Pi 的 context files 机制对齐：从工作目录向上找最近的指令文件。
-var ContextFileNames = []string{"AGENTS.md", "CLAUDE.md", "PI.md"}
+var ContextFileNames = []string{"AGENTS.md", "CLAUDE.md"}
 
 // DiscoverContextFiles 从 dir 向上查找上下文文件，每个名字取最近的一份。
 // 到文件系统根或遇到 .git 目录停止。

@@ -27,7 +27,10 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 
 	allowOutside := a.guard != nil && a.guard.mode == modeAuto
 	reg, bashMgr := tools.DefaultRegistry(tools.Options{
-		Policy:       tools.Policy{Root: root, MaxReadBytes: 2 << 20},
+		Policy: tools.Policy{
+			Root: root, MaxReadBytes: 2 << 20,
+			AllowNetworkWrite: allowOutside, // 与 auto 同步：只有全放行模式才能写网络
+		},
 		AllowOutside: allowOutside,
 		MaxParallel:  8,
 		Disable:      registryDisable(a.cfg, a.webUsable),

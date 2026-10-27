@@ -5,6 +5,7 @@
 ```
 acp-agent                     交互式 REPL（流式渲染 + 斜杠命令）
 acp-agent -p "任务"            非交互，stdout 只输出结果
+acp-agent -p --mode json      Pi 兼容：stdout 逐行 JSON 事件（编排器驱动）
 acp-agent --acp               ACP agent 服务（stdio JSON-RPC）
 ```
 
@@ -24,7 +25,7 @@ Windows 为 `%AppData%\acp-agent\config.json`；`ACP_AGENT_CONFIG` 可指定其�
   "provider": "deepseek",
   "model": "deepseek-flash",
   "permissions": "ask",
-  "maxTurns": 100,
+  "maxTurns": 500,
   "temperature": 0.7,
   "thinkingLevel": "medium",
   "root": "D:/golang/acp-agent",
@@ -45,7 +46,7 @@ Windows 为 `%AppData%\acp-agent\config.json`；`ACP_AGENT_CONFIG` 可指定其�
 | `segmenterExpand` | `ACP_AGENT_SEGMENTER_EXPAND` | gse 是否额外输出 CJK bigram，`on`（默认）/ `off`；关掉会丢跨词边界召回 |
 | `root` | `ACP_AGENT_ROOT` | 工具可访问范围，默认 cwd，启动时转绝对路径；`permissions=auto` 下不生效（无边界） |
 | `session` | `ACP_AGENT_SESSION` | 显式指定会话文件；不设则按项目目录自动分配（见下） |
-| `maxTurns` | `ACP_AGENT_MAX_TURNS` | 单次 `Run` 的 assistant 轮数上限，默认 100 |
+| `maxTurns` | `ACP_AGENT_MAX_TURNS` | 单次 `Run` 的 assistant 轮数上限，默认 500（上游 Pi 本身无轮数上限，只靠模型不再调工具自然终止；这里是移植时加的兜底） |
 | `temperature` | `ACP_AGENT_TEMPERATURE` | 非法值静默忽略 |
 | `thinkingLevel` | `ACP_AGENT_THINKING` | `off` / `minimal` / `low` / `medium`（默认）/ `high` / `max`；DeepSeek 侧 `off`→`thinking.type=disabled`、`minimal|low`→`effort=low`、`medium|high`→`effort=high`、`max`→`effort=max`；其他端点不注入该字段 |
 | `disableTools` | — | 不注册的工具名数组 |
@@ -177,7 +178,7 @@ acp-agent -c                   # 接本项目最近一次会话（REPL 与 -p �
 acp-agent --session ./x.jsonl  # 指定文件
 ```
 
-## 三个模式
+## 四个模式
 
 ### 1. REPL（默认 Bubble Tea 界面）
 
@@ -287,6 +288,75 @@ echo "解释这段代码" | acp-agent -p -   # 从 stdin 读 prompt
 
 stdout 只走协议帧。permissions 映射到 `acp.PermissionAllowAll / Ask / ReadOnly`。
 工具执行复用同一个 `tools.Registry`，因此 concurrency-safe 的工具仍然并行。
+
+### 4. Pi 兼容模式（编排器驱动）
+
+有些编排器（例如 Multica 的自托管守护进程）不实现自己的运行时协议，而是按 Pi CLI
+的既有契约驱动本机工具。我们用同一套 argv 伪装成 `pi`：
+
+```bash
+# 编排器实际发的形状：-p 是无值开关，prompt 走 stdin
+echo "把 go.mod 的 Go 版本升到 1.28" \
+  | acp-agent -p --mode json --session /tmp/s.jsonl \
+              --model deepseek/deepseek-flash --thinking high
+```
+
+| 行为 | 说明 |
+|---|---|
+| `-p` / `--print` | 无值开关：后面紧跟**已知 flag**（或没有参数）时按「从 stdin 读 prompt」处理，等价 `-p -`；手打 `-p "任务"`、以及以 `-` 开头的 prompt（如 markdown 列表）原样当值 |
+| `--mode json` | stdout 只输出事件流（`terminal.quiet` 强制打开，人读日志全走 stderr）；**必须同时给 `-p`**，否则直接报错——不然会掉进 REPL/TUI，两种输出撞在同一个 stdout 上 |
+| `--session <路径>` | 原样复用：文件已存在（哪怕是空文件，编排器冷启动会先建）就加载，运行完写回同一路径 |
+| `--model <provider>/<id>` | 目录里的选择器，前缀是已知端点时自动拆成 provider + model；**但只在没指定 provider（或前缀就是当前 provider）时才拆** —— `openrouter` 的模型 ID 天生带斜杠（`openai/gpt-5`），无脑拆会静默换端点、换计费 |
+| `--thinking <level>` | 同 `--thinking` |
+| `--extension <file>` | 从扩展文件里的 `JSON.parse("…")` 取 `mcpServers`，叠加到已读到的 MCP 配置上；脚本里有多处 `JSON.parse` 会逐个试，取第一份带 `mcpServers` 的；找不到会打一行警告。坏条目逐个跳过，不拖垮运行 |
+| `--no-session` / `--no-context-files` | 不读也不写会话文件 / 不注入 `AGENTS.md` 等上下文文件 |
+| `--no-skills` / `--no-prompt-templates` | 接受但忽略（无对应机制） |
+| `--list-models` | 打印 `provider  model  context  max-output` 表格后退出 |
+| `models [--json]` | 打印 `{"models":[{provider,id,selector,…}]}` 后退出 |
+| `--mode rpc` | 不支持，立即以非 0 退出（探测方会回退到 `--list-models`） |
+
+事件流的类型与字段就是 Pi 的那一套（`internal/agent/events.go` 的事件名本来就是照它抄的）：
+
+```jsonc
+{"type":"agent_start"}
+{"type":"turn_start","turn":0}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"改"}}
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"先看"}}
+{"type":"tool_execution_start","toolCallId":"c1","toolName":"read","args":{"path":"a.txt"}}
+{"type":"tool_execution_end","toolCallId":"c1","toolName":"read","result":"…","isError":false}
+{"type":"turn_end","message":{"role":"assistant","model":"deepseek-flash",\
+  "usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15},\
+  "stopReason":"toolUse"}}
+{"type":"agent_end","messages":[…]}
+```
+
+约定：
+
+- **最终结果靠拼 `text_delta`**，不另发一份全文；`turn_end` 的 `usage` 就是这一轮的 token 用量。
+- `turn_end` / `agent_end` 里最后一条 assistant 的 `stopReason=error` 表示 provider 失败；
+  进程退出码同时是非 0（除 `stopReason` 外还带 `errorMessage`）。失败轮次没有正常的
+  `turn_end`（agent 直接跳到 `agent_end`），所以这里会**补发一条** `turn_end`；正常轮次不补，
+  否则调用方会把 usage 算两遍。
+- 事件流里的 `error` 只代表**致命失败**。非致命告警（自动压缩失败等）只写 stderr——
+  它们会被调用方当成整轮失败，而 run 其实还会继续。
+- 事件之间不插入任何非 JSON 行（web 后端降级、权限拒绝提示这类人读内容全部改走
+  stderr）；写管道断了就静默丢弃，不打断 agent；除管道关闭外的写失败（磁盘满、
+  stdout 出错）会记下首个错误并在收尾时变成**非 0 退出码**——否则调用方只看到半截
+  事件流却以为成功。
+- 权限：`--mode json` 下把默认的 `ask` 提成 `auto`（没人能回答询问，`ask` 会把所有改动型
+  工具直接拒掉）；显式 `readonly` 保留。
+- `--session` 指向的文件如果解析不了（半截写入、占位符、别家格式），会备份成
+  `<path>.corrupt-<时间戳>` 后当新会话跑，结果写回同一路径——下一轮仍能 resume，
+  不会因为一个坏文件把这个任务永久钉死。
+
+Multica 侧接入（守护进程不认识新二进制名）：运行时页面 → 该电脑 → **添加自定义运行时** →
+协议族选 **Pi**，命令填 `acp-agent` 的绝对路径；或直接 `MULTICA_PI_PATH=<路径>`。
+skill 注入位置 `.pi/skills/` 我们不读，属于静默失效；`~/.pi/agent/mcp.json` 也不读，
+MCP 请走 `.mcp.json` / `--mcp-json` / `--extension`。
+
+从 `--extension` 拿到的 server 还会过一遍我们自己的校验，两类会**跳过并警告**：
+传输写 `type:"sse"`（我们只走 stdio / streamable-http），以及名字带 `.` `:` 之类字符的
+（本程序只收 `[A-Za-z0-9_-]`）。其余条目照常接上。
 
 ## 权限模型
 

@@ -13,6 +13,8 @@ task build                            # → bin/acp-agent（轻量版，约 20MB
 acp-agent                             # 交互式 REPL（Bubble Tea）
 acp-agent -p "把 go.mod 的 Go 版本升到 1.28 并跑测试"   # 一次性执行
 acp-agent --acp                       # 作为 ACP agent 服务（stdio JSON-RPC，供 Zed 等）
+acp-agent -p --mode json              # Pi 兼容：prompt 读 stdin，stdout 逐行 JSON 事件（供 Multica 等编排器）
+acp-agent --list-models               # 模型目录（Pi 兼容，编排列出 --model 可选值）
 acp-agent --provider ollama --model qwen3-coder
 acp-agent -c                          # 续接当前目录最近一次会话
 acp-agent -endpoints                  # 内置端点与定价

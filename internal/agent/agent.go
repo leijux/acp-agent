@@ -11,6 +11,17 @@ import (
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
+// defaultMaxTurns 是单次 Run 的默认轮数上限。
+//
+// 上限本身是移植时加的防守：上游 Pi 的 agent loop 没有轮数上限，只靠
+// 「模型不再调工具」自然终止（见 @earendil-works/pi-agent-core 的
+// agent-loop.ts runLoop）。这里给一个足够大的值，让长任务不会因为
+// 正常的多轮工具执行被截断，又保留一层「彻底失控」的兜底。
+//
+// 改这里必须同步 cmd/acp-agent/config.go 的 defaultMaxTurns
+// （两个包互相不依赖，各自一份）。
+const defaultMaxTurns = 500
+
 // Options 配置 Agent。
 type Options struct {
 	Provider Provider
@@ -24,7 +35,7 @@ type Options struct {
 	// Context 控制 system prompt 组装。
 	Context ContextOptions
 
-	// MaxTurns 单次 Run 的最大轮数（含工具执行）。0 = 默认 100。
+	// MaxTurns 单次 Run 的最大轮数（含工具执行）。0 = 默认 defaultMaxTurns（500）。
 	MaxTurns int
 	// MaxSteps 单次 Run 的最大模型调用次数。0 = MaxTurns。
 	MaxSteps int
@@ -71,7 +82,7 @@ func (o *Options) normalize() error {
 		o.Session = NewSession()
 	}
 	if o.MaxTurns <= 0 {
-		o.MaxTurns = 100
+		o.MaxTurns = defaultMaxTurns
 	}
 	if o.MaxSteps <= 0 {
 		o.MaxSteps = o.MaxTurns
@@ -513,7 +524,7 @@ func runMessagesSince(s *Session, startIdx int) []Message {
 }
 
 // stream 发起一次模型请求，并把流式增量转成事件。
-func (a *Agent) stream(ctx context.Context, res *RunResult) (*AssistantMessage, error) {
+func (a *Agent) stream(ctx context.Context, _ *RunResult) (*AssistantMessage, error) {
 	partial := &AssistantMessage{Content: nil, StopReason: StopPending, At: now()}
 	started := false
 	sink := &SinkFunc{

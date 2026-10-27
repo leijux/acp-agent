@@ -116,10 +116,20 @@ func (t *terminal) resetMarkdown() {
 	}
 }
 
+// humanOut 返回「人读输出」该去的 writer：正常是 stdout，安静模式（-p /
+// --mode json，stdout 已经另有用途）改走 stderr。
+// 以前各处直接写 t.out，一个 web 配置错误就能把中文塞进事件流。
+func (t *terminal) humanOut() io.Writer {
+	if t.quiet && t.errOut != nil {
+		return t.errOut
+	}
+	return t.out
+}
+
 func (t *terminal) printf(format string, args ...any) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	fmt.Fprintf(t.out, format, args...)
+	fmt.Fprintf(t.humanOut(), format, args...)
 }
 
 func (t *terminal) logf(format string, args ...any) {
@@ -276,9 +286,11 @@ func (a *app) renderHandler() agent.EventHandler {
 				fmt.Sprintf("⚕ 上下文已压缩：%d → %d token", e.TokensBefore, e.TokensAfter)))
 
 		case agent.AgentEndEvent:
-			if e.Err != nil && !errors.Is(e.Err, context.Canceled) {
+			if e.Err != nil && !errors.Is(e.Err, context.Canceled) && !t.quiet {
 				a.setKind(kindSystem)
 				t.closeDelta()
+				// 安静模式下不在这里打：-p / --mode json 的失败原因由 main 统一写一次
+				// stderr（否则同一条错误会出现两次），stdout 也不能掺人读内容。
 				t.printf("%s %v\n", t.paint(cRed, "错误:"), e.Err)
 			}
 		}

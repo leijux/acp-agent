@@ -77,27 +77,36 @@ type flags struct {
 	thinking       string
 	temperature    float64
 	temperatureSet bool
-	acpMode        bool
-	listEndpoints  bool
-	mcpStatus      bool
-	showVersion    bool
-	noColor        bool
-	mcpConfig      string
-	mcpJSON        string
-	disableTools   string
-	noSubagent     bool
-	subagentCmd    string
-	noMCP          bool
-	webSearch      string
-	webSearchKey   string
-	noWeb          bool
-	noTUI          bool
+	// mode 是输出模式："" 是人类交互，"json" 是 Pi 兼容的事件流（供编排器）。
+	mode           string
+	noSession      bool
+	noContextFiles bool
+	// extensions 是 --extension/-e 给出的 Pi 扩展文件（Multica 用它下发 MCP 配置）。
+	extensions    []string
+	acpMode       bool
+	listEndpoints bool
+	mcpStatus     bool
+	showVersion   bool
+	noColor       bool
+	mcpConfig     string
+	mcpJSON       string
+	disableTools  string
+	noSubagent    bool
+	subagentCmd   string
+	noMCP         bool
+	webSearch     string
+	webSearchKey  string
+	noWeb         bool
+	noTUI         bool
 }
 
-func parseFlags(args []string) (*flags, error) {
-	f := &flags{}
+// newFlagSet 注册全部 flag。
+//
+// 单独抽出来是为了让 normalizePiArgs 能查「下一个 token 是不是已知 flag」：
+// 只有已知 flag 才说明那个 -p 是无值开关，否则它就是被当成了 prompt 的值。
+func newFlagSet(f *flags) *flag.FlagSet {
 	fs := flag.NewFlagSet("acp-agent", flag.ContinueOnError)
-	fs.StringVar(&f.print, "p", "", "非交互模式：执行一次 prompt 后退出")
+	fs.StringVar(&f.print, "p", "", "非交互模式：执行一次 prompt 后退出（值为 - 时从 stdin 读）")
 	fs.StringVar(&f.print, "print", "", "非交互模式（同 -p）")
 	fs.StringVar(&f.provider, "provider", "", "模型服务商（deepseek/openai/ollama/...）")
 	fs.StringVar(&f.model, "m", "", "模型 ID")
@@ -113,6 +122,19 @@ func parseFlags(args []string) (*flags, error) {
 	fs.StringVar(&f.thinking, "thinking", "", "思考等级：off/minimal/low/medium/high/max（默认 medium）")
 	fs.Float64Var(&f.temperature, "temperature", 0, "采样温度（推理模型自动忽略）")
 	fs.BoolVar(&f.acpMode, "acp", false, "以 ACP agent 模式运行（stdio JSON-RPC）")
+	fs.StringVar(&f.mode, "mode", "", "输出模式：json（逐行 JSON 事件流，供 Multica 等编排器）；rpc 不支持")
+	fs.BoolVar(&f.noSession, "no-session", false, "不落盘会话文件（Pi 兼容）")
+	fs.BoolVar(&f.noContextFiles, "no-context-files", false, "不注入 AGENTS.md/CLAUDE.md 等上下文文件（Pi 兼容）")
+	// --no-skills / --no-prompt-templates：Pi 探测目录时会带，我们没有对应机制，
+	// 接受但什么都不做，免得那条探测路径直接报未知 flag。
+	fs.Bool("no-skills", false, "兼容 Pi：忽略（无 skill 机制）")
+	fs.Bool("no-prompt-templates", false, "兼容 Pi：忽略（无 prompt 模板机制）")
+	for _, name := range []string{"extension", "e"} {
+		fs.Func(name, "Pi 扩展文件（Multica 用它下发 MCP 配置）；可重复", func(v string) error {
+			f.extensions = append(f.extensions, v)
+			return nil
+		})
+	}
 	fs.BoolVar(&f.listEndpoints, "endpoints", false, "列出内置服务端点后退出")
 	fs.BoolVar(&f.mcpStatus, "mcp-status", false, "连接 MCP server 并打印状态后退出")
 	fs.BoolVar(&f.showVersion, "version", false, "打印版本后退出")
@@ -133,17 +155,27 @@ func parseFlags(args []string) (*flags, error) {
 		fmt.Fprintf(os.Stderr, "用法:\n  acp-agent [flags]            交互式 REPL\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent -p \"任务\" [flags]   执行一次后退出\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent \"任务\" [flags]      同上（位置参数等价于 -p）\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent --acp [flags]      作为 ACP agent 服务\n\n")
+		fmt.Fprintf(os.Stderr, "  acp-agent --acp [flags]      作为 ACP agent 服务\n")
+		fmt.Fprintf(os.Stderr, "  acp-agent -p --mode json     Pi 兼容：prompt 读 stdin，stdout 逐行 JSON 事件\n\n")
 		fmt.Fprintf(os.Stderr, "示例:\n")
 		fmt.Fprintf(os.Stderr, "  export DEEPSEEK_API_KEY=sk-...\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent -p \"列出 internal/ 下所有包的用途\"\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent -c \"接着上次的继续改\"\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent --provider ollama --model qwen3-coder\n")
 		fmt.Fprintf(os.Stderr, "  acp-agent --web-search tavily --web-search-key tvly-... -p \"最新 Go 1.28 有什么变化\"\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent --no-web -p \"离线看一下代码\"\n\n")
+		fmt.Fprintf(os.Stderr, "  acp-agent --no-web -p \"离线看一下代码\"\n")
+		fmt.Fprintf(os.Stderr, "  echo \"任务\" | acp-agent -p --mode json --session /tmp/s.jsonl\n\n")
 		fmt.Fprintf(os.Stderr, "flags:\n")
 		fs.PrintDefaults()
 	}
+	return fs
+}
+
+func parseFlags(args []string) (*flags, error) {
+	f := &flags{}
+	fs := newFlagSet(f)
+	// Pi 那边把 -p 当无值开关用（prompt 走 stdin），先把这种形状归一化。
+	args = normalizePiArgs(args, fs)
 
 	// Go 的 flag 解析遇到第一个非 flag 参数就停止，`acp-agent -c "任务" --provider openai"
 	// 会让后面的 flag 全部被静默丢弃。这里循环解析：每轮把首个位置参数收走，
@@ -178,6 +210,10 @@ func parseFlags(args []string) (*flags, error) {
 }
 
 func run() error {
+	// 模型目录是纯查询命令，不跑 agent，也不用先解析 flag（Pi 兼容）。
+	if handled, err := handlePiCatalog(os.Args[1:], os.Stdout); handled {
+		return err
+	}
 	f, err := parseFlags(os.Args[1:])
 	if err != nil {
 		return err
@@ -199,7 +235,18 @@ func run() error {
 	cfg.applyEnv()
 	// flag 覆盖配置（优先级最高）
 	cfg.applyFlags(f)
+
+	// 在补默认值之前处理 --model 的 "provider/id" 前缀，这样能分清
+	// 「provider 是用户指定的」和「provider 只是 applyDefaults 填的」。
+	applyModelSelector(&cfg)
 	cfg.applyDefaults()
+
+	// Pi 兼容模式（编排器驱动）。
+	if err := applyRunMode(f, &cfg); err != nil {
+		return err
+	}
+	// --extension 里带的是调用方下发的 MCP 配置，叠加到已经读到的配置上。
+	mergePiExtensions(&cfg, f.extensions)
 
 	if abs, err := filepath.Abs(cfg.Root); err == nil {
 		cfg.Root = abs
@@ -228,6 +275,13 @@ func run() error {
 	// -p 模式是一次性非交互运行，同样不该停下来等人。
 	interactive := !f.acpMode && f.print == "" && xterm.IsTerminal(int(os.Stdin.Fd()))
 
+	// quiet 必须在 newApp 之前置位：guard、web 后端这些拿到的 writer 在
+	// 构造时就固化了，晚了它们还会往 stdout 写人读内容（污染管道/事件流）。
+	// -p 模式：正文只在结束时打印一次（stdout 是结果），工具/用量日志走 stderr。
+	if f.print != "" {
+		termOut.quiet = true
+	}
+
 	// 分词器必须在 kernel 首次初始化前装上（进程级共享，选项只生效一次）。
 	installSegmenter(cfg)
 
@@ -238,11 +292,6 @@ func run() error {
 	defer app.close()
 	if f.cont {
 		app.reportContinue()
-	}
-	// -p 模式：正文只在结束时打印一次（stdout 是结果），
-	// 工具/用量日志走 stderr，便于管道处理。
-	if f.print != "" {
-		termOut.quiet = true
 	}
 
 	switch {
@@ -257,7 +306,16 @@ func run() error {
 			}
 			prompt = string(b)
 		}
-		return app.runOnce(ctx, prompt)
+		runErr := app.runOnce(ctx, prompt)
+		// 事件流没写完（磁盘满、stdout 出错）时调用方只看到半截流，
+		// 不能还给它们一个 0。管道被对面关掉不算错，已在 emit 里滤掉。
+		if serr := app.eventStreamErr(); serr != nil {
+			if runErr != nil {
+				return fmt.Errorf("事件流写入失败: %w（run 同时失败: %v）", serr, runErr)
+			}
+			return fmt.Errorf("事件流写入失败: %w", serr)
+		}
+		return runErr
 	default:
 		// 真终端默认走 Bubble Tea 界面；stdout 被重定向时退回行式 REPL，
 		// 否则整屏重绘的 ANSI 会把管道/文件写花。
@@ -336,6 +394,10 @@ type app struct {
 
 	// ui 是 Bubble Tea 界面句柄；非 TUI 模式（--no-tui、非终端）下为 nil。
 	ui *tui.UI
+
+	// jsonSink 是 --mode json 的事件流出口；其它模式下为 nil。
+	// run() 收尾时用它把「事件没写完」变成非 0 退出码。
+	jsonSink *piEventSink
 }
 
 func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Model, in *bufio.Reader, term *terminal, cont bool, interactive bool) (*app, error) {
@@ -343,8 +405,12 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 	if err != nil {
 		return nil, err
 	}
+	if cfg.JSONMode {
+		// 事件流占用 stdout，人读的渲染一律走 stderr。
+		term.quiet = true
+	}
 
-	g := newGuard(mode, in, term.out)
+	g := newGuard(mode, in, term.humanOut())
 	g.interactive = interactive
 
 	// delegate 通过 ACP 驱动另一个 acp-agent 进程（默认就是自身）。
@@ -359,10 +425,15 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 
 	// web 能力（web_search / web_fetch）由 internal/web 提供；
 	// 构造失败（如 tavily 缺 key）时降级为关闭，而不是拦住整个启动。
-	searchProvider, fetchProvider, webUsable := buildWebProviders(cfg, term.out)
+	searchProvider, fetchProvider, webUsable := buildWebProviders(cfg, term.humanOut())
 
 	reg, bashMgr := tools.DefaultRegistry(tools.Options{
-		Policy: tools.Policy{Root: cfg.Root, MaxReadBytes: 2 << 20},
+		Policy: tools.Policy{
+			Root: cfg.Root, MaxReadBytes: 2 << 20,
+			// 写网络（fetch 非 GET/HEAD）只在 auto 下放行：js 不是改动型工具，
+			// ask 下放行就等于绕过了 bash 那条确认路径。
+			AllowNetworkWrite: mode == modeAuto,
+		},
 		// auto 模式已全部放行，root 边界只会让模型绕道 bash（bash 的命令
 		// 本身不受 Root 约束）；ask/readonly 保留边界。
 		AllowOutside: mode == modeAuto,
@@ -398,6 +469,9 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 	}
 
 	contextFiles := agent.DiscoverContextFiles(cfg.Root)
+	if cfg.NoContextFiles {
+		contextFiles = nil
+	}
 	// temperature 用指针表达「是否设置」：0 值不发送，避免覆盖服务端默认。
 	var temperature *float64
 	if cfg.Temperature != 0 {
@@ -444,8 +518,20 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 		started:   time.Now(),
 	}
 	a.On(ap.renderHandler())
+	if cfg.JSONMode {
+		// stdout 只走事件流：人读的渲染仍由 renderHandler 写 stderr（term.quiet）。
+		out := cfg.JSONOut
+		if out == nil {
+			out = os.Stdout
+		}
+		ap.jsonSink = newPiEventSink(out)
+		a.On(piEventHandler(ap.jsonSink, term.errOut))
+	}
 	return ap, nil
 }
+
+// eventStreamErr 报告事件流有没有写完（只有 --mode json 会用到）。
+func (a *app) eventStreamErr() error { return a.jsonSink.Err() }
 
 // loadOrNewSession 决定本次启动用哪个会话：
 //   - 显式指定的文件（--session）优先；
@@ -453,14 +539,7 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 //   - 否则新建一个空会话，真正落盘要等到有消息时（见 app.close）。
 func loadOrNewSession(cfg Config, cont bool) (*agent.Session, string, error) {
 	if cfg.Session != "" {
-		if _, err := os.Stat(cfg.Session); err == nil {
-			s, err := agent.LoadSession(cfg.Session)
-			if err != nil {
-				return nil, "", fmt.Errorf("加载会话 %s: %w", cfg.Session, err)
-			}
-			return s, cfg.Session, nil
-		}
-		return agent.NewSession(), cfg.Session, nil
+		return loadOrResetSession(cfg.Session)
 	}
 	if cont {
 		if p := newSessionStore(cfg.Root).latest(); p != "" {
@@ -470,6 +549,38 @@ func loadOrNewSession(cfg Config, cont bool) (*agent.Session, string, error) {
 		}
 	}
 	return agent.NewSession(), "", nil
+}
+
+// loadOrResetSession 加载调用方指定的会话文件，把「文件坏了」降级成新会话。
+//
+// 编排列器每一轮都会把同一个路径拿回来。以前 LoadSession 一报错就让整个进程
+// 起不来（exit 1），那个任务就永久钉死在这个坏文件上了；现在改为：备份坏文件、
+// 当新会话跑、结果写回同一路径，下一轮又能 resume。
+func loadOrResetSession(path string) (*agent.Session, string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// 文件不存在是正常的：Save 会创建它。
+			return agent.NewSession(), path, nil
+		}
+		fmt.Fprintf(os.Stderr, "警告: 访问会话文件 %s 失败（%v），本次自动分配会话文件\n", path, err)
+		return agent.NewSession(), "", nil
+	}
+	if info.IsDir() {
+		fmt.Fprintf(os.Stderr, "警告: --session %s 是个目录，本次自动分配会话文件\n", path)
+		return agent.NewSession(), "", nil
+	}
+	s, err := agent.LoadSession(path)
+	if err == nil {
+		return s, path, nil
+	}
+	backup := fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix())
+	if rerr := os.Rename(path, backup); rerr == nil {
+		fmt.Fprintf(os.Stderr, "警告: 会话文件 %s 无法解析（%v），已备份为 %s，本次用新会话\n", path, err, backup)
+	} else {
+		fmt.Fprintf(os.Stderr, "警告: 会话文件 %s 无法解析（%v），备份失败（%v），本次用新会话并在结束时覆盖它\n", path, err, rerr)
+	}
+	return agent.NewSession(), path, nil
 }
 
 func (a *app) close() {
@@ -482,6 +593,9 @@ func (a *app) close() {
 // 之前 sessPath 为空时直接 return，导致 -p 模式只有在进程正常退出时
 // （close 里才分配路径）才写盘，中途被 kill 就丢历史。
 func (a *app) saveSession() {
+	if a.cfg.NoSession {
+		return
+	}
 	if len(a.sess.Messages()) == 0 {
 		return
 	}
@@ -515,10 +629,14 @@ func (a *app) runOnce(ctx context.Context, prompt string) error {
 	res, err := a.agent.Run(ctx, prompt)
 	a.saveSession()
 	if res != nil {
-		for _, m := range res.Messages {
-			if am, ok := m.(*agent.AssistantMessage); ok {
-				if t := am.Text(); t != "" {
-					fmt.Fprintln(a.term.out, t)
+		// JSON 模式下文字已经通过 message_update 事件出去了，再打一遍会把
+		// stdout 弄成非法 JSON 行（调用方虽会跳过，但没必要）。
+		if !a.cfg.JSONMode {
+			for _, m := range res.Messages {
+				if am, ok := m.(*agent.AssistantMessage); ok {
+					if t := am.Text(); t != "" {
+						fmt.Fprintln(a.term.out, t)
+					}
 				}
 			}
 		}

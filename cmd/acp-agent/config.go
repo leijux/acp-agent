@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,12 +52,28 @@ type Config struct {
 	// SegmenterExpand 控制 gse 是否额外输出 CJK run 内的 bigram（默认开）。
 	// off 会让 kernel 的 cjkRunTokens 丢掉单字与跨词边界的召回。
 	SegmenterExpand string `json:"segmenterExpand,omitempty"` // "" | on | off
+
+	// JSONMode 由 --mode json 打开：stdout 只输出 Pi 兼容的 JSON 事件流。
+	// 只存在于本次运行，不落盘。
+	JSONMode bool `json:"-"`
+	// NoSession 由 --no-session 打开：不读也不写会话文件。
+	NoSession bool `json:"-"`
+	// JSONOut 是事件流的出口；为空时用 os.Stdout（测试用）。
+	JSONOut io.Writer `json:"-"`
+	// NoContextFiles 由 --no-context-files 打开：不注入 AGENTS.md 等上下文文件。
+	NoContextFiles bool `json:"-"`
 }
 
 const (
 	permAsk      = "ask"
 	permAuto     = "auto"
 	permReadonly = "readonly"
+
+	// defaultMaxTurns 与 internal/agent 的默认轮数保持一致（那里是
+	// defaultMaxTurns=500）。两边各自一份常量是因为 agent 包不能反向依赖 cmd；
+	// 改一个必须同时改另一个，
+	// internal/agent/agent_test.go 的默认值断言会拦住单独改一侧的提交。
+	defaultMaxTurns = 500
 )
 
 // ConfigPath 返回配置文件路径（配置目录下的 config.json，遵循 XDG）。
@@ -263,7 +280,7 @@ func (c *Config) applyDefaults() {
 		c.Permissions = permAsk
 	}
 	if c.MaxTurns <= 0 {
-		c.MaxTurns = 100
+		c.MaxTurns = defaultMaxTurns
 	}
 	if c.Root == "" {
 		if wd, err := os.Getwd(); err == nil {
