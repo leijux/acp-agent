@@ -11,6 +11,7 @@
 | [acp.md](acp.md) | `internal/acp/` | ACP v1 agent 侧：方法表、session/update、权限门禁、通知顺序 |
 | [mcp.md](mcp.md) | `internal/mcp/` | MCP 客户端：mcp.json、官方 SDK 接入、工具命名与权限、结果映射 |
 | [cli.md](cli.md) | `cmd/acp-agent/` | 终端 agent：flag、配置文件、斜杠命令、权限模式、输出约定 |
+| [skills.md](skills.md) | （待实现）`internal/skills/`、`internal/tools/skill.go` | Skills（`.agents/skills`）：发现、frontmatter、prompt 注入、`skill` 工具。**设计已定，代码未实现** |
 
 `internal/provider/`（OpenAI 兼容客户端与 DeepSeek 适配）暂无独立文档，
 端点与模型矩阵运行 `acp-agent -endpoints` 查看，设计说明见根 README「结构」一节。
