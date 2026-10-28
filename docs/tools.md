@@ -119,10 +119,28 @@ go env GOMOD                                 默认 50ms   native 71ms
 | `pwd` | `-L` / `-P` | 解释器的当前 cwd（脚本里 `cd` 之后正确） |
 | `mkdir` | `-p` | |
 | `rm` | `-r/-R/-f/-v` | 危险命令仍由 `Policy.CheckCommand` 在入口拦 |
+| `grep` | `-i -v -n -c -l -L -o -q -w -x -F -E -r/-R -h -H -e` | 见下「内建 grep 的取舍」 |
 
-不在表里的命令（`grep`、`sed`、`awk`、`wc`、`tr`、`sort`、`which`…）仍然要求系统里有真实
+不在表里的命令（`sed`、`awk`、`wc`、`tr`、`sort`、`which`…）仍然要求系统里有真实
 可执行文件。Windows 上想用它们，要么装 Git Bash / MSYS2 / scoop coreutils，要么改用
 `read`/`grep`/`glob` 工具。
+
+#### 内建 grep 的取舍（`shell_builtin_grep.go`）
+
+退出码与 GNU 一致：`0` 有匹配 / `1` 无匹配 / `2` 出错（打不开文件、选项非法、正则无效），
+所以 `grep x f || echo none` 这种写法靠得住。与真 grep 的差异：
+
+| 项 | 内建行为 | 原因 |
+|---|---|---|
+| `-A/-B/-C/-m` | **明确报错退出 2** | 静默当普通匹配更坏：调用方会以为拿到了上下文 |
+| 正则方言 | 默认按扩展正则（ERE，Go RE2） | GNU 默认 BRE 里 `\+`/`\?`/`\{n,m\}` 才特殊，这里反过来；模型写 ERE 远多于 BRE |
+| 二进制文件 | 按字面行扫，不报 `Binary file … matches` | 省一次预扫；日志/代码场景不依赖它 |
+| 递归时符号链接目录 | 不跟随 | `filepath.WalkDir` 的默认语义，避免环 |
+| 递归输出的路径分隔符 | 统一 `/` | 输出要能直接喂回 sh 里的其他命令 |
+
+几个实现细节：用 `bufio.Reader.ReadString` 而不是 `Scanner`（单行 >64KB 时 Scanner 会误判
+EOF）；CRLF 行尾原样保留（`grep x f > out` 不会把文件悄悄改成 LF）；`-l` 命中第一个就停；
+`-F` 且不带 `-i` 时走 `strings.Index`（顺便避开 `ToLower` 改变字节长度导致区间错位）。
 
 已知限制（默认的 interp 引擎）：
 

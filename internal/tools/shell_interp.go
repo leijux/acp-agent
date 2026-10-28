@@ -15,9 +15,14 @@ import (
 )
 
 // shellEngineHint 说明当前执行引擎。
+//
+// 这里的命令名是给模型看的「能用什么」的唯一入口（工具描述不列内建清单，
+// 模型也不会去猜）：新加内建命令时记得同步这一行，否则它就是个存在但
+// 永远不会被想起来的命令。
 func shellEngineHint() string {
 	return "（内置解释器 POSIX/bash 语义；" +
-		"PATH 里没有 ls/cat/head/tail/sleep/pwd/mkdir/rm 时自动用内建实现）"
+		"PATH 里没有 ls/cat/head/tail/sleep/pwd/mkdir/rm/grep 时自动用内建实现，" +
+		"自定义工具 goja 可在管道里执行 JS 做纯计算）"
 }
 
 // newShellProcess 用 mvdan/sh 的纯 Go 解释器执行脚本（默认引擎）。
@@ -28,7 +33,7 @@ func shellEngineHint() string {
 // 支持 POSIX sh + 大部分 bash 语法（[[ ]]、(( )、数组、heredoc、管道、重定向、
 // 函数、set -e/-u/-o pipefail）。内建命令（cd/echo/export/printf/test/…）由
 // 解释器自己实现；awk/sed/git 这类外部命令仍然走 os/exec 调用系统可执行文件。
-// PATH 里找不到的常用命令（sleep/ls/cat/head/tail/pwd/mkdir/rm）由
+// PATH 里找不到的常用命令（sleep/ls/cat/head/tail/pwd/mkdir/rm/grep）由
 // shell_builtin.go 的 ExecHandler 中间件用纯 Go 实现回退，因此纯 Windows 环境
 // （一个 coreutils 都没装）也能跑通。
 func newShellProcess(ctx context.Context, script, dir string, env map[string]string, stdout, stderr io.Writer, policy Policy) (shellProc, error) {
