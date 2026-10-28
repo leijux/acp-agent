@@ -26,7 +26,7 @@ results := ex.Execute(ctx, []tools.Call{
 | `write` | ✅* | 创建或覆盖，自动建父目录。自带路径级互斥（同文件串行、异文件并行） |
 | `edit` | ✅* | 精确替换，要求 `oldText` 唯一；一次可带多个互不重叠的 edits。**读-改-写全程持文件锁**。容错见下方「edit 的文本容错」 |
 | `ls` | ✅ | 列目录，支持 `-a` / `-l` / 递归深度，默认跳过 `node_modules`、`.git` |
-| `glob` | ✅ | `**` 通配，按 mtime 倒序（找最近改动） |
+| `glob` | ✅ | `**` 通配，按 mtime 倒序（找最近改动）。`limit` 截断后保证是**全库最新的 N 个**；候选超过 20000 时如实标注「可能不完整」。pattern 含 `/` 时按相对路径匹配（`*` 不跨目录），不含时按 basename 递归 |
 | `grep` | ✅ | Go 正则，输出 `文件:行号:内容`（上下文行用 `-` 分隔），支持 `glob` 过滤 / `context` 行 / `limit`。内部 4 worker 并发扫描，见下方「grep 的扫描策略」 |
 | `bash` | ✅ | 执行命令；超时或 `background:true` 转后台，返回 `sessionId` |
 | `bash_output` | ✅ | 读后台输出，支持正则 `filter` 轮询 |
@@ -47,6 +47,28 @@ results := ex.Execute(ctx, []tools.Call{
 
 `✅*` 标记的是**自带路径级互斥**的改动型工具（`write`/`edit`）：权限层仍按改动处理，
 但调度上允许并行 —— 同一路径的读-改-写由 `LockFile` 串行化，不同路径真正并行。
+
+### glob 的截断语义（`internal/tools/search.go`）
+
+`glob` 承诺「按修改时间倒序」，所以截断必须按**全量候选的 mtime** 挑，
+不能用「遍历到的前 N 个里最新的几个」冒充。旧实现在 `limit*4` 处直接
+`SkipAll`，实测：1000 个文件、`limit=5` 时返回 `f0020.go`（遍历序靠前的旧文件）
+而不是 `f0999.go`（真正最新）—— 且没有任何提示。
+
+现在的做法：小顶堆（size = `limit`）在遍历过程中维护「最新的 N 个」，
+遍历结束再排序输出。代价是每个匹配文件都要 `d.Info()`（stat），
+全命中场景 20.6ms → ~33ms；半命中/不命中基本持平（去掉了一次重复匹配）。
+
+另外两个行为变化：
+
+- **候选硬上限**：匹配文件超过 20000 个时停止遍历，并在输出里写明
+  「不保证是全库最新的 N 个」—— 让不完整**可见**，而不是静默给错。
+- **pattern 含 `/` 时不再拿 basename 兜底**。`pkg/*.go` 只匹配 `pkg` 这一层
+  （旧实现会把 `pkg/sub/b.go` 也算进来）；不含 `/` 的 `*_test.go` 仍是
+  basename 递归匹配。
+
+`splitStaticPrefix`（把 `src/**/*.go` 的固定前缀下推成遍历根）与
+`globToRegexp` 的正则缓存保持不变。
 
 ### grep 的扫描策略（`internal/tools/grep.go`）
 

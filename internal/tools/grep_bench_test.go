@@ -86,8 +86,8 @@ func BenchmarkGrepBigFile(b *testing.B) {
 		b.Fatal(err)
 	}
 	tool := NewGrepTool(Policy{Root: root})
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		res, err := tool.Execute(context.Background(), Args{"pattern": "NEEDLE", "limit": 100})
 		if err != nil || res.IsError {
 			b.Fatalf("grep: %v %s", err, res.Text())

@@ -685,10 +685,11 @@ func (t *GlobTool) Execute(ctx context.Context, a Args) (Result, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	matches, truncated, err := globFiles(ctx, root, pattern, limit)
+	res, err := globFiles(ctx, root, pattern, limit)
 	if err != nil {
 		return ErrorResult("查找失败：%v", err), nil
 	}
+	matches := res.paths
 	if len(matches) == 0 {
 		return Result{Content: []Block{{Kind: KindText, Text: "没有匹配的文件: " + pattern}}}, nil
 	}
@@ -697,13 +698,19 @@ func (t *GlobTool) Execute(ctx context.Context, a Args) (Result, error) {
 		b.WriteString(t.Policy.Rel(m))
 		b.WriteString("\n")
 	}
-	if truncated {
-		fmt.Fprintf(&b, "[结果超过 %d 条，已截断]\n", limit)
+	if res.truncated {
+		fmt.Fprintf(&b, "[结果超过 %d 条，已按修改时间保留最新的 %d 个]\n", limit, len(matches))
+	}
+	if res.capped {
+		fmt.Fprintf(&b, "[匹配文件超过 %d 个，已停止遍历：以上不保证是全库最新的 %d 个]\n",
+			globMaxCandidates, len(matches))
 	}
 	return Result{
 		Content:   []Block{{Kind: KindText, Text: b.String()}},
-		Truncated: truncated,
-		Details:   map[string]any{"count": len(matches), "pattern": pattern},
+		Truncated: res.truncated || res.capped,
+		Details: map[string]any{
+			"count": len(matches), "pattern": pattern, "capped": res.capped,
+		},
 	}, nil
 }
 
