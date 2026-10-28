@@ -18,6 +18,7 @@ import (
 
 	"github.com/leijux/acp-agent/internal/acp"
 	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/skills"
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
@@ -26,6 +27,12 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 	root := normalizeSessionRoot(cwd, a.cfg.Root)
 
 	allowOutside := a.guard != nil && a.guard.mode == modeAuto
+	// 技能按会话 cwd 重新发现：一个进程服务多个项目时，技能集也得跟着走。
+	skillSet := skills.Discover(skills.Options{
+		Root:       root,
+		ExtraPaths: a.cfg.Skills,
+		Disabled:   a.cfg.DisableSkills,
+	})
 	reg, bashMgr := tools.DefaultRegistry(tools.Options{
 		Policy: tools.Policy{
 			Root: root, MaxReadBytes: 2 << 20,
@@ -37,6 +44,7 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 		Subagent:     a.sessionSubagentRunner(root),
 		Search:       a.search,
 		Fetch:        a.fetch,
+		Skills:       skillSet.Skills,
 	})
 	a.inheritMCPTools(reg)
 
@@ -46,6 +54,7 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 		Context: agent.ContextOptions{
 			WorkingDir:   root,
 			ContextFiles: agent.DiscoverContextFiles(root),
+			Skills:       skillSet.Skills,
 		},
 		Dir: acpSessionDir(root),
 		// 会话独占的 bash 后台进程跟着会话一起回收。

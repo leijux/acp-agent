@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/leijux/acp-agent/internal/skills"
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
@@ -17,6 +18,9 @@ type ContextOptions struct {
 	Sections map[string]string
 	// ContextFiles 是注入的上下文文件（典型是 AGENTS.md 的内容）。
 	ContextFiles []ContextFile
+	// Skills 是发现的技能清单。非空时在「项目上下文」之前注入名单
+	// （只放 name/description/location，正文由 skill 工具按需加载）。
+	Skills []skills.Skill
 	// WorkingDir 供 prompt 里描述环境。
 	WorkingDir string
 	// ExtraInstructions 追加在末尾。
@@ -35,8 +39,8 @@ const DefaultSystemPrompt = `你是一个在用户机器上工作的编码助手
 
 准则：
 - 动手前先读相关代码，不要凭猜测修改。
-- 搜索代码优先用 grep/glob，不要用 bash 里的 grep/find。
-- 修改文件优先用 edit（精确替换）而不是 write（整体覆盖）。
+- 搜索代码优先用 grep/glob ，而不是 bash 里的 grep/find。
+- 修改文件优先用 edit（精确替换），而不是 write（整体覆盖）。
 - 同时需要多个只读探查时，一次发出多个工具调用，它们会并发执行。
 - 改动后运行相关的构建/测试验证，不要声称"应该能过"。
 - 回答简洁，直接说结论和影响，不要复述代码。`
@@ -64,6 +68,14 @@ func BuildSystemPrompt(opts ContextOptions) string {
 		b.WriteString(sk)
 		b.WriteString("\n")
 		b.WriteString(strings.TrimRight(opts.Sections[sk], "\n"))
+		b.WriteString("\n")
+	}
+
+	// 技能名单放在项目上下文之前：它决定「该不该去读某份说明」，比
+	// AGENTS.md 更靠近决策点。只列名单，正文走 skill 工具按需加载。
+	if block := skills.PromptBlock(opts.Skills, 0); block != "" {
+		b.WriteString("\n## Skills\n")
+		b.WriteString(block)
 		b.WriteString("\n")
 	}
 

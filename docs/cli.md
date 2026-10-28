@@ -313,7 +313,8 @@ echo "把 go.mod 的 Go 版本升到 1.28" \
 | `--thinking <level>` | 同 `--thinking` |
 | `--extension <file>` | 从扩展文件里的 `JSON.parse("…")` 取 `mcpServers`，叠加到已读到的 MCP 配置上；脚本里有多处 `JSON.parse` 会逐个试，取第一份带 `mcpServers` 的；找不到会打一行警告。坏条目逐个跳过，不拖垮运行 |
 | `--no-session` / `--no-context-files` | 不读也不写会话文件 / 不注入 `AGENTS.md` 等上下文文件 |
-| `--no-skills` / `--no-prompt-templates` | 接受但忽略（无对应机制） |
+| `--no-skills` | 不加载 `.agents/skills`（技能发现见 [skills.md](skills.md)） |
+| `--no-prompt-templates` | 接受但忽略（无 prompt 模板机制） |
 | `--list-models` | 打印 `provider  model  context  max-output` 表格后退出 |
 | `models [--json]` | 打印 `{"models":[{provider,id,selector,…}]}` 后退出 |
 | `--mode rpc` | 不支持，立即以非 0 退出（探测方会回退到 `--list-models`） |
@@ -354,7 +355,7 @@ echo "把 go.mod 的 Go 版本升到 1.28" \
 
 Multica 侧接入（守护进程不认识新二进制名）：运行时页面 → 该电脑 → **添加自定义运行时** →
 协议族选 **Pi**，命令填 `acp-agent` 的绝对路径；或直接 `MULTICA_PI_PATH=<路径>`。
-skill 注入位置 `.pi/skills/` 我们不读，属于静默失效；`~/.pi/agent/mcp.json` 也不读，
+skill 只读规范的 `.agents/skills/`，Multica 注入的 `.pi/skills/` 不生效（要么改注入路径，要么建软链接，见 [skills.md](skills.md)）；`~/.pi/agent/mcp.json` 也不读，
 MCP 请走 `.mcp.json` / `--mcp-json` / `--extension`。
 
 从 `--extension` 拿到的 server 还会过一遍我们自己的校验，两类会**跳过并警告**：

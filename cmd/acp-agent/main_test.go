@@ -17,6 +17,7 @@ import (
 
 	"github.com/leijux/acp-agent/internal/agent"
 	"github.com/leijux/acp-agent/internal/provider"
+	"github.com/leijux/acp-agent/internal/skills"
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
@@ -340,4 +341,64 @@ func TestWrapRegistry_PreservesMutationAndOrder(t *testing.T) {
 	if !rt.ConcurrencySafe() {
 		t.Error("read 应可并发")
 	}
+}
+
+// 技能接线端到端：项目里的 .agents/skills 要进 system prompt，并注册 skill 工具；
+// --no-skills 时两者都不出现。
+func TestSkillsWiredIntoAgent(t *testing.T) {
+	makeSkill := func(root string) {
+		dir := filepath.Join(root, ".agents", "skills", "pdf-tools")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := "---\nname: pdf-tools\ndescription: Extract text from PDFs.\n---\n# body\n"
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// 让祖先扫描停在 root
+		if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("enabled", func(t *testing.T) {
+		dir := t.TempDir()
+		makeSkill(dir)
+		// 这个用例不跑模型：只要一个不会被打到的 provider。
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		defer srv.Close()
+		a, _ := newTestApp(t, Config{
+			Provider: "deepseek", Model: "deepseek-chat", Root: dir,
+			Permissions: permAuto, MaxTurns: 3,
+		}, srv.URL)
+
+		if _, ok := a.reg.Get("skill"); !ok {
+			t.Fatal("发现技能后应注册 skill 工具")
+		}
+		prompt := agent.BuildSystemPrompt(agent.ContextOptions{
+			Skills: skills.Discover(skills.Options{Root: dir}).Skills,
+		})
+		if !strings.Contains(prompt, "<name>pdf-tools</name>") {
+			t.Fatalf("system prompt 缺少技能名单:\n%s", prompt)
+		}
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		dir := t.TempDir()
+		makeSkill(dir)
+		// 这个用例不跑模型：只要一个不会被打到的 provider。
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		defer srv.Close()
+		a, _ := newTestApp(t, Config{
+			Provider: "deepseek", Model: "deepseek-chat", Root: dir,
+			Permissions: permAuto, MaxTurns: 3, DisableSkills: true,
+		}, srv.URL)
+
+		if _, ok := a.reg.Get("skill"); ok {
+			t.Fatal("--no-skills 时不该注册 skill 工具")
+		}
+		if got := skills.Discover(skills.Options{Root: dir, Disabled: true}).Skills; len(got) != 0 {
+			t.Fatalf("Disabled 时应发现 0 个，实际 %d", len(got))
+		}
+	})
 }

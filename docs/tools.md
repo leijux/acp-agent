@@ -32,6 +32,7 @@ results := ex.Execute(ctx, []tools.Call{
 | `bash_output` | ✅ | 读后台输出，支持正则 `filter` 轮询 |
 | `bash_kill` | ❌ | 杀整个进程组 / 进程树 |
 | `js` | ✅ | 内置 goja 执行 JavaScript：纯计算、JSON 变换、字符串/正则处理，只读 `fs`，同步 `fetch`（出网受超时/次数/字节预算约束） |
+| `skill` | ✅ | 加载 `.agents/skills` 里的技能：无参列清单、`name` 读 SKILL.md 正文、`name`+`file` 读随附脚本/文档。**未发现技能时不注册**（见下方「Skills」） |
 | `todo` | ❌ | 内存态任务清单（replace/add/update/list） |
 | `web_search` | ✅ | 多 query 并发检索；后端在 `internal/web`（duckduckgo 免 key / searxng / tavily / brave / exa） |
 | `web_fetch` | ✅ | 抓正文：HTML→纯文本（去 nav/footer/script，代码块保留围栏）、GB18030/UTF-16 自动解码、字节+字符双上限 |
@@ -69,6 +70,32 @@ results := ex.Execute(ctx, []tools.Call{
 
 `splitStaticPrefix`（把 `src/**/*.go` 的固定前缀下推成遍历根）与
 `globToRegexp` 的正则缓存保持不变。
+
+### Skills：按需加载的指令（`internal/tools/skill.go`）
+
+技能是「目录 + `SKILL.md`」，位置只认规范里的 `.agents/skills`（项目级从 cwd
+向祖先找到 `.git` 根，加上用户级 `~/.agents/skills`）。system prompt 里只放
+name / description / location，**正文按需加载** —— 几十个技能常驻上下文也只花几百 token。
+
+| 调用 | 行为 |
+|---|---|
+| `skill`（无参） | 列出全部技能：名字 + 描述 + 目录 |
+| `skill{name}` | 返回 SKILL.md 正文，前缀 `[skill dir: …]`，并附同目录的随附文件清单 |
+| `skill{name, file}` | 读技能目录下的随附文件（`scripts/`、`references/` 等），路径越出技能目录直接拒绝 |
+
+几个刻意的选择：
+
+- **没有技能时不注册这个工具**。一段只会回答「没有技能」的描述白占 prompt。
+- **工具名与参数名不能改**：`internal/kernel/kernel.dist.cjs` 的 `toolPathOf` 已经把
+  `toolName=="skill"` 的调用归一成 `skill/<name>`，并从 args 的 `name` 取技能名。
+  改名会让压缩/检索段的锚定失效（压缩后相关内容丢掉 `skill/<name>` 标签、BM25 变差）。
+- **让宿主读文件而不是让模型用 read**：用户级技能在 `Policy.Root` 之外，`ask/readonly`
+  下 `read` 会被拒 —— prompt 里给一个读不到的路径等于骗模型。
+- 随附文件只允许读技能目录内的相对路径（技能是外部内容，不能变成任意路径读取器）。
+
+发现规则、frontmatter 字段与校验（缺 `description` 直接跳过、坏 name 只 warning）、
+`--no-skills` / `disableSkills` / `skills` 开关与「为什么不读 `.pi/skills`」都见
+[skills.md](skills.md)。
 
 ### grep 的扫描策略（`internal/tools/grep.go`）
 

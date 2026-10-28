@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/leijux/acp-agent/internal/skills"
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
@@ -678,6 +679,42 @@ func TestBuildSystemPromptOrder(t *testing.T) {
 	}
 	if !(idx("BASE") < idx("RULES") && idx("RULES") < idx("EXTRA")) {
 		t.Fatalf("顺序错误:\n%s", got)
+	}
+}
+
+// 技能名单注入：出现在项目上下文之前，只放 name/description/location，不放正文。
+func TestBuildSystemPromptIncludesSkills(t *testing.T) {
+	got := BuildSystemPrompt(ContextOptions{
+		BasePrompt: "BASE",
+		Skills: []skills.Skill{{
+			Name:        "pdf-tools",
+			Description: "Extract text from PDFs.",
+			Path:        "/home/u/.agents/skills/pdf-tools/SKILL.md",
+			Body:        "SECRET-BODY-SHOULD-NOT-BE-HERE",
+		}},
+		ContextFiles: []ContextFile{{Path: "AGENTS.md", Content: "RULES"}},
+	})
+	idx := func(s string) int { return strings.Index(got, s) }
+	if idx("<name>pdf-tools</name>") < 0 {
+		t.Fatalf("缺少技能名单:\n%s", got)
+	}
+	if !strings.Contains(got, "<location>/home/u/.agents/skills/pdf-tools/SKILL.md</location>") {
+		t.Fatalf("缺少 location:\n%s", got)
+	}
+	if !strings.Contains(got, "## Skills") {
+		t.Fatalf("缺少 Skills 小节:\n%s", got)
+	}
+	if idx("SECRET-BODY-SHOULD-NOT-BE-HERE") >= 0 {
+		t.Fatalf("技能正文不该进 prompt:\n%s", got)
+	}
+	if !(idx("## Skills") < idx("RULES")) {
+		t.Fatalf("技能名单应在项目上下文之前:\n%s", got)
+	}
+
+	// 没有技能时不留空 section
+	plain := BuildSystemPrompt(ContextOptions{BasePrompt: "BASE"})
+	if strings.Contains(plain, "## Skills") || strings.Contains(plain, "available_skills") {
+		t.Fatalf("无技能时不该有 Skills 段:\n%s", plain)
 	}
 }
 

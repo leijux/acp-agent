@@ -126,6 +126,9 @@ func applyRunMode(f *flags, cfg *Config) error {
 		return fmt.Errorf("未知 --mode %q（可选：json）", f.mode)
 	}
 	cfg.NoContextFiles = f.noContextFiles
+	if f.noSkills {
+		cfg.DisableSkills = true
+	}
 	if f.noSession {
 		cfg.Session = ""
 		cfg.NoSession = true

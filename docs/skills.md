@@ -182,22 +182,23 @@ ConcurrencySafe() true
 
 ---
 
-## 9. 文件分工（实现时）
+## 9. 文件分工
 
 | 文件 | 职责 |
 |---|---|
-| `internal/skills/skills.go` | `Skill` 结构、`Discover`（祖先扫描 + 优先级 + 冲突）、frontmatter 解析、校验、prompt 块渲染 |
-| `internal/skills/skills_test.go` | tempdir 造 skill：发现/递归/祖先/优先级/冲突/坏 frontmatter/缺 description/disable-model-invocation |
-| `internal/tools/skill.go` | `skill` 工具（list / load / file） |
-| `internal/tools/skill_test.go` | 未知名字、file 越界、正文与 location 正确 |
-| `internal/agent/context.go` | `ContextOptions.Skills []SkillInfo` + 在「项目上下文」前渲染 |
-| `cmd/acp-agent/main.go`、`acp_sessions.go`、`config.go` | 接线与开关 |
-| `docs/tools.md` | 新增「Skills」一节（工具表加 `skill` 行） |
-| `docs/cli.md` | `--no-skills` 改真话；删掉「skill 注入位置我们不读」 |
+| `internal/skills/skills.go` | `Skill` 结构、`Discover`（祖先扫描 + 优先级 + 冲突）、frontmatter 解析、校验、`PromptBlock` 渲染 |
+| `internal/skills/skills_test.go` | tempdir 造技能：发现/递归/祖先/优先级/冲突/坏 frontmatter/缺 description/disable-model-invocation/块标量/CRLF |
+| `internal/tools/skill.go` | `skill` 工具（list / load / file），随附文件限在技能目录内 |
+| `internal/tools/skill_test.go` | 列表、加载、file 越界拒绝、未知名字给名单、工具契约（名字/参数/只读）、注册开关 |
+| `internal/agent/context.go` | `ContextOptions.Skills` + 在「项目上下文」前渲染 `## Skills` |
+| `cmd/acp-agent/main.go`、`acp_sessions.go`、`config.go`、`pimode.go` | 发现、接线，以及 `--no-skills` / `disableSkills` / `skills` 三个开关 |
 
 ---
 
-## 10. 测试计划
+## 10. 测试覆盖（落地时按此写）
+
+下表已全部落到 `internal/skills/skills_test.go`、`internal/tools/skill_test.go`、
+`internal/agent/agent_test.go` 与 `cmd/acp-agent/*_test.go`。
 
 | 用例 | 断言 |
 |---|---|
@@ -214,7 +215,7 @@ ConcurrencySafe() true
 
 ---
 
-## 11. 实施顺序
+## 11. 实施顺序（已按此落地）
 
 1. `internal/skills`（发现 + 解析 + 校验 + 渲染）+ 单测
 2. `internal/tools/skill.go` + 单测
@@ -222,4 +223,4 @@ ConcurrencySafe() true
 4. `cmd/acp-agent` 接线（`--no-skills` / `disableSkills` / `skills`）+ ACP 会话
 5. 文档（`docs/tools.md`、`docs/cli.md`）
 
-每步独立可测；3 之前不影响任何现有行为。
+每步独立可测；第 3 步（prompt 注入）之前不影响任何现有行为。

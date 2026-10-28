@@ -234,3 +234,35 @@ func TestDataAndConfigPathEnv(t *testing.T) {
 		t.Fatalf("ConfigPath() = %q", got)
 	}
 }
+
+// skills 相关配置：路径列表与关闭开关（--no-skills / disableSkills）。
+func TestConfigSkillsOptions(t *testing.T) {
+	useConfigFile(t, `{"skills": ["extra/skills", "/abs/skills"], "disableSkills": true}`)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Skills) != 2 || cfg.Skills[0] != "extra/skills" || cfg.Skills[1] != "/abs/skills" {
+		t.Fatalf("skills 路径解析不对: %+v", cfg.Skills)
+	}
+	if !cfg.DisableSkills {
+		t.Fatal("disableSkills 未解析")
+	}
+
+	// --no-skills 走 applyRunMode（与 --mode json / -p 同一处）
+	t.Setenv("ACP_AGENT_CONFIG", filepath.Join(t.TempDir(), "missing.json"))
+	base, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.DisableSkills {
+		t.Fatal("默认不该关闭 skills")
+	}
+	withFlag := base
+	if err := applyRunMode(&flags{noSkills: true}, &withFlag); err != nil {
+		t.Fatalf("applyRunMode: %v", err)
+	}
+	if !withFlag.DisableSkills {
+		t.Fatal("--no-skills 应置 DisableSkills")
+	}
+}

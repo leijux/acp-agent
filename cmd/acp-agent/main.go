@@ -29,6 +29,7 @@ import (
 	"github.com/leijux/acp-agent/internal/agent"
 	"github.com/leijux/acp-agent/internal/mcp"
 	"github.com/leijux/acp-agent/internal/provider"
+	"github.com/leijux/acp-agent/internal/skills"
 	"github.com/leijux/acp-agent/internal/tools"
 	"github.com/leijux/acp-agent/internal/tui"
 )
@@ -82,6 +83,7 @@ type flags struct {
 	mode           string
 	noSession      bool
 	noContextFiles bool
+	noSkills       bool
 	// extensions 是 --extension/-e 给出的 Pi 扩展文件（Multica 用它下发 MCP 配置）。
 	extensions    []string
 	acpMode       bool
@@ -126,9 +128,9 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.StringVar(&f.mode, "mode", "", "输出模式：json（逐行 JSON 事件流，供 Multica 等编排器）；rpc 不支持")
 	fs.BoolVar(&f.noSession, "no-session", false, "不落盘会话文件（Pi 兼容）")
 	fs.BoolVar(&f.noContextFiles, "no-context-files", false, "不注入 AGENTS.md/CLAUDE.md 等上下文文件（Pi 兼容）")
-	// --no-skills / --no-prompt-templates：Pi 探测目录时会带，我们没有对应机制，
-	// 接受但什么都不做，免得那条探测路径直接报未知 flag。
-	fs.Bool("no-skills", false, "兼容 Pi：忽略（无 skill 机制）")
+	// --no-skills / --no-prompt-templates：Pi 探测目录时会带。no-skills 现在是
+	// 真的（关掉 .agents/skills 发现）；prompt 模板仍未实现。
+	fs.BoolVar(&f.noSkills, "no-skills", false, "不加载 .agents/skills（Pi 兼容）")
 	fs.Bool("no-prompt-templates", false, "兼容 Pi：忽略（无 prompt 模板机制）")
 	for _, name := range []string{"extension", "e"} {
 		fs.Func(name, "Pi 扩展文件（Multica 用它下发 MCP 配置）；可重复", func(v string) error {
@@ -434,6 +436,14 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 	// 构造失败（如 tavily 缺 key）时降级为关闭，而不是拦住整个启动。
 	searchProvider, fetchProvider, webUsable := buildWebProviders(cfg, term.humanOut())
 
+	// 技能只从规范的 .agents/skills 发现（项目级 + 用户级），
+	// 不读 Pi 私有的 .pi/skills（见 docs/skills.md）。
+	skillSet := skills.Discover(skills.Options{
+		Root:       cfg.Root,
+		ExtraPaths: cfg.Skills,
+		Disabled:   cfg.DisableSkills,
+	})
+
 	reg, bashMgr := tools.DefaultRegistry(tools.Options{
 		Policy: tools.Policy{
 			Root: cfg.Root, MaxReadBytes: 2 << 20,
@@ -449,6 +459,7 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 		Subagent:     runner,
 		Search:       searchProvider,
 		Fetch:        fetchProvider,
+		Skills:       skillSet.Skills,
 	})
 	// 保证子进程在退出时被回收。
 	_ = bashMgr
@@ -494,6 +505,7 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 		Executor: exec,
 		Context: agent.ContextOptions{
 			ContextFiles: contextFiles,
+			Skills:       skillSet.Skills,
 			WorkingDir:   cfg.Root,
 		},
 		MaxTurns:      cfg.MaxTurns,

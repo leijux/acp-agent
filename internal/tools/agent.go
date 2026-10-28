@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/leijux/acp-agent/internal/skills"
 )
 
 // SubagentRunner 由宿实现：在一个干净的上下文里跑子任务，返回结果文本。
@@ -180,6 +182,9 @@ type Options struct {
 	// 用途是 --permissions auto：那里连改动型工具都不用确认，守着 root 只会
 	// 让模型绕道 bash（bash 的命令本身从来不受 Root 约束）。ask/readonly 保留边界。
 	AllowOutside bool
+	// Skills 是发现的技能清单。非空时注册 skill 工具；为空则不注册
+	// （没东西可加载时，一段工具描述只是白占 prompt）。
+	Skills []skills.Skill
 	// Disable 指定不注册的工具名。
 	Disable []string
 }
@@ -229,6 +234,11 @@ func DefaultRegistry(o Options) (*Registry, *BashManager) {
 		if err := r.Register(t); err != nil {
 			panic(err)
 		}
+	}
+	// 没有任何技能时不注册 skill 工具：工具描述本身也占 prompt，
+	// 一个只会回答「没有技能」的工具不值得。
+	if len(o.Skills) > 0 && !disable["skill"] {
+		r.MustRegister(NewSkillTool(o.Skills))
 	}
 	if !disable["parallel"] {
 		r.MustRegister(NewParallelTool(r, o.MaxParallel))

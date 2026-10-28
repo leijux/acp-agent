@@ -66,6 +66,12 @@ type Config struct {
 	JSONOut io.Writer `json:"-"`
 	// NoContextFiles 由 --no-context-files 打开：不注入 AGENTS.md 等上下文文件。
 	NoContextFiles bool `json:"-"`
+
+	// Skills 是额外的技能发现目录（相对 root 或绝对路径）。
+	// 默认位置永远是规范里的 .agents/skills（项目级 + 用户级），这里只追加。
+	Skills []string `json:"skills,omitempty"`
+	// DisableSkills 关闭 .agents/skills 发现（--no-skills / disableSkills）。
+	DisableSkills bool `json:"disableSkills,omitempty"`
 }
 
 const (
