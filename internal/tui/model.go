@@ -71,9 +71,21 @@ type Model struct {
 	needRebuild bool
 	lastCols    int
 
+	// lastKeyAt / loose / looseSeq / looseNL 识别「终端没启用括号粘贴」时的落粘贴。
+	// 那种情况下一次多行粘贴会被拆成一串 runes+Enter+runes…，若不拦，
+	// 每个换行都变成一次提交，一条粘贴就变成好几条消息。
+	// 所以先攒进 loose，停下（或到点）再整体走 inputLine.paste() 折叠。
+	lastKeyAt time.Time
+	loose     strings.Builder
+	looseSeq  int
+	looseNL   bool
+	tailRunes int // 上一次直接插入的字数（落粘贴要拿它把这一段抽回去重折）
+
+	// now 只在测试里替换，nil 用 time.Now。
+	now func() time.Time
+
 	onInterrupt func()
 	onResize    func(w, h int)
-	onCopy      func()
 	onCopyText  func(string)
 }
 
@@ -213,6 +225,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m, m.onKey(msg)
 
+	case loosePasteMsg:
+		// 落粘贴停止输入后的收尾：把攒的整段折叠成 [txt×N行]。
+		if msg.seq == m.looseSeq {
+			m.flushLoose()
+		}
+		return m, nil
+
 	case tea.MouseMsg:
 		return m, m.onMouse(msg)
 	}
@@ -243,11 +262,33 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	rapid := m.touchKey()
+	tail := m.tailRunes // 上一个键直接插进输入行的字数（落粘贴要抽回去重折）
+	m.tailRunes = 0
+	// 突发结束（或来了个不属于粘贴的按键）：先把攒着的落粘贴折进输入行，
+	// 再让这个键按正常语义处理（回车就是要提交、方向键就是要移光标）。
+	if !rapid || (msg.Type != tea.KeyRunes && msg.Type != tea.KeyEnter) {
+		m.flushLoose()
+	}
+
 	switch msg.Type {
 	case tea.KeyEnter:
 		if msg.Alt { // Alt+Enter 不提交（便于敲多行）
 			m.in.insert('\n')
 			return nil
+		}
+		if rapid {
+			// 上一次按键就在几毫秒内，这是粘贴里的换行，不是用户在提交。
+			m.adoptTail(tail)
+			// Windows 的行尾是 \r\n，两个字节都解析成 KeyEnter 且成对出现，
+			// 吞掉第二个，否则每行之间会多出一个空行。
+			if m.looseNL {
+				m.looseNL = false
+				return nil
+			}
+			m.loose.WriteByte('\n')
+			m.looseNL = true
+			return m.looseTick()
 		}
 		m.submit()
 		return nil
@@ -280,13 +321,6 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 
 	case tea.KeyCtrlT:
 		m.toggleRecent()
-		return nil
-
-	case tea.KeyCtrlY:
-		// 复制交给宿主（它才知道要复制什么）；阻塞的剪贴板命令由宿主自己丢到 goroutine。
-		if m.onCopy != nil {
-			m.onCopy()
-		}
 		return nil
 
 	case tea.KeyCtrlUp:
@@ -356,11 +390,26 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeyRunes:
 		if msg.Paste { // 括号粘贴：整段交给输入行（多行/过长会自动折叠成 [txt×N行]）
 			m.in.paste(string(msg.Runes))
+			m.looseNL = false
 			return nil
+		}
+		// 没带括号粘贴标记：只能靠“紧接上一个键（几毫秒内）”识别。
+		// 不能用“一次送来多个字符”当依据：输入法上屏也是一条多字符消息，
+		// 那样会把中文输入延迟到收尾定时器才显示。
+		if rapid {
+			m.adoptTail(tail)
+			for _, r := range string(msg.Runes) {
+				if r >= 0x20 || r == '\t' {
+					m.loose.WriteRune(r)
+				}
+			}
+			m.looseNL = false
+			return m.looseTick()
 		}
 		for _, r := range string(msg.Runes) {
 			if r >= 0x20 || r == '\t' {
 				m.in.insertString(string(r))
+				m.tailRunes++
 			}
 		}
 		return nil
@@ -446,7 +495,74 @@ func (m *Model) onMouse(msg tea.MouseMsg) tea.Cmd {
 
 // ---------- 行为 ----------
 
+// pasteBurstGap 是判断「这几个键是同一批粘贴」的间隔上限。
+//
+// 真粘贴时所有字节是同时到达终端的，相邻消息的间隔是微秒级；人打字（包括
+// 输入法上屏后立刻回车）不会快到这个程度。取 30ms 是为了容下大粘贴里
+// 分块读取（bubbletea 每次最多读 256 字节）引入的抖动。
+const pasteBurstGap = 30 * time.Millisecond
+
+// pasteSettle 是落粘贴「停止输入多久算粘完了」。到点就把攒的内容折成
+// [txt×N行]，用户粘完松手就能看到占位符，不用等下一次按键。
+const pasteSettle = 80 * time.Millisecond
+
+// loosePasteMsg 是落粘贴的收尾定时器。seq 用来作废过期的那个。
+type loosePasteMsg struct{ seq int }
+
+func (m *Model) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// touchKey 记录本次按键时间，返回它是否紧接在上一次按键之后（粘贴特征）。
+func (m *Model) touchKey() bool {
+	now := m.clock()
+	rapid := !m.lastKeyAt.IsZero() && now.Sub(m.lastKeyAt) < pasteBurstGap
+	m.lastKeyAt = now
+	return rapid
+}
+
+// looseTick 安排一次收尾：到 pasteSettle 还没新按键就把攒的折叠进输入行。
+// 每来一个字符就重新计时，所以只有真停下来才会触发。
+func (m *Model) looseTick() tea.Cmd {
+	if m.loose.Len() == 0 {
+		return nil
+	}
+	m.looseSeq++
+	seq := m.looseSeq
+	return tea.Tick(pasteSettle, func(time.Time) tea.Msg { return loosePasteMsg{seq: seq} })
+}
+
+// adoptTail 把上一个键刚直接插进输入行的文字抽回 loose，跟着一起折叠。
+//
+// 只在 loose 还空着时调用（即这个突发里的第一段），已攒了内容就说明
+// 前面的分块已经在 loose 里了。tail 为 0 或光标不在那段文字末尾时不动。
+func (m *Model) adoptTail(tail int) {
+	if tail <= 0 || m.loose.Len() > 0 {
+		return
+	}
+	if s := m.in.takeTail(tail); s != "" {
+		m.loose.WriteString(s)
+	}
+}
+
+// flushLoose 把攒着的落粘贴整段折进输入行（与括号粘贴同一套折叠规则）。
+func (m *Model) flushLoose() {
+	s := m.loose.String()
+	m.loose.Reset()
+	m.looseNL = false
+	m.looseSeq++ // 作废在途的 settle tick
+	m.tailRunes = 0
+	if s == "" {
+		return
+	}
+	m.in.paste(s)
+}
+
 func (m *Model) submit() {
+	m.flushLoose() // 落粘贴可能还没到收尾时间，先折进来再取文本
 	text := strings.TrimSpace(m.in.text())
 	if text == "" {
 		return

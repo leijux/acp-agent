@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -142,6 +143,88 @@ func TestAltEnterNewlineRendersAsSymbol(t *testing.T) {
 	}
 	if !strings.Contains(view, "⏎") {
 		t.Fatalf("渲染应显示 ⏎: %q", view)
+	}
+}
+
+// 终端没启括号粘贴时，一次多行粘贴会变成 runes+Enter+runes… 一串事件。
+// 每个换行都不能当成提交，否则一条粘贴会变成好几条消息发给模型；
+// 而且停下来以后要跟括号粘贴一样折成 [txt×N行]。
+func TestLoosePasteMultilineIsOneMessage(t *testing.T) {
+	m, ui := newTestModel(80, 20)
+	fakeClock(m, time.Millisecond) // 粘贴：所有字符几乎是同一时刻到达的
+
+	send(m, runes("第一行"))
+	send(m, key(tea.KeyEnter)) // 粘贴里的换行（\n）
+	send(m, runes("第二行"))
+	send(m, key(tea.KeyEnter)) // 粘贴里的 \r\n：\r 和 \n 各解析成一个 KeyEnter
+	send(m, key(tea.KeyEnter))
+
+	select {
+	case got := <-ui.submit:
+		t.Fatalf("粘贴中途就提交了: %q", got)
+	default:
+	}
+
+	// 粘完松手：收尾定时器到点，攒的整段折叠成占位符。
+	send(m, loosePasteMsg{seq: m.looseSeq})
+	if got := m.in.text(); got != "第一行\n第二行" {
+		t.Fatalf("展开 = %q，期望两行且 \\r\\n 只算一个换行", got)
+	}
+	if got := string(m.in.buf); got != "[txt×2行]" {
+		t.Fatalf("输入行 = %q，期望整段折成一个 [txt×2行]", got)
+	}
+
+	// 粘贴结束后停下来，再按回车才是真的提交，而且只提交一条。
+	fakeClock(m, 200*time.Millisecond)
+	send(m, key(tea.KeyEnter))
+
+	select {
+	case got := <-ui.submit:
+		if got != "第一行\n第二行" {
+			t.Fatalf("提交 = %q", got)
+		}
+	default:
+		t.Fatal("粘贴结束后回车没有提交")
+	}
+	select {
+	case got := <-ui.submit:
+		t.Fatalf("一次粘贴发出了多条消息，多出: %q", got)
+	default:
+	}
+	if n := len(m.blocks); n != 1 {
+		t.Fatalf("用户块 = %d 个，期望 1 个", n)
+	}
+}
+
+// 打字（键间隔远大于突发窗口）后回车必须照旧提交，不能误判成粘贴。
+func TestTypingThenEnterStillSubmits(t *testing.T) {
+	m, ui := newTestModel(80, 20)
+	fakeClock(m, 80*time.Millisecond)
+
+	send(m, runes("帮我看看"))
+	send(m, key(tea.KeyEnter))
+
+	select {
+	case got := <-ui.submit:
+		if got != "帮我看看" {
+			t.Fatalf("提交 = %q", got)
+		}
+	default:
+		t.Fatalf("回车没有提交，输入行还留着 %q", m.in.text())
+	}
+}
+
+// 输入法上屏也是一条多字符消息，但它不是粘贴：不能延迟显示、不能折叠。
+func TestIMERunesInsertDirectly(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	fakeClock(m, 100*time.Millisecond)
+
+	send(m, runes("你好世界"))
+	if got := string(m.in.buf); got != "你好世界" {
+		t.Fatalf("输入行 = %q，期望直接落字", got)
+	}
+	if len(m.in.pastes) != 0 {
+		t.Fatalf("上屏不该被当成粘贴: %v", m.in.pastes)
 	}
 }
 

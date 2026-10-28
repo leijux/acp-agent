@@ -29,6 +29,26 @@ type pasteRef struct {
 	text  string
 }
 
+// takeTail 把光标前面刚插入的 n 个 rune 抽回去，返回抽出的文本。
+//
+// 用在“没括号粘贴标记”的落粘贴上：第一个分块已经按普通打字插进去了，
+// 等下一个事件确认这是粘贴时再抽回来，跟后面的内容一起折成占位符
+// （否则输入行会变成「第一行[txt×2行]」这种半折半不折的样子）。
+func (in *inputLine) takeTail(n int) string {
+	if n <= 0 || in.cur <= 0 {
+		return ""
+	}
+	start := in.cur
+	for i := 0; i < n && start > 0; i++ {
+		_, size := utf8.DecodeLastRune(in.buf[:start])
+		start -= size
+	}
+	s := string(in.buf[start:in.cur])
+	in.buf = append(in.buf[:start], in.buf[in.cur:]...)
+	in.cur = start
+	return s
+}
+
 // 粘贴折叠阀值：多行必然折叠（单行输入框装不下），单行超过这个长度也折叠。
 const pasteFoldRunes = 300
 

@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -11,8 +12,19 @@ import (
 func newTestModel(w, h int) (*Model, *UI) {
 	ui := &UI{submit: make(chan string, 8), opts: Options{FPS: 30}}
 	m := newModel(ui, Options{Header: "hdr", FPS: 30})
+	// 默认假时钟每次按键走 100ms：模拟人打字（远大于 pasteBurstGap），
+	// 否则连同一条测试里背靠背的 send 都会被当成粘贴突发。
+	// 要测粘贴就自己换一个步长更小的时钟（见 paste_test.go）。
+	fake := time.Time{}
+	m.now = func() time.Time { fake = fake.Add(100 * time.Millisecond); return fake }
 	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return m, ui
+}
+
+// fakeClock 让 m 的按键时间按每次 step 推进（step 小于 pasteBurstGap 即模拟粘贴）。
+func fakeClock(m *Model, step time.Duration) {
+	cur := time.Time{}
+	m.now = func() time.Time { cur = cur.Add(step); return cur }
 }
 
 func send(m *Model, msg tea.Msg) { m.Update(msg) }
