@@ -357,7 +357,6 @@ const replHelp = `
   /model [id]      查看或切换模型
   /tools           列出可用工具
   /cost            本次会话累计用量
-  /copy [n]        复制倒数第 n 条回复（默认 1）到剪贴板
   /save [path]     保存会话
   /session         显示会话文件路径与消息数
   /init            生成 AGENTS.md 模板
@@ -368,7 +367,6 @@ const replHelp = `
 （运行中按 Esc 中断当前任务，Ctrl-C 退出）
 
 交互界面（默认，Bubble Tea）额外键位：
-  Ctrl-Y          复制最近一条回复到剪贴板
   鼠标左键拖选     松开即复制选中文本（已带反显高亮）
   Ctrl-↑/Ctrl-↓   在上一条/下一条提问与回答之间跳转
   Ctrl-T          折叠/展开思考（也可鼠标点击思考块）
@@ -579,17 +577,6 @@ func (a *app) command(ctx context.Context, input string) (bool, error) {
 			"累计 in=%d out=%d cache_read=%d reasoning=%d  %s%.4f  轮数=%d",
 			u.Input, u.Output, u.CacheRead, u.Reasoning, sym, u.Cost.Total, a.agent.Turns())))
 		return false, nil
-
-	case "/copy":
-		n := 1
-		if arg != "" {
-			v, err := strconv.Atoi(arg)
-			if err != nil || v <= 0 {
-				return false, fmt.Errorf("/copy [n]：n 是倒数第几条回复，默认 1")
-			}
-			n = v
-		}
-		return false, a.copyReply(n)
 
 	case "/save":
 		path := arg

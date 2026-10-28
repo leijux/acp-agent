@@ -8,62 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/leijux/acp-agent/internal/agent"
 	"github.com/leijux/acp-agent/internal/tui"
 )
-
-// 建一个带多条助手回复的会话：思考/工具调用/纯工具步骤都要被正确跳过。
-func copySession() *agent.Session {
-	s := agent.NewSession()
-	s.Append(userMsg("问题一"))
-	s.Append(&agent.AssistantMessage{Content: []agent.Block{
-		agent.ThinkingBlock{Thinking: "想一想"},
-		agent.TextBlock{Text: "回答一"},
-		agent.ToolCallBlock{Name: "edit", Arguments: map[string]any{"path": "a.go"}},
-	}})
-	s.Append(&agent.AssistantMessage{Content: []agent.Block{
-		agent.TextBlock{Text: "继续补一句"},
-	}}) // 同一轮的后半段：也算一条回复
-	s.Append(userMsg("问题二"))
-	s.Append(&agent.AssistantMessage{Content: []agent.Block{
-		agent.ToolCallBlock{Name: "read", Arguments: map[string]any{"path": "b.go"}},
-	}}) // 纯工具步骤：没有正文，不算回复
-	s.Append(&agent.AssistantMessage{Content: []agent.Block{
-		agent.TextBlock{Text: "回答二"},
-	}})
-	return s
-}
-
-func TestLastAssistantText(t *testing.T) {
-	a := &app{sess: copySession()}
-
-	if got, _ := a.lastAssistantText(1); got != "回答二" {
-		t.Errorf("倒数第 1 条 = %q, 期望 回答二", got)
-	}
-	if got, _ := a.lastAssistantText(2); got != "继续补一句" {
-		t.Errorf("倒数第 2 条 = %q, 期望 继续补一句", got)
-	}
-	// 思考块、工具调用不能混进复制内容。
-	if got, _ := a.lastAssistantText(3); got != "回答一" {
-		t.Errorf("倒数第 3 条 = %q, 期望 回答一", got)
-	}
-	text, total := a.lastAssistantText(4)
-	if text != "" || total != 3 {
-		t.Errorf("越界应返回空文本 + total=3，实际 %q / %d", text, total)
-	}
-}
-
-func TestAssistantTextOfJoinsBlocks(t *testing.T) {
-	m := &agent.AssistantMessage{Content: []agent.Block{
-		agent.TextBlock{Text: "第一段"},
-		agent.ThinkingBlock{Thinking: "不该出现"},
-		agent.TextBlock{Text: "  第二段  "},
-		agent.ToolCallBlock{Name: "x"},
-	}}
-	if got, want := assistantTextOf(m), "第一段\n\n第二段"; got != want {
-		t.Fatalf("assistantTextOf = %q, 期望 %q", got, want)
-	}
-}
 
 // OSC 52 序列里必须是原文的 base64；tmux 下要包 DCS 透传。
 func TestOsc52SeqEncodesText(t *testing.T) {
@@ -111,7 +57,7 @@ func TestPsClipboardScriptEscapesQuotes(t *testing.T) {
 }
 
 // 复制提示不能粘在流式半行后面（TUI 的 printf 共用同一个行缓冲）。
-// 复现路径：思考内容逐 token 写入且没有换行 → 此时按 Ctrl-Y / 拖选复制。
+// 复现路径：思考内容逐 token 写入且没有换行 → 此时拖选复制。
 func TestNoticeBreaksPendingLine(t *testing.T) {
 	ui := tui.New(tui.Options{Header: "h"})
 	term := &terminal{out: ui.Sink(), errOut: io.Discard}

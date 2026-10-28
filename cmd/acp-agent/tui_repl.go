@@ -71,16 +71,7 @@ func (a *app) tuiRepl(ctx context.Context, cont bool) error {
 
 	ctl := &turnCtl{}
 	ui.OnInterrupt(ctl.stop)
-	// Ctrl-Y：复制最近一条回复。写剪贴板要起子进程（Windows 上还带 PowerShell），
-	// 放到 goroutine 里跑，不能卡住界面的事件循环。
-	ui.OnCopy(func() {
-		go func() {
-			if err := a.copyReply(1); err != nil {
-				a.copyFailure(err)
-			}
-		}()
-	})
-	// 鼠标拖选：松开左键就把选中的文本写剪贴板。同样丢到 goroutine，
+	// 鼠标拖选：松开左键就把选中的文本写剪贴板。丢到 goroutine，
 	// 别让 PowerShell 的启动时间堵住界面。
 	ui.OnCopyText(func(text string) {
 		go func() {

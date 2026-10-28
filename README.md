@@ -27,14 +27,14 @@ acp-agent -mcp-status                 # 连 MCP server 并列出工具
 
 - 提/答分块；**思考块可折叠**（`Ctrl-T` 或点它），一轮结束自动收起。
 - **多行/超长粘贴自动折叠**成 `[txt×12行]` / `[txt×800字]` 占位符（输入框保持单行），提交时展开成原文；`Alt-Enter` 手动换行显示为 `⏎`。
-- **鼠标左键拖选，松开即复制**；`Ctrl-Y` 复制最近一条回复，`/copy [n]` 复制倒数第 n 条（纯文本，不含思考/工具）。
+- **鼠标左键拖选，松开即复制**（纯文本，不含思考/工具）。
 - `Ctrl-↑/↓` 在上一条/下一条问答间跳转；`PgUp/PgDn`/滚轮滚动。
 - 顶部常驻「模型 / ctx 占用百分比 / 权限 / 工作目录」，右下角显示 `● 运行中 12s`。
 - 不占 alt-screen：`/freeze` 把当前全文写进终端 scrollback，之后可用终端原生滚动/搜索回看。
 - `-c`（或 `--session <文件>`）启动即回放历史（最近 160 段，旧思考默认收起）；`--no-tui` 退回旧行式 REPL。
 - 正文边流边渲染 Markdown（代码围栏内不误判格式）；非 TTY / `--no-color` 退化为去标记纯文本。
 
-REPL 命令：`/help /new /compact /context /model /tools /cost /copy /save /session /init /mouse /freeze /exit`。
+REPL 命令：`/help /new /compact /context /model /tools /cost /save /session /init /mouse /freeze /exit`。
 
 ## 关键行为
 

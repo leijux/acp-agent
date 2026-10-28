@@ -3,75 +3,11 @@ package main
 import (
 	"fmt"
 	"strings"
-
-	"github.com/leijux/acp-agent/internal/agent"
 )
 
-// 复制助手回复。
-//
-// 为什么从活动分支取、而不是 a.sess.Messages()：后者是发给模型的投影，
-// 压缩过的前缀已被摘要替代，复制到的是摘要而不是原文。
-// 只取 TextBlock：思考和工具调用用户一般不想要，混进来反而碍事。
+// 拖选复制：界面把选中的纯文本交过来，这里只负责写剪贴板并报一行结果。
 
-// lastAssistantText 返回倒数第 n 条助手回复的正文（n=1 即最近一条），
-// 以及遍历到的助手回复总数（用于「超出范围」提示）。
-func (a *app) lastAssistantText(n int) (string, int) {
-	if a.sess == nil || n <= 0 {
-		return "", 0
-	}
-	branch := a.sess.ActiveBranch()
-	total := 0
-	for i := len(branch) - 1; i >= 0; i-- {
-		e := branch[i]
-		if e == nil || e.Type != agent.EntryMessage {
-			continue
-		}
-		msg, ok := e.Message.(*agent.AssistantMessage)
-		if !ok {
-			continue
-		}
-		text := assistantTextOf(msg)
-		if text == "" {
-			continue // 纯工具调用的中间步骤不算「回复」
-		}
-		total++
-		if total == n {
-			return text, total
-		}
-	}
-	return "", total
-}
-
-// assistantTextOf 把一条助手消息里的正文块拼起来（跳过思考/工具调用）。
-func assistantTextOf(m *agent.AssistantMessage) string {
-	var parts []string
-	for _, blk := range m.Content {
-		if b, ok := blk.(agent.TextBlock); ok {
-			if t := strings.TrimSpace(b.Text); t != "" {
-				parts = append(parts, t)
-			}
-		}
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-// copyReply 复制倒数第 n 条回复，并就地给一行结果提示。
-func (a *app) copyReply(n int) error {
-	text, total := a.lastAssistantText(n)
-	if text == "" {
-		if total == 0 {
-			return fmt.Errorf("还没有可复制的回复")
-		}
-		return fmt.Errorf("只有 %d 条回复（/copy %d 超出范围）", total, n)
-	}
-	label := "最近一条回复"
-	if n > 1 {
-		label = fmt.Sprintf("倒数第 %d 条回复", n)
-	}
-	return a.copyWithNotice(label, text)
-}
-
-// copyWithNotice 写剪贴板并报一行结果（TUI 的拖选复制也走这里）。
+// copyWithNotice 写剪贴板并报一行结果（TUI 的拖选复制走这里）。
 func (a *app) copyWithNotice(label, text string) error {
 	// 先把耗时操作做掉（起子进程 / PowerShell），不占任何锁。
 	how, err := a.copyText(text)

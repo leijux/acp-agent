@@ -255,10 +255,6 @@ func (u *UI) OnInterrupt(fn func()) { u.model.onInterrupt = fn }
 // OnResize 注册终端尺寸变化回调（宿主用它同步渲染宽度）。
 func (u *UI) OnResize(fn func(w, h int)) { u.model.onResize = fn }
 
-// OnCopy 注册 Ctrl-Y 的回调。复制什么是宿主的事（界面不认识“回复”），
-// 所以这里只转达按键；耗时操作（起子进程写剪贴板）由宿主自己并发执行。
-func (u *UI) OnCopy(fn func()) { u.model.onCopy = fn }
-
 // OnCopyText 注册拖选复制回调：鼠标松开时把选中的纯文本交给它。
 // 界面不碰剪贴板（那是平台相关的事，属于宿主）。
 func (u *UI) OnCopyText(fn func(string)) { u.model.onCopyText = fn }
