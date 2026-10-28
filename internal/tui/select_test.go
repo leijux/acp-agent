@@ -190,7 +190,7 @@ func TestPointAtWithScrollOffset(t *testing.T) {
 	}
 	// 选出来的内容必须真的是那一行
 	m.sel = selection{armed: true, active: true, anchor: p, focus: selPoint{row: p.row, col: 99}}
-	if got := m.selectionText(); !strings.HasSuffix(got, fmt.Sprintf("行内容")) ||
+	if got := m.selectionText(); !strings.HasSuffix(got, "行内容") ||
 		!strings.Contains(got, fmt.Sprintf("第%d行内容", p.row)) {
 		t.Fatalf("选区内容 = %q，期望包含第%d行内容", got, p.row)
 	}
