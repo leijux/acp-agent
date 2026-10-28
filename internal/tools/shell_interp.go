@@ -4,6 +4,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -15,7 +16,7 @@ import (
 
 // shellEngineHint 说明当前执行引擎。
 func shellEngineHint() string {
-	return "（引擎：内置解释器，Windows 上也不需要安装 bash；" +
+	return "（内置解释器 POSIX/bash 语义；" +
 		"PATH 里没有 ls/cat/head/tail/sleep/pwd/mkdir/rm 时自动用内建实现）"
 }
 
@@ -99,7 +100,12 @@ func (p *interpProc) Start() error {
 		p.mu.Lock()
 		p.status, p.runErr = 0, nil
 		if err != nil {
-			if st, ok := interp.IsExitStatus(err); ok {
+			if st, ok := func() (status uint8, ok bool) {
+				if es, ok := errors.AsType[interp.ExitStatus](err); ok {
+					return uint8(es), true
+				}
+				return 0, false
+			}(); ok {
 				p.status = int(st)
 			} else {
 				p.status, p.runErr = 1, err
