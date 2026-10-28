@@ -39,7 +39,7 @@ func NewJSToolWithPolicy(p Policy) *JSTool { return &JSTool{Policy: p} }
 func (*JSTool) Name() string { return "js" }
 
 func (*JSTool) Description() string {
-	return "在内置 JavaScript 引擎（goja，纯 Go、跨平台、零外部依赖）里执行脚本，" +
+	return "JavaScript 执行引擎，" +
 		"适合计算、JSON 变换、字符串/正则处理、日期换算。" +
 		"可用 console.log/info/warn/error 输出（会被收集）；脚本最后一个表达式的值作为结果返回。" +
 		"只读文件系统可用：fs.readFile(path)、fs.readDir(path)、fs.stat(path)、fs.exists(path)、" +
