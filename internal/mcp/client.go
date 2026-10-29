@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,12 +92,63 @@ func NewClient(ctx context.Context, name string, cfg ServerConfig, impl Implemen
 	return c, nil
 }
 
+// headerRoundTripper 给 MCP 的每个 HTTP 请求补上配置里的 `headers`。
+//
+// 为什么要自己包一层：go-sdk 的 StreamableClientTransport 只有 Endpoint / HTTPClient
+// 两个字段，没有 headers —— 配了 `Authorization` 如果不挂在 RoundTripper 上，
+// 请求就一个字节都带不出去，对端的 401 会一路冒成
+// `连接 "xxx": calling "initialize": sending "initialize": Unauthorized`。
+//
+// 注入规则：**只补不覆盖**。accept / content-type / mcp-session-id 这些协议头由 SDK
+// 自己设，配置里写错一个 Accept 就能把 SSE 流弄坏，所以已经存在的头一律让位。
+type headerRoundTripper struct {
+	base    http.RoundTripper
+	headers http.Header
+}
+
+func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// 不能改写调用方传进来的 request：RoundTrip 可能与其它请求并发、共享 header map。
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	if clone.Header == nil {
+		clone.Header = http.Header{}
+	}
+	for name, values := range t.headers {
+		if _, ok := clone.Header[name]; ok {
+			continue
+		}
+		clone.Header[name] = values
+	}
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
+}
+
+// headerOf 把配置里的 headers 规范成 http.Header，顺带丢掉空值。
+func headerOf(cfg map[string]string) http.Header {
+	h := make(http.Header, len(cfg))
+	for name, value := range cfg {
+		value = strings.TrimSpace(value)
+		if name = strings.TrimSpace(name); name == "" || value == "" {
+			continue
+		}
+		h.Set(name, value)
+	}
+	return h
+}
+
 // transportFor 按配置选择传输。stdio 模式预置进程属性，保证整棵进程树可回收。
 func transportFor(cfg ServerConfig) (sdkmcp.Transport, *exec.Cmd, error) {
 	if cfg.IsHTTP() {
 		hc := &http.Client{Timeout: 0} // 单次请求超时由调用方 ctx 控制
 		if cfg.Timeout > 0 {
 			hc = &http.Client{Timeout: cfg.requestTimeout()}
+		}
+		// headers（Authorization / 自定义鉴权 / 路由头）必须挂在这里，否则配了也不生效。
+		if h := headerOf(cfg.Headers); len(h) > 0 {
+			hc.Transport = &headerRoundTripper{base: hc.Transport, headers: h}
 		}
 		return &sdkmcp.StreamableClientTransport{
 			Endpoint:   cfg.URL,

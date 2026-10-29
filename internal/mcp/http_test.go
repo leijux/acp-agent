@@ -16,6 +16,12 @@ import (
 // newFakeHTTPServer 用官方 SDK 的 streamable HTTP handler 起一个测试 server。
 func newFakeHTTPServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return newFakeHTTPServerWith(t, nil)
+}
+
+// newFakeHTTPServerWith 同上，但允许在 handler 外面套一层（例如鉴权middleware）。
+func newFakeHTTPServerWith(t *testing.T, wrap func(http.Handler) http.Handler) *httptest.Server {
+	t.Helper()
 
 	readOnly := true
 	build := func() *sdkmcp.Server {
@@ -47,7 +53,11 @@ func newFakeHTTPServer(t *testing.T) *httptest.Server {
 	handler := sdkmcp.NewStreamableHTTPHandler(func(*http.Request) *sdkmcp.Server {
 		return build()
 	}, nil)
-	return httptest.NewServer(handler)
+	var h http.Handler = handler
+	if wrap != nil {
+		h = wrap(h)
+	}
+	return httptest.NewServer(h)
 }
 
 func TestHTTPTransport(t *testing.T) {
@@ -101,6 +111,78 @@ func TestHTTPTransportRejectsErrorStatus(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "500") && !strings.Contains(err.Error(), "连接") {
 		t.Errorf("错误信息不含线索: %v", err)
+	}
+}
+
+// TestHTTPTransportSendsConfiguredHeaders 守住一个真实踩过的坑：mcp.json 里的
+// `headers` 曾经被完全丢掉（go-sdk 的 StreamableClientTransport 只有 Endpoint /
+// HTTPClient，没有 headers 字段），需要 Bearer 的对端一律在
+// `initialize` 上回 401，前端看到的就是 `未连接 ... Unauthorized`。
+func TestHTTPTransportSendsConfiguredHeaders(t *testing.T) {
+	const want = "Bearer YQAV-EAFM"
+
+	// 鉴权 middleware：所有请求（POST initialize / GET SSE / DELETE）都得带对头。
+	var seen []string
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got := r.Header.Get("Authorization"); got != want {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			seen = append(seen, r.Method)
+			next.ServeHTTP(w, r)
+		})
+	}
+	srv := newFakeHTTPServerWith(t, wrap)
+	defer srv.Close()
+
+	cfg := ServerConfig{
+		URL:     srv.URL,
+		Timeout: 30,
+		Headers: map[string]string{"Authorization": "  " + want + "  "},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client, err := NewClient(ctx, "http", cfg, Implementation{Name: "test"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+
+	if defs := client.cachedTools(); len(defs) != 1 {
+		t.Fatalf("tools = %+v", defs)
+	}
+
+	res, err := client.CallTool(ctx, "http-echo", map[string]any{"text": "x"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if txt, ok := res.Content[0].(*sdkmcp.TextContent); !ok || txt.Text != "http:x" {
+		t.Fatalf("content = %#v", res.Content[0])
+	}
+
+	// 握手、列表、调用、SSE 长连接全得经过注入层；一个 POST 都没走到就是没注入。
+	if len(seen) == 0 {
+		t.Fatal("没有任何请求带上 Authorization（headers 未注入）")
+	}
+}
+
+func TestHTTPTransportMissingHeadersFails(t *testing.T) {
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		})
+	}
+	srv := newFakeHTTPServerWith(t, wrap)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	_, err := NewClient(ctx, "http", ServerConfig{URL: srv.URL, Timeout: 5}, Implementation{Name: "test"})
+	if err == nil {
+		t.Fatal("401 时连接应该失败")
 	}
 }
 
