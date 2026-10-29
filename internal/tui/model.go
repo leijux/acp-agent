@@ -920,7 +920,7 @@ func (m *Model) permView() string {
 }
 
 func (m *Model) statusView() string {
-	left := escDim + "↑/↓ 历史 · ⌃↑/↓ 跳消息 · ⌃T 折叠 · PgUp/PgDn 滚动 · /help" + escReset
+	left := escDim + "↑/↓ 历史 · PgUp/PgDn 滚动 · /help" + escReset
 	right := ""
 	if m.running {
 		parts := []string{"● 运行中"}

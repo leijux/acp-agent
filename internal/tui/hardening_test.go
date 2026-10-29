@@ -38,7 +38,7 @@ func TestStatusViewKeepsLeftHintWhenNarrow(t *testing.T) {
 	if !strings.Contains(out, "运行中") {
 		t.Fatalf("窄终端下右侧状态被丢了: %q", out)
 	}
-	if !strings.Contains(out, "⌃↑") {
+	if !strings.Contains(out, "↑/↓") {
 		t.Fatalf("左侧提示应截断保留，而不是整段消失: %q", out)
 	}
 	if !strings.Contains(out, "…") {
