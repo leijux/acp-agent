@@ -46,6 +46,7 @@ var builtinCmds = map[string]builtinCmd{
 	"mkdir": cmdMkdir,
 	"rm":    cmdRm,
 	"grep":  cmdGrep,
+	"cp":    cmdCp,
 }
 
 // builtinExecHandler 返回 ExecHandler 中间件。policy 用于约束需要访问文件的

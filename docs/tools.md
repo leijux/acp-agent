@@ -224,6 +224,7 @@ go env GOMOD                                 默认 50ms   native 71ms
 | `pwd` | `-L` / `-P` | 解释器的当前 cwd（脚本里 `cd` 之后正确） |
 | `mkdir` | `-p` | |
 | `rm` | `-r/-R/-f/-v` | 危险命令仍由 `Policy.CheckCommand` 在入口拦 |
+| `cp` | `-r/-R -f -n` | 默认跟随符号链接；不实现 `-p/-a`；目标是已存在目录时拷成 `dst/<basename>` |
 | `grep` | `-i -v -n -c -l -L -o -q -w -x -F -E -r/-R -h -H -e` | 见下「内建 grep 的取舍」 |
 
 不在表里的命令（`sed`、`awk`、`wc`、`tr`、`sort`、`which`…）仍然要求系统里有真实

@@ -21,7 +21,7 @@ import (
 // 永远不会被想起来的命令。
 func shellEngineHint() string {
 	return "（内置解释器 POSIX/bash 语义；" +
-		"PATH 里没有 ls/cat/head/tail/sleep/pwd/mkdir/rm/grep 时自动用内建实现，" +
+		"PATH 里没有 ls/cat/head/tail/sleep/pwd/mkdir/rm/cp/grep 时自动用内建实现，" +
 		"自定义工具 goja 可在管道里执行 JS 做纯计算）"
 }
 
