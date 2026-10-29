@@ -84,7 +84,8 @@ type flags struct {
 	noSession      bool
 	noContextFiles bool
 	noSkills       bool
-	// extensions 是 --extension/-e 给出的 Pi 扩展文件（Multica 用它下发 MCP 配置）。
+	// extensions 是 --extension/-e 给出的 Pi 扩展文件。我们不执行扩展 JS，只从
+// 文件里提取 mcpServers（某些编排器用它下发受管 MCP 配置）。
 	extensions    []string
 	acpMode       bool
 	listEndpoints bool
@@ -133,7 +134,7 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.BoolVar(&f.noSkills, "no-skills", false, "不加载 .agents/skills（Pi 兼容）")
 	fs.Bool("no-prompt-templates", false, "兼容 Pi：忽略（无 prompt 模板机制）")
 	for _, name := range []string{"extension", "e"} {
-		fs.Func(name, "Pi 扩展文件（Multica 用它下发 MCP 配置）；可重复", func(v string) error {
+		fs.Func(name, "Pi 扩展文件；只提取其中的 mcpServers 作为 MCP 配置（不执行扩展 JS），可重复", func(v string) error {
 			f.extensions = append(f.extensions, v)
 			return nil
 		})

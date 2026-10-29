@@ -309,11 +309,11 @@ func splitModelSelector(selector string) (providerName, modelID string, ok bool)
 	return selector[:idx], selector[idx+1:], true
 }
 
-// ── --extension：Multica 通过它下发受管 MCP 配置 ──
+// ── --extension：从 Pi 扩展文件里提取受管 MCP 配置 ──
 
 // piExtensionMCPServers 从 Pi 扩展文件里取出受管 MCP server。
 //
-// Multica 生成的 mcp-extension.mjs 形如：
+// 编排器生成的扩展文件形如（Pi 会执行它，我们只抠字符串）：
 //
 //	const servers = JSON.parse("{\"mcpServers\":{…}}");
 //	export default function (pi) { … pi.registerMcpServer(name, config) … }
