@@ -80,11 +80,22 @@ func describeSources(cfg Config, mc *mcp.Config) string {
 	if mc != nil {
 		parts = append(parts, mc.SourceFiles...)
 	}
-	if looksLikeJSON(cfg.MCPConfig) {
+	switch {
+	case looksLikeJSON(cfg.MCPConfig):
 		parts = append(parts, "内联 JSON（--mcp-config）")
+	case cfg.MCPConfig != "":
+		// 显式指定的文件以前完全不显示，排查来源时最需要它。
+		parts = append(parts, cfg.MCPConfig+"（--mcp-config）")
 	}
-	if strings.TrimSpace(cfg.MCPJSON) != "" {
+	// 判 --mcp-json 要看 hadInlineJSON：扩展会被合并进 MCPJSON，只看
+	// MCPJSON != "" 会把「扩展」误报成「--mcp-json」。没有扩展文件时
+	// MCPJSON 非空必然来自调用方，照旧显示（这条兜底让直接构造 Config 的
+	// 调用方/测试不必关心那个内部标志）。
+	if cfg.hadInlineJSON || (strings.TrimSpace(cfg.MCPJSON) != "" && len(cfg.ExtensionFiles) == 0) {
 		parts = append(parts, "内联 JSON（--mcp-json）")
+	}
+	if len(cfg.ExtensionFiles) > 0 {
+		parts = append(parts, "Pi 扩展（"+strings.Join(cfg.ExtensionFiles, ", ")+"）")
 	}
 	if len(parts) == 0 {
 		return "无配置文件"
@@ -126,8 +137,13 @@ func runMCPStatus(ctx context.Context, cfg Config) error {
 	default:
 		fmt.Printf("搜索顺序: %s\n", strings.Join(mcp.DefaultPaths(cfg.Root), "  →  "))
 	}
-	if strings.TrimSpace(cfg.MCPJSON) != "" {
+	// 与 describeSources 同一套判断：扩展会写进 MCPJSON，不能一看 MCPJSON
+	// 非空就说「叠加了 --mcp-json」。
+	if cfg.hadInlineJSON || (strings.TrimSpace(cfg.MCPJSON) != "" && len(cfg.ExtensionFiles) == 0) {
 		fmt.Println("（并叠加了 --mcp-json 内联配置）")
+	}
+	if len(cfg.ExtensionFiles) > 0 {
+		fmt.Println("（并叠加了 Pi 扩展里的 MCP 配置）")
 	}
 	if len(mcpCfg.MCPServers) == 0 {
 		fmt.Println("未配置任何 MCP server。")

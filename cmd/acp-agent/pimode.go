@@ -381,6 +381,10 @@ func mergePiExtensions(cfg *Config, paths []string) {
 	if len(paths) == 0 || cfg.NoMCP {
 		return
 	}
+	// 先记调用方原本有没有给 --mcp-json（下面会把扩展也并进 MCPJSON）。
+	if strings.TrimSpace(cfg.MCPJSON) != "" {
+		cfg.hadInlineJSON = true
+	}
 	merged := map[string]json.RawMessage{}
 	for _, path := range paths {
 		servers, err := piExtensionMCPServers(path)
@@ -393,6 +397,7 @@ func mergePiExtensions(cfg *Config, paths []string) {
 			fmt.Fprintf(os.Stderr, "警告: Pi 扩展 %s 里没找到 mcpServers，本次不注入受管 MCP\n", path)
 			continue
 		}
+		contributed := 0
 		for name, raw := range servers {
 			// 逐个隔离：一个写错的 server 不能把整轮运行拖下水（本地配置仍然严格）。
 			var sc mcp.ServerConfig
@@ -405,6 +410,10 @@ func mergePiExtensions(cfg *Config, paths []string) {
 				continue
 			}
 			merged[name] = raw
+			contributed++
+		}
+		if contributed > 0 {
+			cfg.ExtensionFiles = append(cfg.ExtensionFiles, path)
 		}
 	}
 	if len(merged) == 0 {

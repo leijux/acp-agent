@@ -933,3 +933,54 @@ func TestLoadOrResetSession_DirectoryPicksNewPath(t *testing.T) {
 		t.Errorf("应是空会话，得到 %d 条", len(sess.Messages()))
 	}
 }
+
+// -mcp-status 的来源行必须能分出来：扩展贡献的 server 不该被标成 --mcp-json，
+// 显式 --mcp-config <路径> 也不该整段消失。
+func TestDescribeSourcesDistinguishesOrigins(t *testing.T) {
+	dir := t.TempDir()
+	ext := filepath.Join(dir, "mcp-extension.mjs")
+	inner := `{"mcpServers":{"managed":{"command":"real-binary"}}}`
+	quoted, err := json.Marshal(inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := "const servers = JSON.parse(" + string(quoted) + ");\n"
+	if err := os.WriteFile(ext, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("extension-only", func(t *testing.T) {
+		cfg := Config{Root: dir}
+		mergePiExtensions(&cfg, []string{ext})
+		got := describeSources(cfg, nil)
+		if !strings.Contains(got, "Pi 扩展（"+ext+"）") {
+			t.Fatalf("来源里应有扩展文件路径: %q", got)
+		}
+		if strings.Contains(got, "--mcp-json") {
+			t.Fatalf("扩展不该被标成 --mcp-json: %q", got)
+		}
+	})
+
+	t.Run("extension-plus-inline", func(t *testing.T) {
+		cfg := Config{Root: dir, MCPJSON: `{"mcpServers":{"local":{"command":"x"}}}`}
+		mergePiExtensions(&cfg, []string{ext})
+		got := describeSources(cfg, nil)
+		if !strings.Contains(got, "--mcp-json") || !strings.Contains(got, "Pi 扩展") {
+			t.Fatalf("两者都应出现: %q", got)
+		}
+	})
+
+	t.Run("mcp-config-file", func(t *testing.T) {
+		cfg := Config{MCPConfig: filepath.Join(dir, "custom.json")}
+		got := describeSources(cfg, nil)
+		if !strings.Contains(got, "custom.json（--mcp-config）") {
+			t.Fatalf("显式配置路径不该消失: %q", got)
+		}
+	})
+
+	t.Run("nothing", func(t *testing.T) {
+		if got := describeSources(Config{}, nil); got != "无配置文件" {
+			t.Fatalf("空配置 = %q", got)
+		}
+	})
+}

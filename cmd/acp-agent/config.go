@@ -72,6 +72,13 @@ type Config struct {
 	Skills []string `json:"skills,omitempty"`
 	// DisableSkills 关闭 .agents/skills 发现（--no-skills / disableSkills）。
 	DisableSkills bool `json:"disableSkills,omitempty"`
+
+	// ExtensionFiles 记录本次从 --extension 里真的取到 mcpServers 的文件，
+	// 只用于 -mcp-status 的来源显示（合并结果写进 MCPJSON 后就分不清来源了）。
+	ExtensionFiles []string `json:"-"`
+	// hadInlineJSON 记录 --mcp-json 是否由调用方给出：mergePiExtensions 会把
+	// 扩展合并进 MCPJSON，事后再看 MCPJSON 无法区分「用户传的」与「扩展来的」。
+	hadInlineJSON bool
 }
 
 const (
