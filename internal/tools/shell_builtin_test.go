@@ -247,7 +247,8 @@ func TestBuiltinSleepInterruptible(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		_, done, _, _ := bt.Manager.Read(id, "")
+		readRes, _ := bt.Manager.Read(ctx_(), id, 0, "", WaitNone, 0)
+		done := readRes.Done
 		if done {
 			if d := time.Since(start); d > 2*time.Second {
 				t.Fatalf("kill 后 %v 才结束", d)

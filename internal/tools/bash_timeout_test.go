@@ -37,7 +37,7 @@ func TestBashTimeoutDoesNotReexecute(t *testing.T) {
 	// 等后台进程结束，再确认只追加了一次。
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, done, _, _ := bt.Manager.Read(id, ""); done {
+		if res, err := bt.Manager.Read(ctx_(), id, 0, "", WaitNone, 0); err == nil && res.Done {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -79,7 +79,7 @@ func killAndWait(t *testing.T, m *BashManager, id string) {
 	_ = m.Kill(id)
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, done, _, err := m.Read(id, ""); err != nil || done {
+		if res, err := m.Read(ctx_(), id, 0, "", WaitNone, 0); err != nil || res.Done {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)

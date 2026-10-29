@@ -29,7 +29,7 @@ results := ex.Execute(ctx, []tools.Call{
 | `glob` | ✅ | `**` 通配，按 mtime 倒序（找最近改动）。`limit` 截断后保证是**全库最新的 N 个**；候选超过 20000 时如实标注「可能不完整」。pattern 含 `/` 时按相对路径匹配（`*` 不跨目录），不含时按 basename 递归 |
 | `grep` | ✅ | Go 正则，输出 `文件:行号:内容`（上下文行用 `-` 分隔），支持 `glob` 过滤 / `context` 行 / `limit`。内部 4 worker 并发扫描，见下方「grep 的扫描策略」 |
 | `bash` | ✅ | 执行命令；超时或 `background:true` 转后台，返回 `sessionId` |
-| `bash_output` | ✅ | 读后台输出，支持正则 `filter` 轮询 |
+| `bash_output` | ✅ | 读后台输出：正则 `filter`、`cursor` 增量读、`wait=output/exit` 阻塞等待（见下方「后台任务的等待」） |
 | `bash_kill` | ❌ | 杀整个进程组 / 进程树 |
 | `js` | ✅ | 内置 goja 执行 JavaScript：纯计算、JSON 变换、字符串/正则处理，只读 `fs`，同步 `fetch`（出网受超时/次数/字节预算约束） |
 | `skill` | ✅ | 加载 `.agents/skills` 里的技能：无参列清单、`name` 读 SKILL.md 正文、`name`+`file` 读随附脚本/文档。**未发现技能时不注册**（见下方「Skills」） |
@@ -96,6 +96,34 @@ name / description / location，**正文按需加载** —— 几十个技能常
 发现规则、frontmatter 字段与校验（缺 `description` 直接跳过、坏 name 只 warning）、
 `--no-skills` / `disableSkills` / `skills` 开关与「为什么不读 `.pi/skills`」都见
 [skills.md](skills.md)。
+
+### 后台任务的等待（`bash_output`）
+
+后台命令（`background:true` 或前台超时被接管）以前只能靠模型反复轮询
+`bash_output`，或者前台 `sleep N` 死等：一次两分钟的任务要耗掉好几轮模型往返，
+而且每次返回的是**从头开始的全部输出**（截断到 16KB），token 成倍浪费。
+
+现在 `bash_output` 有三件事：
+
+| 参数 | 作用 |
+|---|---|
+| `cursor` | 从上次返回的 `[cursor N]` 之后开始读，只要新增内容 |
+| `wait: "output"` | 阻塞到**出现新输出**（默认超时 5s）——判断命令有没有起来 |
+| `wait: "exit"` | 阻塞到**进程结束**（默认超时 60s，上限 300s）——跑完再叫我 |
+
+实现要点：
+
+- 唤醒用 `bashSession.notify`（容量 1 的 channel，非阻塞发送）：reader 每写一行、
+  `done` 置位、`Kill` 都 signal 一次。等待方 `select` 在 notify / ctx.Done / 定时器上。
+- **ctx 取消必须能打断等待**：用户按 Esc 取消 turn 时，等待立刻返回当前快照并标
+  `[running, 等待已取消]`，不能把 turn 挂住。
+- **同一会话只允许一个等待者**：第二个调用拿快照立即返回（否则 `parallel` 里几个
+  `bash_output` 会一起占住 executor 的槽位）。
+- **cursor 只推进到最后一个完整行的末尾**：写了一半的行留在游标后面，下次连剩余
+  部分一起发，不重复也不丢；整块没有换行时（进度条、超长单行）照常推进，否则永远
+  读不到。
+- 前台超时被接管的会话走 `sharedOutput`，它的写入也接了 signal，两种来源行为一致。
+- 结果状态行保持旧格式 `[running]` / `[done(exit N)]`，只在等待超时/取消时加后缀。
 
 ### grep 的扫描策略（`internal/tools/grep.go`）
 

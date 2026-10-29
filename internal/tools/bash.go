@@ -94,7 +94,8 @@ func (t *BashTool) Execute(ctx context.Context, a Args) (Result, error) {
 			return ErrorResult("启动后台命令失败：%v", err), nil
 		}
 		return Result{
-			Content: []Block{{Kind: KindText, Text: fmt.Sprintf("已转入后台，sessionId=%s\n用 bash_output 读取输出，bash_kill 终止。", id)}},
+			Content: []Block{{Kind: KindText, Text: fmt.Sprintf("已转入后台，sessionId=%s\n用 bash_output 读取输出" +
+				"（wait=\"exit\" 可直接等到结束，wait=\"output\" 等到有新输出），bash_kill 终止。", id)}},
 			Details: map[string]any{"sessionId": id, "command": cmd, "background": true},
 		}, nil
 	}
@@ -168,6 +169,8 @@ type sharedOutput struct {
 	b     bytes.Buffer
 	limit int
 	drop  bool
+	// onWrite 在每次写入后调用（锁外），用来唤醒被接管会话的等待者。
+	onWrite func()
 }
 
 func newSharedOutput(limit int) *sharedOutput {
@@ -177,18 +180,34 @@ func newSharedOutput(limit int) *sharedOutput {
 	return &sharedOutput{limit: limit}
 }
 
+// setOnWrite 设置写入回调（Attach 时接上会话的 signal）。
+func (o *sharedOutput) setOnWrite(fn func()) {
+	o.mu.Lock()
+	o.onWrite = fn
+	o.mu.Unlock()
+}
+
 func (o *sharedOutput) Write(p []byte) (int, error) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
+	hook := o.onWrite
 	// 超过上限后仍然返回 len(p)：写端不能因为缓冲区满了而阻塞或报错。
 	if room := o.limit - o.b.Len(); room < len(p) {
 		o.drop = true
 		if room > 0 {
 			o.b.Write(p[:room])
 		}
+		o.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		return len(p), nil
 	}
-	return o.b.Write(p)
+	n, err := o.b.Write(p)
+	o.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return n, err
 }
 
 func (o *sharedOutput) String() string {
@@ -199,6 +218,21 @@ func (o *sharedOutput) String() string {
 		s += "\n[输出超过上限，已截断]"
 	}
 	return s
+}
+
+// Slice 返回从 from 开始的剩余输出（增量读用；不重复拷贝整块）。
+func (o *sharedOutput) Slice(from int) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	b := o.b.Bytes()
+	if from >= len(b) {
+		return ""
+	}
+	out := string(b[from:])
+	if o.drop {
+		out += "\n[输出超过上限，已截断]"
+	}
+	return out
 }
 
 // Len 返回已缓冲的字节数。
@@ -293,6 +327,24 @@ type bashSession struct {
 	done    bool
 	exit    int
 	started time.Time
+
+	// notify 是「有新输出 / 已结束 / 被 kill」的唤醒信号（容量 1，非阻塞发送）。
+	// 等待方用 select 挂在它上面，而不是反复轮询 bash_output。
+	notify chan struct{}
+	// waiting 表示已经有一个调用方在等这个会话：第二个等待者直接拿快照返回，
+	// 否则 parallel 里几个 bash_output 会一起挂在 executor 的槽位上。
+	waiting bool
+}
+
+// signal 唤醒等待者（不阻塞）。
+func (s *bashSession) signal() {
+	if s.notify == nil {
+		return
+	}
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
 }
 
 // textLocked 返回当前已捕获的输出（调用方需持 s.mu）。
@@ -351,7 +403,7 @@ func (m *BashManager) Start(command, dir string, env map[string]string) (string,
 	m.mu.Lock()
 	m.seq++
 	id := fmt.Sprintf("bash-%d", m.seq)
-	s := &bashSession{id: id, proc: p, started: time.Now(), exit: -1}
+	s := &bashSession{id: id, proc: p, started: time.Now(), exit: -1, notify: make(chan struct{}, 1)}
 	m.sessions[id] = s
 	// 清理最旧的已完成会话
 	if len(m.sessions) > m.maxKeep {
@@ -373,6 +425,7 @@ func (m *BashManager) Start(command, dir string, env map[string]string) (string,
 					s.buf.WriteByte('\n')
 				}
 				s.mu.Unlock()
+				s.signal()
 				time.Sleep(time.Millisecond)
 			}
 			// Scan 返回 false 既可能是读完（EOF），也可能是出错：单行超过 1MB 的
@@ -404,6 +457,7 @@ func (m *BashManager) Start(command, dir string, env map[string]string) (string,
 			s.exit = code
 		}
 		s.mu.Unlock()
+		s.signal()
 	}()
 	return id, nil
 }
@@ -419,8 +473,11 @@ func (m *BashManager) Attach(lp *liveProc) string {
 	m.mu.Lock()
 	m.seq++
 	id := fmt.Sprintf("bash-%d", m.seq)
-	s := &bashSession{id: id, proc: lp.proc, started: time.Now(), exit: -1, src: lp.out}
+	s := &bashSession{id: id, proc: lp.proc, started: time.Now(), exit: -1, src: lp.out, notify: make(chan struct{}, 1)}
 	m.sessions[id] = s
+	// 前台的 stdout 已经在往 lp.out 里写：接上唤醒回调，否则接管的会话
+	// 在等待方眼里永远是「没有新输出」。
+	lp.out.setOnWrite(s.signal)
 	if len(m.sessions) > m.maxKeep {
 		m.pruneLocked()
 	}
@@ -434,6 +491,7 @@ func (m *BashManager) Attach(lp *liveProc) string {
 			s.exit = r.code
 		}
 		s.mu.Unlock()
+		s.signal()
 		// 进程已退出，释放为它单独开的 context。
 		lp.cancel()
 	}()
@@ -452,33 +510,158 @@ func (m *BashManager) pruneLocked() {
 	}
 }
 
-// Read 读取后台输出（offset 为从此位置开始）。
-func (m *BashManager) Read(id string, filter string) (text string, done bool, exit int, err error) {
+// WaitUntil 说明要等到什么程度才返回。
+type WaitUntil int
+
+const (
+	// WaitNone 立即返回当前快照（旧行为）。
+	WaitNone WaitUntil = iota
+	// WaitOutput 等到出现新输出（或进程结束 / 超时）。
+	WaitOutput
+	// WaitExit 等到进程结束（或超时）。
+	WaitExit
+)
+
+// ReadResult 是一次读取（可能带等待）的结果。
+type ReadResult struct {
+	Text   string
+	Next   int // 下次读取用的 cursor
+	Done   bool
+	Exit   int // -1 表示未知
+	Waited time.Duration
+	// TimedOut 表示等到了超时但条件仍未满足（进程还在跑）。
+	TimedOut bool
+	// Canceled 表示 ctx 被取消（用户 Esc / turn 中断）—— 结果里带的是取消瞬间的快照。
+	Canceled bool
+}
+
+// Read 读取后台输出。
+//
+// cursor 是上次返回的 Next（0 = 从头读）；until != WaitNone 时会阻塞到
+// 「有新输出 / 进程结束 / 超时 / ctx 取消」。
+//
+// 为什么要能等：模型之前只能反复调 bash_output 或前台 sleep 死等，一次
+// 两分钟的任务要耗掉好几轮模型往返和重复的全量输出。
+func (m *BashManager) Read(ctx context.Context, id string, cursor int, filter string, until WaitUntil, timeout time.Duration) (ReadResult, error) {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	m.mu.Unlock()
 	if !ok {
-		return "", false, -1, fmt.Errorf("未知 sessionId %q（可能已被清理）", id)
+		return ReadResult{}, fmt.Errorf("未知 sessionId %q（可能已被清理）", id)
 	}
+	if cursor < 0 {
+		cursor = 0
+	}
+
+	// 同一个会话只允许一个等待者：第二个直接拿快照返回，否则 parallel 里
+	// 几个 bash_output 会一起挂在 executor 的槽位上。
+	onlySnapshot := until == WaitNone
+	if !onlySnapshot {
+		s.mu.Lock()
+		if s.waiting {
+			onlySnapshot = true
+			until = WaitNone
+		} else {
+			s.waiting = true
+		}
+		s.mu.Unlock()
+		if !onlySnapshot {
+			defer func() {
+				s.mu.Lock()
+				s.waiting = false
+				s.mu.Unlock()
+			}()
+		}
+	}
+
+	start := time.Now()
+	var deadline <-chan time.Time
+	if !onlySnapshot && timeout > 0 {
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		deadline = t.C
+	}
+
+	for {
+		res, notify := s.snapshot(cursor, filter)
+		res.Waited = time.Since(start)
+		if res.Done || onlySnapshot {
+			return res, nil
+		}
+		if until == WaitOutput && res.Text != "" {
+			return res, nil
+		}
+		select {
+		case <-notify:
+			// 有新输出或状态变化：重新取快照。
+		case <-ctx.Done():
+			res, _ = s.snapshot(cursor, filter)
+			res.Waited = time.Since(start)
+			res.Canceled = true
+			return res, nil
+		case <-deadline:
+			res, _ = s.snapshot(cursor, filter)
+			res.Waited = time.Since(start)
+			res.TimedOut = true
+			return res, nil
+		}
+	}
+}
+
+// snapshot 取从 cursor 开始的输出与唤醒通道。
+//
+// Next 只推进到**最后一个完整行的末尾**：写了一半的行留在游标后面，下次
+// 连同剩余部分一起发，既不重复也不丢。整块都没有换行时（进度条、超长
+// 单行）照常推进，否则永远读不到。
+func (s *bashSession) snapshot(cursor int, filter string) (ReadResult, <-chan struct{}) {
 	s.mu.Lock()
-	text = s.textLocked()
-	done, exit = s.done, s.exit
-	s.mu.Unlock()
-	if filter != "" {
-		re, rerr := regexp.Compile(filter)
-		if rerr != nil {
-			return "", done, exit, fmt.Errorf("filter 正则无效：%w", rerr)
-		}
-		var b strings.Builder
-		for _, ln := range strings.Split(text, "\n") {
-			if re.MatchString(ln) {
-				b.WriteString(ln)
-				b.WriteString("\n")
-			}
-		}
-		text = b.String()
+	size := s.sizeLocked()
+	if cursor > size {
+		// 缓冲区被换过（理论上的兜底）：从头读。
+		cursor = 0
 	}
-	return text, done, exit, nil
+	chunk := s.sliceLocked(cursor)
+	done, exit := s.done, s.exit
+	notify := s.notify
+	s.mu.Unlock()
+
+	next := cursor + len(chunk)
+	if i := strings.LastIndexByte(chunk, '\n'); i >= 0 {
+		next = cursor + i + 1
+	}
+	text := applyLineFilter(chunk[:next-cursor], filter)
+	return ReadResult{Text: text, Next: next, Done: done, Exit: exit}, notify
+}
+
+// sliceLocked 返回从 from 开始的剩余输出（调用方需持 s.mu）。
+func (s *bashSession) sliceLocked(from int) string {
+	if s.src != nil {
+		return s.src.Slice(from)
+	}
+	b := s.buf.Bytes()
+	if from >= len(b) {
+		return ""
+	}
+	return string(b[from:])
+}
+
+// applyLineFilter 按正则只保留匹配的行；filter 为空时原样返回。
+func applyLineFilter(text, filter string) string {
+	if filter == "" || text == "" {
+		return text
+	}
+	re, err := regexp.Compile(filter)
+	if err != nil {
+		return text
+	}
+	var b strings.Builder
+	for _, ln := range strings.Split(text, "\n") {
+		if re.MatchString(ln) {
+			b.WriteString(ln)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // Kill 终止后台会话。
@@ -490,6 +673,7 @@ func (m *BashManager) Kill(id string) error {
 		return fmt.Errorf("未知 sessionId %q", id)
 	}
 	s.proc.Kill()
+	s.signal()
 	return nil
 }
 
@@ -541,12 +725,18 @@ func NewBashOutputTool(m *BashManager) *BashOutputTool { return &BashOutputTool{
 
 func (*BashOutputTool) Name() string { return "bash_output" }
 func (*BashOutputTool) Description() string {
-	return "读取后台命令的输出。可反复调用以轮询；用 filter 只取关键行。"
+	return "读取后台命令的输出。默认立即返回当前快照；wait=output/exit 会阻塞到" +
+		"有新输出/命令结束（比反复轮询或前台 sleep 省 token）。" +
+		"配合 cursor 只取上次之后的新输出。"
 }
 func (*BashOutputTool) Parameters() map[string]any {
 	return Schema(map[string]any{
 		"sessionId": Prop("string", "bash 返回的 sessionId"),
 		"filter":    Prop("string", "可选：只返回匹配该正则的行"),
+		"cursor":    PropInt("从上次返回的 [cursor N] 之后开始读；0 = 从头", 0),
+		"wait": Prop("string", "none（默认，立即返回）| output（等到有新输出）| "+
+			"exit（等到命令结束）"),
+		"timeoutMs": PropInt("等待超时毫秒（output 默认 5000，exit 默认 60000，上限 300000）", 0),
 	}, "sessionId")
 }
 func (*BashOutputTool) ConcurrencySafe() bool { return true }
@@ -557,24 +747,77 @@ func (t *BashOutputTool) Execute(ctx context.Context, a Args) (Result, error) {
 	if err != nil {
 		return ErrorResult("%v", err), nil
 	}
-	text, done, exit, err := t.Manager.Read(id, a.Str("filter", ""))
+	until, err := parseWaitUntil(a.Str("wait", ""))
 	if err != nil {
 		return ErrorResult("%v", err), nil
 	}
-	text, truncated := Truncate(strings.TrimRight(text, "\n"), 0, 0)
+	timeoutMs := a.Int("timeoutMs", 0)
+	if timeoutMs <= 0 {
+		switch until {
+		case WaitOutput:
+			timeoutMs = 5000
+		case WaitExit:
+			timeoutMs = 60000
+		}
+	}
+	if timeoutMs > maxWaitTimeoutMs {
+		timeoutMs = maxWaitTimeoutMs
+	}
+
+	res, err := t.Manager.Read(ctx, id, int(a.Int("cursor", 0)), a.Str("filter", ""),
+		until, time.Duration(timeoutMs)*time.Millisecond)
+	if err != nil {
+		return ErrorResult("%v", err), nil
+	}
+
+	text, truncated := Truncate(strings.TrimRight(res.Text, "\n"), 0, 0)
 	if text == "" {
-		text = "(暂无输出)"
+		switch {
+		case res.Canceled:
+			text = "(等待被取消，暂无新输出)"
+		case res.TimedOut:
+			text = "(等待超时，暂无新输出)"
+		default:
+			text = "(暂无输出)"
+		}
 	}
+	// 状态行保持旧格式 [running] / [done(exit N)]，只在需要时加后缀，
+	// 免得既有的调用方（和模型）重新学一遍。
 	status := "running"
-	if done {
-		status = fmt.Sprintf("done(exit %d)", exit)
+	switch {
+	case res.Done:
+		status = fmt.Sprintf("done(exit %d)", res.Exit)
+	case res.Canceled:
+		status = "running, 等待已取消"
+	case res.TimedOut:
+		status = "running, 等待超时"
 	}
-	final := fmt.Sprintf("%s [%s]", text, status)
+	final := fmt.Sprintf("%s [%s] [cursor %d]", text, status, res.Next)
 	return Result{
 		Content:   []Block{{Kind: KindText, Text: final}},
 		Truncated: truncated,
-		Details:   map[string]any{"sessionId": id, "done": done, "exitCode": exit},
+		Details: map[string]any{
+			"sessionId": id, "done": res.Done, "exitCode": res.Exit,
+			"cursor": res.Next, "timedOut": res.TimedOut, "canceled": res.Canceled,
+		},
 	}, nil
+}
+
+// maxWaitTimeoutMs 是 bash_output 等待的上限：无限等会让 turn 永远不结束，
+// 用户只能 Ctrl-C 才能拿回控制权。
+const maxWaitTimeoutMs = 300000
+
+// parseWaitUntil 解析 wait 参数。空串等于 none（保持老行为）。
+func parseWaitUntil(v string) (WaitUntil, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "none", "false", "no":
+		return WaitNone, nil
+	case "output", "new", "any":
+		return WaitOutput, nil
+	case "exit", "done", "finish":
+		return WaitExit, nil
+	}
+	return WaitNone, fmt.Errorf("wait 只支持 none / output / exit，收到 %q", v)
 }
 
 // BashKillTool 终止后台命令。
