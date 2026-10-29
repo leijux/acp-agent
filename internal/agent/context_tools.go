@@ -277,8 +277,12 @@ func (a *Agent) mirrorBlocks(ke *kernelEngine, cr kernel.CompressionResult, toke
 			continue
 		}
 		ke.mirrored[b.BlockID] = true
+		// kernel 的 direct 列表不保证含区间内全部 tool result：父被折叠、工具
+		// 结果留在上下文里会变成无父的 role=tool 消息，下一次请求直接 400。
+		// 在写 entry 之前补齐，投影与 persisted 数据才一致。
+		blockedIDs := expandBlockedToolResults(a.opts.Session.ActiveBranch(), b.DirectMessageIDs)
 		if _, err := a.opts.Session.AppendCompactionBlock(
-			b.BlockID, b.Summary, b.DirectMessageIDs, tokensBefore, tokensAfter,
+			b.BlockID, b.Summary, blockedIDs, tokensBefore, tokensAfter,
 		); err != nil {
 			return nil, err
 		}
@@ -287,7 +291,7 @@ func (a *Agent) mirrorBlocks(ke *kernelEngine, cr kernel.CompressionResult, toke
 			Topic:        b.Topic,
 			Tier:         b.Tier,
 			Summary:      b.Summary,
-			MessageIDs:   b.DirectMessageIDs,
+			MessageIDs:   blockedIDs,
 			TokensBefore: tokensBefore,
 			TokensAfter:  tokensAfter,
 		})

@@ -142,6 +142,21 @@ kernel 的 **state 快照跟着 Session 一起落盘**（`Session.SetKernelState
 `compactionBlocksLocked` 把每块的摘要插在它首个被吃 entry 的位置
 （`Entry.BlockedIDs` 非空时生效），旧格式仍走原逻辑当兵底。
 
+**压缩后 tool 结果会变成孤儿 → HTTP 400。** 真实事故：45 万 token 的会话触发自动
+压缩，kernel 的 `DirectMessageIDs` 只含 user/assistant，assistant 那两个 bash 调用的
+**结果**留在上下文里。投影后模型收到一串没有父的 `role=tool` 消息，OpenAI 兼容接口
+硬性要求 `tool` 必须紧跟带 `tool_calls` 的 assistant，于是下一次请求直接：
+
+    Messages with role 'tool' must be a response to a preceding message with 'tool_calls'
+
+步数越多的会话越容易撞上（工具结果占比高、被折叠的机会多）。两道防线
+（`internal/agent/toolpair.go`）：
+
+1. `expandBlockedToolResults`：压缩落地写 entry 之前，把「父 assistant 已折叠、
+   自己没进列表」的 tool 结果补进 `BlockedIDs`（省 token，persisted 数据也自洽）；
+2. `dropOrphanToolResults`：投影时兜底丢掉仍找不到父的 tool 消息 —— 不论 kernel
+   返回什么形状、不论从 JSONL 恢复出什么，都不会把 400 发出去。
+
 **工具事件 hook 是临时挂载的。** `Executor.OnStart/OnDone` 是单字段，多个 Agent 共享
 一个 Executor 会打架。`runTools` 里先保存旧 hook、挂上自己的、`defer` 恢复，
 这样串行 run 下正确；**并发 run 同一个 Executor 不安全**（每个 Agent 用独立 Executor 即可）。

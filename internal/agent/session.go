@@ -271,7 +271,7 @@ func (s *Session) messagesLocked() []Message {
 				out = append(out, m)
 			}
 		}
-		return out
+		return dropOrphanToolResults(out)
 	}
 
 	// 旧格式。
@@ -310,7 +310,7 @@ func (s *Session) messagesLocked() []Message {
 			out = append(out, m)
 		}
 	}
-	return out
+	return dropOrphanToolResults(out)
 }
 
 // compactionBlocksLocked 返回活动分支上的压缩块：
