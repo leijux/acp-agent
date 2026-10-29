@@ -323,3 +323,74 @@ func TestReadLineKeepsLastLineBeforeEOF(t *testing.T) {
 		}
 	}
 }
+
+// TestKeyWatcherHistory 行模式的 ↑/↓ 取输入历史。
+//
+// 序列：输入 "first\r" 提交 → 输入 "second\r" 提交 → 输入 "thi" 再按 ↑
+// （前缀无匹配，应放宽成全量取到 "second"）→ ↓ 回到草稿 "thi"。
+func TestKeyWatcherHistory(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	w := newKeyWatcher(pr, io.Discard, nil)
+	go w.loop()
+
+	write := func(s string) {
+		t.Helper()
+		if _, err := pw.Write([]byte(s)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("first\r")
+	if line, err := readLineTimeout(t, w); err != nil || line != "first" {
+		t.Fatalf("第一条 = %q, %v", line, err)
+	}
+	write("second\r")
+	if line, err := readLineTimeout(t, w); err != nil || line != "second" {
+		t.Fatalf("第二条 = %q, %v", line, err)
+	}
+	if w.hist.Len() != 2 {
+		t.Fatalf("历史应有 2 条，实际 %d", w.hist.Len())
+	}
+
+	// ↑ 取上一条（前缀 "thi" 无匹配 → 放宽成全量）
+	write("\x1b[A")
+	waitForState(t, func() bool { return w.inHistory() && w.lineText() == "second" })
+
+	// 再 ↑ 到 "first"
+	write("\x1b[A")
+	waitForState(t, func() bool { return w.lineText() == "first" })
+
+	// ↓ 回 "second"，再 ↓ 回草稿
+	write("\x1b[B")
+	waitForState(t, func() bool { return w.lineText() == "second" })
+	write("\x1b[B")
+	waitForState(t, func() bool { return w.lineText() == "" })
+}
+
+// inHistory 报告是否在历史导航中（测试用）。
+func (w *keyWatcher) inHistory() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.histPos >= 0
+}
+
+// lineText 返回当前输入行（测试用）。
+func (w *keyWatcher) lineText() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return string(w.buf)
+}
+
+// waitForState 等一个按键处理后的状态成立。
+func waitForState(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("等待输入行状态超时")
+}

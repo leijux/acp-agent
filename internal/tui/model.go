@@ -50,6 +50,16 @@ type Model struct {
 	status  string
 	perm    *permState
 
+	// 输入历史（纯内存，本进程内提交过的 prompt）。
+	//
+	// histPos = -1 表示「没在导航历史」（输入行里是用户自己的内容）；
+	// histDraft / histPrefix 在第一次按 ↑ 时拍下，↓ 回到最新一条时靠它们
+	// 把用户原本的草稿放回去（readline 行为）。
+	hist       History
+	histPos    int
+	histDraft  string
+	histPrefix string
+
 	// turnStart / turnSeq 给「运行中 3s」那个秒表用：
 	// turnSeq 让上一轮残留的 tick 作废，不会和新的计时链并发跑。
 	turnStart time.Time
@@ -99,6 +109,7 @@ func newModel(ui *UI, opts Options) *Model {
 		selBlock: -1,
 		mouse:    !opts.NoMouse,
 		turnFrom: -1,
+		histPos:  -1,
 	}
 	m.vp.MouseWheelEnabled = true
 	return m
@@ -340,11 +351,11 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case tea.KeyUp:
-		m.vp.ScrollUp(1)
+		m.historyUp()
 		return nil
 
 	case tea.KeyDown:
-		m.vp.ScrollDown(1)
+		m.historyDown()
 		return nil
 
 	case tea.KeyLeft:
@@ -561,12 +572,64 @@ func (m *Model) flushLoose() {
 	m.in.paste(s)
 }
 
+// historyUp 切到上一条历史。
+//
+// 第一次进入导航（histPos<0）时拍两个快照：
+//   - histDraft：用户当前正在敲的内容，↓ 回到最新一条时要原样放回去；
+//   - histPrefix：用它做前缀过滤（fish 的向上搜索），否则在一个几十条历史的
+//     会话里要按十几次才能找到想要的命令。没有匹配项时**不动输入行** ——
+//     与 readline 的 history-search-backward 一致。
+func (m *Model) historyUp() {
+	if m.hist.Len() == 0 {
+		return
+	}
+	if m.histPos < 0 {
+		m.histDraft = m.in.text()
+		m.histPrefix = m.histDraft
+	}
+	text, pos, ok := m.hist.Prev(m.histPos, m.histPrefix)
+	if !ok && m.histPrefix != "" {
+		// 前缀一条都不匹配（敲了半句想找相关命令，但历史里没有）：
+		// 放宽成全量再找一次 —— 否则按键看起来像坏了。
+		// 一旦放宽，本次导航就一直按全量走，不做「有时过滤有时不过滤」的反复。
+		m.histPrefix = ""
+		text, pos, ok = m.hist.Prev(m.histPos, "")
+	}
+	if !ok {
+		return
+	}
+	m.histPos = pos
+	m.in.setText(text)
+}
+
+// historyDown 切到下一条历史；已经在最新一条时回到用户原本的草稿。
+func (m *Model) historyDown() {
+	if m.histPos < 0 {
+		// 没在导航历史时，↓ 不下走（滚动交给 PgDn / 滚轮）。
+		return
+	}
+	if text, pos, ok := m.hist.Next(m.histPos, m.histPrefix); ok {
+		m.histPos = pos
+		m.in.setText(text)
+		return
+	}
+	m.histPos = -1
+	m.in.setText(m.histDraft)
+	m.histDraft = ""
+	m.histPrefix = ""
+}
+
 func (m *Model) submit() {
 	m.flushLoose() // 落粘贴可能还没到收尾时间，先折进来再取文本
 	text := strings.TrimSpace(m.in.text())
 	if text == "" {
 		return
 	}
+	// 记录输入历史；提交后退出历史导航（否则下一次 ↑ 会从一个旧下标继续）。
+	m.hist.Push(text)
+	m.histPos = -1
+	m.histDraft = ""
+	m.histPrefix = ""
 	m.in.reset()
 	// 回显成 user 块：用户需要看到「我发了什么」，尤其是多行输入。
 	m.appendLine(KindUser, text)
@@ -857,7 +920,7 @@ func (m *Model) permView() string {
 }
 
 func (m *Model) statusView() string {
-	left := escDim + "⌃↑/↓ 跳消息 · ⌃T 折叠思考 · PgUp/PgDn 滚动 · /help" + escReset
+	left := escDim + "↑/↓ 历史 · ⌃↑/↓ 跳消息 · ⌃T 折叠 · PgUp/PgDn 滚动 · /help" + escReset
 	right := ""
 	if m.running {
 		parts := []string{"● 运行中"}

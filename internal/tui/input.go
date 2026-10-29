@@ -56,6 +56,17 @@ func (in *inputLine) text() string { return in.expand(string(in.buf)) }
 
 func (in *inputLine) empty() bool { return len(in.buf) == 0 }
 
+// setText 整体替换输入内容，光标落到末尾（输入历史导航用）。
+//
+// 走 paste() 而不是直接写 buf：历史项可能是多行（Alt+Enter 敲出来的）或超长，
+// 直接塞进去会把「单行输入框」的前提破掉；paste 会按既有规则折叠成占位符，
+// 提交时再展开，与用户自己粘贴同一条路径。
+func (in *inputLine) setText(s string) {
+	in.reset()
+	in.paste(s)
+	in.cur = len(in.buf)
+}
+
 func (in *inputLine) reset() {
 	in.buf = in.buf[:0]
 	in.cur = 0

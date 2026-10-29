@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/leijux/acp-agent/internal/tui"
 )
 
 // REPL 的按键层：在 cbreak 模式下独占 stdin，把字节流变成「行」与「中断」。
@@ -58,6 +60,14 @@ type keyWatcher struct {
 	cols   int    // 终端列数；0 表示未知（按单行处理）
 	closed bool
 
+	// 输入历史（纯内存，与 TUI 模式共用 tui.History 的语义）：
+	// histPos = -1 表示没在导航；histDraft 是第一次按 ↑ 之前的内容，
+	// ↓ 到最新一条时原样放回去。
+	hist       tui.History
+	histPos    int
+	histDraft  string
+	histPrefix string
+
 	// tailUntil：刚把单个 ESC 当 Esc 处理后的一个短窗口。终端偶尔会把
 	// ESC 与 "[D" 拆成两次送达（慢链路 / ssh），这时剩下的 "[D" 不能被
 	// 当成用户输入写进行里。只由 loop goroutine 读写。
@@ -87,6 +97,7 @@ func startKeyWatcher(fd int, out io.Writer, outMu sync.Locker, cols int) (*keyWa
 
 // newKeyWatcher 构造按键层（不切终端模式）；测试直接注入 reader。
 func newKeyWatcher(r io.Reader, out io.Writer, restore func()) *keyWatcher {
+	// histPos=-1：初始不在历史导航中。
 	return &keyWatcher{
 		reader:  bufio.NewReader(r),
 		out:     out,
@@ -94,6 +105,7 @@ func newKeyWatcher(r io.Reader, out io.Writer, restore func()) *keyWatcher {
 		quit:    make(chan struct{}),
 		eof:     make(chan struct{}),
 		restore: restore,
+		histPos: -1, // -1：不在历史导航中
 	}
 }
 
@@ -332,6 +344,10 @@ func (w *keyWatcher) onSequenceKey(final byte, params string) {
 		w.moveRight()
 	case 'D': // ←
 		w.moveLeft()
+	case 'A': // ↑ 输入历史
+		w.historyUp()
+	case 'B': // ↓ 输入历史
+		w.historyDown()
 	case 'H': // Home
 		w.moveHome()
 	case 'F': // End
@@ -346,7 +362,7 @@ func (w *keyWatcher) onSequenceKey(final byte, params string) {
 			w.deleteAt()
 		}
 	}
-	// ↑/↓（A/B）没有历史，PgUp/PgDn 等一律忽略。
+	// PgUp/PgDn 等一律忽略。
 }
 
 // inEscTail 报告是否处在「刚把单个 ESC 当 Esc 处理」的短窗口内。
@@ -468,6 +484,59 @@ func (w *keyWatcher) killToEnd() {
 	w.renderLocked()
 }
 
+// historyUp 把输入行换成上一条历史（↑）。
+//
+// 语义与 TUI 模式一致（共用 tui.History）：第一次按 ↑ 时记住当前行与它作为
+// 前缀；前缀没有匹配时放宽成全量，免得按键看起来像坏的。
+func (w *keyWatcher) historyUp() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.hist.Len() == 0 {
+		return
+	}
+	if w.histPos < 0 {
+		w.histDraft = string(w.buf)
+		w.histPrefix = w.histDraft
+	}
+	text, pos, ok := w.hist.Prev(w.histPos, w.histPrefix)
+	if !ok && w.histPrefix != "" {
+		w.histPrefix = ""
+		text, pos, ok = w.hist.Prev(w.histPos, "")
+	}
+	if !ok {
+		return
+	}
+	w.histPos = pos
+	w.setBufLocked(text)
+	w.renderLocked()
+}
+
+// historyDown 把输入行换成下一条历史（↓）；已经在最新一条时回到原草稿。
+func (w *keyWatcher) historyDown() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.histPos < 0 {
+		return
+	}
+	if text, pos, ok := w.hist.Next(w.histPos, w.histPrefix); ok {
+		w.histPos = pos
+		w.setBufLocked(text)
+		w.renderLocked()
+		return
+	}
+	w.histPos = -1
+	w.setBufLocked(w.histDraft)
+	w.histDraft = ""
+	w.histPrefix = ""
+	w.renderLocked()
+}
+
+// setBufLocked 整体替换当前行。调用方必须持有 w.mu。
+func (w *keyWatcher) setBufLocked(s string) {
+	w.buf = append(w.buf[:0], s...)
+	w.cur = len(w.buf)
+}
+
 func (w *keyWatcher) submit() {
 	if !w.editable() {
 		return
@@ -479,6 +548,11 @@ func (w *keyWatcher) submit() {
 		w.cur = len(w.buf)
 		w.renderLocked()
 	}
+	// 记录输入历史，并退出导航（下次 ↑ 从最新一条重新开始）。
+	w.hist.Push(line)
+	w.histPos = -1
+	w.histDraft = ""
+	w.histPrefix = ""
 	w.buf = w.buf[:0]
 	w.cur = 0
 	w.mu.Unlock()
