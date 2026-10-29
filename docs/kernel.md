@@ -244,6 +244,14 @@ GC 是全局的 —— 8 个 VM 并行跑，GC 成了共同瓶颈。这也意味
 
 ## 重新生成 bundle
 
+当前 bundle 对应上游 `acp-kernel 0.0.169`（commit `1fad21d`）。
+
+上一次更新（0.0.167 → 0.0.169）的实际变化很小，只多了一个函数：
+`restampContentStore`（上游 #4733 —— CCR content store 在 `restampRefsToLedger`
+把 messageRefs 重编号之后要按新的 `byRaw` re-key，否则 store 的 byRef 键会指向
+另一个消息）。它在 bundle 里，Go 侧只读持久化结构里的 `byRef` 字段、没有复刻这段
+逻辑，所以不需要跟着改。更新后 `messagesHash` / `blockNoTimeHash` 仍与 Node 一致。
+
 上游发新版时：
 
 ```bash

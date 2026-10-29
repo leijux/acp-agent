@@ -57,7 +57,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
-// dist/index.js
+// C:/Users/Maxwell/AppData/Local/Temp/bc/billion-context/kernel/dist/index.js
 var index_exports = {};
 __export(index_exports, {
   ABSORB_PROMPT_MARKER: () => ABSORB_PROMPT_MARKER,
@@ -296,6 +296,7 @@ __export(index_exports, {
   resolveRuleLimits: () => resolveRuleLimits,
   resolveTransformChannel: () => resolveTransformChannel,
   resolveVerbosityLevel: () => resolveVerbosityLevel,
+  restampContentStore: () => restampContentStore,
   restampRefsToLedger: () => restampRefsToLedger,
   restoreStoredPlaceholderText: () => restoreStoredPlaceholderText,
   retrieveByRef: () => retrieveByRef,
@@ -322,7 +323,7 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
-// dist/chunk-VBWN2X6H.js
+// C:/Users/Maxwell/AppData/Local/Temp/bc/billion-context/kernel/dist/chunk-2EDVYAJ5.js
 var import_module = require("module");
 var REF_WIDTH = 5;
 var MIN_INDEX = 1;
@@ -825,7 +826,7 @@ function compact(parts) {
   while (parts.length > 0 && parts[0] === "") parts.shift();
   return parts;
 }
-var ONE_CALL_HINT = "ONE call, ONE string \u2014 fold every range you keep into a single compress call: content entries ({startId, endId, summary, topic?}) or one JSON-escaped string holding one block per range ('m00150\u2013m00220 topic' header line, then the summary). Ranges you still need can wait \u2014 they reappear in later nudges; never split the batch across separate calls.";
+var ONE_CALL_HINT = "ONE call, ONE string \u2014 fold every range you keep into a single compress call: one JSON-escaped string holding one block per range ('m00150\u2013m00220 topic' header line, then the summary). Ranges you still need can wait \u2014 they reappear in later nudges; never split the batch across separate calls.";
 var ANTHROPIC_LANE_NOTE = "Write the summary ONLY as the `compress` tool's `content` argument. Never emit `<analysis>` or `<summary>` tags in your reply text \u2014 they are not parsed, and a reply without a tool call ends the turn.";
 function renderNudgeText(decision, prompts = defaultPrompts, sections = {}, protocol) {
   var _a, _b, _c, _d, _e, _f, _g, _h, _i;
@@ -857,7 +858,7 @@ function renderNudgeText(decision, prompts = defaultPrompts, sections = {}, prot
         triggerLine,
         ...guidance === null ? [] : [guidance],
         blockList,
-        `Example: compress({ content: [{ startId: "${startId}", endId: "${endId}", summary: "..." }] })`,
+        `Example: compress({ content: "${startId}\u2013${endId} optional topic\\nsummary markdown..." })`,
         "",
         prompts.howToCompressRules,
         "",
@@ -900,7 +901,7 @@ function renderNudgeText(decision, prompts = defaultPrompts, sections = {}, prot
       rangesStr,
       ...blockMapStr ? ["", blockMapStr] : [],
       "",
-      `\u{1F4A1} If you compress, fold the ranges you keep in ONE call \u2014 pass multiple content entries (\`content: [{...}, {...}]\`) or ONE plain string holding every range, each block starting with its 'mNNNNN\u2013mNNNNN topic' header line (a valid JSON string: \\" and \\n). Ranges the task still needs can wait \u2014 they reappear in later nudges.`,
+      `\u{1F4A1} If you compress, fold the ranges you keep in ONE call \u2014 ONE plain string holding every range, each block starting with its 'mNNNNN\u2013mNNNNN topic' header line (a valid JSON string: \\" and \\n). Ranges the task still needs can wait \u2014 they reappear in later nudges.`,
       ...laneNote === null ? [] : ["", laneNote]
     ]).join("\n")
   };
@@ -932,7 +933,7 @@ function scrubLoneSurrogates(text) {
   return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])/g, "\uFFFD").replace(new RegExp("(?<![\\ud800-\\udbff])[\\udc00-\\udfff]", "g"), "\uFFFD");
 }
 
-// dist/chunk-KW5XKWQH.js
+// C:/Users/Maxwell/AppData/Local/Temp/bc/billion-context/kernel/dist/chunk-KW5XKWQH.js
 function createInitialState() {
   return {
     blocks: [],
@@ -1005,7 +1006,7 @@ function advanceSurvival(state, promotionThreshold) {
   }
 }
 
-// dist/chunk-VTRTXHVO.js
+// C:/Users/Maxwell/AppData/Local/Temp/bc/billion-context/kernel/dist/chunk-2XVQWWID.js
 var SUMMARY_HEADER = "[Compressed conversation section]";
 var SUMMARY_ID_PREFIX = "acp_summary_";
 function summaryMessageId(blockId) {
@@ -1025,7 +1026,7 @@ function coveredSeqIntervals(state) {
   const intervals = [];
   for (const block of state.blocks) {
     if (!block.active) continue;
-    if (typeof block.startSeq === "number" && typeof block.endSeq === "number" && block.endSeq >= block.startSeq) {
+    if (typeof block.startSeq === "number" && typeof block.endSeq === "number" && block.startSeq >= 0 && block.endSeq >= block.startSeq) {
       intervals.push({ start: block.startSeq, end: block.endSeq });
     }
   }
@@ -1668,7 +1669,7 @@ function isObjWith(v, key, value) {
   return typeof v === "object" && v !== null && v[key] === value;
 }
 
-// dist/index.js
+// C:/Users/Maxwell/AppData/Local/Temp/bc/billion-context/kernel/dist/index.js
 var import_crypto = require("crypto");
 var import_path = require("path");
 var import_fs = require("fs");
@@ -1729,7 +1730,7 @@ function remintCoveredLiveIds(messages, state) {
   return changed ? next : messages;
 }
 function blockSeqPresent(block, messages) {
-  if (typeof block.startSeq !== "number" || typeof block.endSeq !== "number" || block.endSeq < block.startSeq) {
+  if (typeof block.startSeq !== "number" || typeof block.endSeq !== "number" || block.startSeq < 0 || block.endSeq < block.startSeq) {
     return false;
   }
   for (const message of messages) {
@@ -1788,7 +1789,12 @@ function syncBlocks(messages, state) {
     viewLatches: state.viewLatches ? Object.fromEntries(
       Object.entries(state.viewLatches).map(([k, v]) => [k, __spreadValues({}, v)])
     ) : void 0,
-    viewLatchConfigDigest: state.viewLatchConfigDigest
+    viewLatchConfigDigest: state.viewLatchConfigDigest,
+    // #4797: the one-time ledger-alignment gate MUST survive the sync clone —
+    // dropping it re-arms restampRefsToLedger on every turn, re-populating
+    // the host's superseded map forever (the "one-time" restamp stops being
+    // one-time; reference/ref-keyed-surfaces.md, flag-propagation contract).
+    refLedgerAligned: state.refLedgerAligned
   };
   const liveRefs = new Set(
     messages.map((m) => result.messageRefs.byRaw[m.id]).filter((r) => typeof r === "string")
@@ -2054,61 +2060,12 @@ var ACP_SEARCH_OPEN = "<acp_search>";
 var ACP_SEARCH_CLOSE = "</acp_search>";
 var ACP_DECOMPRESS_OPEN = "<acp_decompress>";
 var ACP_DECOMPRESS_CLOSE = "</acp_decompress>";
-var COMPRESS_RANGE_OBJECT = {
-  type: "object",
-  properties: {
-    topic: { type: "string" },
-    startId: {
-      type: "string",
-      description: "mNNNNN ref at the start of the range"
-    },
-    endId: {
-      type: "string",
-      description: "mNNNNN ref at the end of the range"
-    },
-    startRef: {
-      type: "string",
-      description: "Alternate spelling of startId"
-    },
-    endRef: {
-      type: "string",
-      description: "Alternate spelling of endId"
-    },
-    summary: {
-      type: "string",
-      description: "Self-contained summary replacing the range"
-    }
-  }
-};
 var COMPRESS_PARAMETERS = {
   type: "object",
   properties: {
-    topic: {
-      type: "string",
-      description: "Optional short title for the compressed range"
-    },
     content: {
-      description: `ONE plain string holding ALL ranges to compress \u2014 each block starts with its 'm00150\u2013m00220 optional topic' header line followed by that block's summary markdown (a valid JSON string: internal quotes \\" and newlines \\n; a JSON-encoded array as that string is also accepted). Batch multiple ranges into ONE call \u2014 do not split into one call per range.`,
-      anyOf: [
-        {
-          type: "array",
-          items: {
-            anyOf: [
-              {
-                type: "string",
-                description: `Line form: first line 'm00150\u2013m00220 optional topic', remaining lines the summary markdown, verbatim (a JSON string: quotes \\", newlines \\n). A single string may carry MULTIPLE ranges \u2014 each block starts with its own refs header line`
-              },
-              __spreadProps(__spreadValues({}, COMPRESS_RANGE_OBJECT), {
-                required: ["startId", "endId", "summary"]
-              }),
-              __spreadProps(__spreadValues({}, COMPRESS_RANGE_OBJECT), {
-                required: ["startRef", "endRef", "summary"]
-              })
-            ]
-          }
-        },
-        { type: "string" }
-      ]
+      type: "string",
+      description: `ONE plain string holding ALL ranges to compress \u2014 each block starts with its 'm00150\u2013m00220 optional topic' header line followed by that block's summary markdown (a valid JSON string: internal quotes \\" and newlines \\n; a JSON-encoded array as that string is also accepted). Batch multiple ranges into ONE call \u2014 do not split into one call per range.`
     }
   }
 };
@@ -2181,7 +2138,7 @@ Each message in the conversation is annotated with a <acp tokens="2.1K" type="to
 
 You have five context-management tools:
 
-- compress \u2014 Replace consumed conversation ranges with self-contained summaries you write. ONE call carries EVERY range: compress({ content: "m00150\u2013m00220 Auth\\nsummary\u2026\\nm00300\u2013m00350 Deploy\\nsummary\u2026" }) \u2014 one plain string, one block per range, each block starting with its 'mNNNNN\u2013mNNNNN optional topic' header line followed by that block's summary (a valid JSON string: \\" and \\n). A single range is the same shape with one block. Object entries {startId,endId,summary,topic?} in the content array are also accepted. Never split a batch into one call per range.
+- compress \u2014 Replace consumed conversation ranges with self-contained summaries you write. ONE call carries EVERY range: compress({ content: "m00150\u2013m00220 Auth\\nsummary\u2026\\nm00300\u2013m00350 Deploy\\nsummary\u2026" }) \u2014 one plain string, one block per range, each block starting with its 'mNNNNN\u2013mNNNNN optional topic' header line followed by that block's summary (a valid JSON string: \\" and \\n). A single range is the same shape with one block. Never split a batch into one call per range.
 - decompress \u2014 Restore a previously compressed block's content. By default restores one tier up (T2\u2192T1 summaries, not raw messages). Use full: true to restore all the way to original messages. Use toFile to write to file instead of inflating context. Example: decompress({ blockId: "b5" }) or decompress({ blockId: "b5", toFile: "path" }) or decompress({ blockId: "b5", full: true }).
 - search_context \u2014 Search compressed block summaries (and optionally visible messages) by keyword. Use BEFORE decompressing to find the right block. Example: search_context({ query: "auth token refresh" }).
 - acp_status \u2014 Context status with compressible ranges. No args = overview + ranges. Use to find what to compress next.`
@@ -2506,43 +2463,7 @@ var ABSORB_TOOL_OPENAI = {
 var COMPRESS_TOOL_GOOGLE = {
   name: COMPRESS_TOOL_NAME,
   description: COMPRESS_TOOL.description,
-  // `anyOf` is rejected by older API revisions, so `content` declares the
-  // object form; a JSON-encoded string of that array is still accepted by
-  // parseCompressInput, and the line form (a summary whose first line is
-  // 'm00150–m00220 optional topic') is documented in the description.
-  parameters: {
-    type: "object",
-    properties: {
-      topic: {
-        type: "string",
-        description: "Optional short title for the compressed range"
-      },
-      content: {
-        type: "array",
-        description: "One or more ranges to compress into separate summary blocks. Object form: {startId,endId,summary,topic?}. A JSON-encoded string of that array is also accepted; in the line form the summary begins with its own first line 'm00150\u2013m00220 optional topic', the rest being the summary markdown verbatim. REQUIRED \u2014 compress without content is invalid.",
-        items: {
-          type: "object",
-          properties: {
-            topic: { type: "string" },
-            startId: {
-              type: "string",
-              description: "mNNNNN ref at the start of the range"
-            },
-            endId: {
-              type: "string",
-              description: "mNNNNN ref at the end of the range"
-            },
-            summary: {
-              type: "string",
-              description: "Self-contained summary replacing the range"
-            }
-          },
-          required: ["startId", "endId", "summary"]
-        }
-      }
-    },
-    required: ["content"]
-  }
+  parameters: COMPRESS_PARAMETERS
 };
 var DECOMPRESS_TOOL_GOOGLE = {
   name: DECOMPRESS_TOOL_NAME,
@@ -2632,6 +2553,34 @@ function retrieveByRef(store, ref) {
 }
 function hasStoredRef(store, ref) {
   return store.byRef[ref] !== void 0;
+}
+function restampContentStore(store, byRaw) {
+  const next = {};
+  for (const entry of Object.values(store.byRef)) {
+    const live = byRaw[entry.rawId];
+    if (live === void 0 || live === "BLOCKED") continue;
+    if (next[live] === void 0) next[live] = entry;
+  }
+  let changed = Object.keys(next).length !== Object.keys(store.byRef).length;
+  for (const [ref, entry] of Object.entries(store.byRef)) {
+    const live = byRaw[entry.rawId];
+    if (live !== void 0 && live !== "BLOCKED") continue;
+    if (next[ref] === void 0) {
+      next[ref] = entry;
+    } else {
+      changed = true;
+    }
+  }
+  if (!changed) {
+    for (const [ref, entry] of Object.entries(store.byRef)) {
+      if (next[ref] !== entry) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (!changed) return store;
+  return __spreadProps(__spreadValues({}, store), { byRef: next });
 }
 function contentStoreStats(store) {
   let totalChars = 0;
@@ -5898,35 +5847,91 @@ function projectUnit(input) {
     );
   }
   {
-    const {
-      withdrawn: withdrawIds,
-      splitTurnCount: turns,
-      splitPairCount: pairs
-    } = computeIntegrityWithdrawals(input.messages, effectiveMessageIds);
-    withdrawnIds = withdrawIds;
-    splitTurnCount = turns;
-    splitPairCount = pairs;
-    if (withdrawIds.size > 0) {
-      for (const id of withdrawIds) effectiveMessageIds.delete(id);
-      const beforeWithdraw = filteredIds.length;
-      filteredIds = filteredIds.filter((id) => !withdrawIds.has(id));
+    const isMerge = consumedBlockIds.length > 0;
+    let consumedCoverage = /* @__PURE__ */ new Set();
+    let survivingCoverage = /* @__PURE__ */ new Set();
+    if (isMerge) {
+      const consumedSet = new Set(consumedBlockIds);
+      for (const block of activeBlocks(input.state)) {
+        const target = consumedSet.has(block.blockId) ? consumedCoverage : survivingCoverage;
+        for (const id of block.effectiveMessageIds) target.add(id);
+      }
+    }
+    let foldedRef = effectiveMessageIds;
+    if (isMerge) {
+      foldedRef = new Set(effectiveMessageIds);
+      for (const id of survivingCoverage) foldedRef.add(id);
+    }
+    const initial = computeIntegrityWithdrawals(input.messages, foldedRef);
+    splitTurnCount = initial.splitTurnCount;
+    splitPairCount = initial.splitPairCount;
+    if (initial.withdrawn.size > 0) {
       const splitDesc = [
         splitTurnCount > 0 ? `${splitTurnCount} turn(s)` : null,
         splitPairCount > 0 ? `${splitPairCount} tool call/result pair(s)` : null
       ].filter((part) => part !== null).join(" and ");
-      if (filteredIds.length === 0 && consumedBlockIds.length === 0) {
-        return finish2({
-          fatal: {
-            kind: "split",
-            error: new Error(
-              `Range would split ${splitDesc} at the protected-zone boundary: a visible tool-call must keep its reasoning run and its results (strict providers reject a rebuilt request that lost either). Shrink the range to end before the turn starts, or wait until the whole turn ages out of the protected zone.`
-            )
+      if (!isMerge) {
+        withdrawnIds = initial.withdrawn;
+        for (const id of initial.withdrawn) effectiveMessageIds.delete(id);
+        const beforeWithdraw = filteredIds.length;
+        filteredIds = filteredIds.filter((id) => !initial.withdrawn.has(id));
+        if (filteredIds.length === 0 && consumedBlockIds.length === 0) {
+          return finish2({
+            fatal: {
+              kind: "split",
+              error: new Error(
+                `Range would split ${splitDesc} at the protected-zone boundary: a visible tool-call must keep its reasoning run and its results (strict providers reject a rebuilt request that lost either). Shrink the range to end before the turn starts, or wait until the whole turn ages out of the protected zone.`
+              )
+            }
+          });
+        }
+        warnings.push(
+          `Withdrawn ${beforeWithdraw - filteredIds.length} message(s) from compression range to keep ${splitDesc} intact (visible tool-call would lose its reasoning run or its results).`
+        );
+      } else {
+        const unfoldable = new Set(
+          [...effectiveMessageIds].filter((id) => !consumedCoverage.has(id))
+        );
+        const unfolded = /* @__PURE__ */ new Set();
+        let current = initial.withdrawn;
+        let guard = unfoldable.size + 2;
+        let stuck = false;
+        while (current.size > 0 && guard-- > 0) {
+          let progress = false;
+          for (const id of current) {
+            if (unfoldable.has(id) && !unfolded.has(id)) {
+              unfolded.add(id);
+              progress = true;
+            }
           }
-        });
+          if (!progress) {
+            stuck = true;
+            break;
+          }
+          const recheck = new Set(effectiveMessageIds);
+          for (const id of unfolded) recheck.delete(id);
+          for (const id of survivingCoverage) recheck.add(id);
+          current = computeIntegrityWithdrawals(input.messages, recheck).withdrawn;
+        }
+        if (stuck || current.size > 0) {
+          const sample = [...consumedCoverage].slice(0, 5).join(", ");
+          return finish2({
+            fatal: {
+              kind: "split",
+              error: new Error(
+                `Merging ${consumedBlockIds.join(", ")} cannot satisfy turn integrity without unfolding already-folded message(s) owned by those blocks (${sample}) \u2014 doing so would drop their existing coverage. Align the range to whole turns (do not cut through a reasoning/tool-call/result group) or merge fewer blocks.`
+              )
+            }
+          });
+        }
+        withdrawnIds = unfolded;
+        for (const id of unfolded) effectiveMessageIds.delete(id);
+        const beforeWithdraw = filteredIds.length;
+        filteredIds = filteredIds.filter((id) => !unfolded.has(id));
+        warnings.push(
+          `Withdrew ${beforeWithdraw - filteredIds.length} newly-folded message(s) from the merge to keep ${splitDesc} intact while preserving the existing coverage of ${consumedBlockIds.join(", ")}.`
+        );
       }
-      warnings.push(
-        `Withdrawn ${beforeWithdraw - filteredIds.length} message(s) from compression range to keep ${splitDesc} intact (visible tool-call would lose its reasoning run or its results).`
-      );
     }
   }
   return finish2({ fatal: null });
@@ -7665,7 +7670,7 @@ function resolveCoverageInterval(directMessages, consumedBlocks) {
     segments.push({ start: message.ledgerSeq, end: message.ledgerSeq });
   }
   for (const consumed of consumedBlocks) {
-    if (!consumed || typeof consumed.startSeq !== "number" || typeof consumed.endSeq !== "number" || consumed.endSeq < consumed.startSeq) {
+    if (!consumed || typeof consumed.startSeq !== "number" || typeof consumed.endSeq !== "number" || consumed.endSeq < consumed.startSeq || consumed.startSeq < 0 || consumed.endSeq < 0) {
       return void 0;
     }
     segments.push({ start: consumed.startSeq, end: consumed.endSeq });
@@ -7966,7 +7971,11 @@ function cloneState(state) {
     sweptOrphanCallIds: state.sweptOrphanCallIds ? [...state.sweptOrphanCallIds] : void 0,
     pendingOrphanSweepMinRef: state.pendingOrphanSweepMinRef,
     deadRefs: state.deadRefs ? [...state.deadRefs] : void 0,
-    lastPassIds: state.lastPassIds ? [...state.lastPassIds] : void 0
+    lastPassIds: state.lastPassIds ? [...state.lastPassIds] : void 0,
+    // #4797: the one-time ledger-alignment gate must survive the fold clone
+    // too — same contract as the sync clone (kernel/src/sync.ts); dropping it
+    // re-arms the restamp on every applyCompression.
+    refLedgerAligned: state.refLedgerAligned
   };
 }
 function scoreRelevance(block, terms) {
@@ -8082,12 +8091,7 @@ var LEAN_TOOL_PROMPTS = {
   compress: {
     description: "Replace consumed conversation ranges with self-contained summaries using mNNNNN or bN refs; batch multiple ranges into ONE call (a single string may hold every range).",
     paramDescriptions: {
-      content: "ONE JSON-escaped string holding ALL ranges \u2014 one block per range, first line 'm00150\u2013m00220 optional topic', remaining lines the summary markdown; object entries in the content array also accepted.",
-      startId: "Inclusive first mNNNNN or bN ref.",
-      endId: "Inclusive last mNNNNN or bN ref.",
-      summary: "Self-contained replacement preserving exact technical details.",
-      topic: "Short label; a per-range label overrides the top-level fallback.",
-      summaryMaxChars: "Optional summary length limit override."
+      content: "ONE JSON-escaped string holding ALL ranges \u2014 one block per range, first line 'm00150\u2013m00220 optional topic', remaining lines the summary markdown."
     }
   },
   decompress: {
