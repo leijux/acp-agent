@@ -122,12 +122,82 @@ func (a *app) tuiRepl(ctx context.Context, cont bool) error {
 	return err
 }
 
-// tuiSubmitLoop 消费用户提交的输入：斜杠命令就地处理，其余交给 agent。
+// tuiSubmitLoop 消费用户提交的输入。
+//
+// 两种语义：
+//   - 空闲时提交 = 开一轮新对话；
+//   - 运行中提交 = 作为 steering 插话（agent.Steer）：当前这轮工具调用结束后、
+//     下一次模型请求前进入上下文，而不是排到整轮彻底结束之后。想立刻停下用 Esc。
+//
+// turn 必须放在 goroutine 里跑：主循环要一直能收输入，否则运行中的提交只能堆在
+// UI 的 8 条缓冲里，等轮次结束才被取走 —— 那时 agent 已空闲，插话就退化成排队了。
+// submitAction 是「这条输入该怎么处理」的决策结果。
+type submitAction int
+
+const (
+	submitCommand submitAction = iota // 斜杠命令：就地执行
+	submitTurn                        // 空闲：开一轮新对话
+	submitSteer                       // 运行中：作为 steering 插话
+)
+
+// decideSubmit 是 tuiSubmitLoop 的唯一分支判断，单独抽出来是为了能测：
+// 「运行中的普通输入必须变成 steering，而不是排到下一轮」这条语义一旦坏了，
+// 表现只是行为变了（没人报错），没有测试守不住。
+func decideSubmit(input string, busy bool) submitAction {
+	if strings.HasPrefix(input, "/") {
+		return submitCommand
+	}
+	if busy {
+		return submitSteer
+	}
+	return submitTurn
+}
+
 func (a *app) tuiSubmitLoop(ctx context.Context, ui *tui.UI, ctl *turnCtl) {
+	turnDone := make(chan struct{}, 1)
+	var pending []string // 运行中收到的斜杠命令：命令不能插话，攒到轮次结束
+	busy := false
+
+	// handle 处理一条输入，返回是否退出。
+	handle := func(input string) bool {
+		switch decideSubmit(input, busy) {
+		case submitCommand:
+			quit, err := a.command(ctx, input)
+			if err != nil {
+				a.setKind(kindSystem)
+				a.term.printf("%s %v\n", a.term.paint(cRed, "错误:"), err)
+			}
+			ui.SetHeader(a.headerLine())
+			return quit
+		case submitSteer:
+			a.agent.Steer(input)
+			a.setKind(kindSystem)
+			a.term.printf("%s\n", a.term.paint(cDim,
+				"↳ 已插话：这轮工具调用结束后生效（要立刻中断按 Esc）"))
+			return false
+		}
+		busy = true
+		go func(in string) {
+			defer func() { turnDone <- struct{}{} }()
+			a.tuiTurn(ctx, ui, ctl, in)
+		}(input)
+		return false
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-turnDone:
+			busy = false
+			q := pending
+			pending = nil
+			for _, in := range q {
+				if handle(in) {
+					ui.Quit()
+					return
+				}
+			}
 		case input, ok := <-ui.Submit():
 			if !ok {
 				return
@@ -136,24 +206,20 @@ func (a *app) tuiSubmitLoop(ctx context.Context, ui *tui.UI, ctl *turnCtl) {
 			if input == "" {
 				continue
 			}
-			if strings.HasPrefix(input, "/") {
-				quit, err := a.command(ctx, input)
-				if err != nil {
-					a.setKind(kindSystem)
-					a.term.printf("%s %v\n", a.term.paint(cRed, "错误:"), err)
-				}
-				ui.SetHeader(a.headerLine())
-				if quit {
-					ui.Quit()
-					return
-				}
+			// 运行中的命令不能插话（它改的是会话/工具/模型状态），先攒着。
+			if busy && strings.HasPrefix(input, "/") {
+				pending = append(pending, input)
+				a.setKind(kindSystem)
+				a.term.printf("%s\n", a.term.paint(cDim, "↳ 命令将在当前任务结束后执行"))
 				continue
 			}
-			a.tuiTurn(ctx, ui, ctl, input)
+			if handle(input) {
+				ui.Quit()
+				return
+			}
 		}
 	}
 }
-
 // tuiTurn 跑一轮对话。阻塞在提交 goroutine 上，界面另用一条 goroutine 刷新。
 func (a *app) tuiTurn(ctx context.Context, ui *tui.UI, ctl *turnCtl, input string) {
 	start := time.Now()

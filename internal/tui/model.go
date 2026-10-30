@@ -665,7 +665,10 @@ func (m *Model) submit() {
 	m.breakBlk = true
 	select {
 	case m.ui.submit <- text:
-	default: // 宿主还没取走：丢弃，不让界面卡死
+	default:
+		// 宿主还没取走（正常不会：提交循环一直在收）。丢了必须让用户知道，
+		// 否则界面上那条 user 块看起来已经发出去了。
+		m.appendLine(KindSystem, "↳ 输入队列已满，本次未发送")
 	}
 }
 
