@@ -346,3 +346,64 @@ func TestEscClearsInput(t *testing.T) {
 		t.Fatal("输入为空时 Ctrl+C 应退出")
 	}
 }
+
+// 思考一结束（正文开始）就折叠，不等整轮结束。
+func TestThinkingCollapsesWhenTextStarts(t *testing.T) {
+	m, _ := newTestModel(60, 20)
+	send(m, RunningMsg{On: true})
+	send(m, LineMsg{Kind: KindThinking, Text: "想了很多"})
+	if m.blocks[0].Collapsed {
+		t.Fatal("思考还在流的时候不该折叠")
+	}
+
+	// 宿主在这时切 kind：思考结束、正文开始
+	send(m, KindMsg{Kind: KindText})
+	if !m.blocks[0].Collapsed {
+		t.Fatal("正文开始后思考块应立即折叠")
+	}
+	send(m, LineMsg{Kind: KindText, Text: "答案"})
+	if m.blocks[1].Kind != KindText || m.blocks[1].Collapsed {
+		t.Fatalf("正文块不该被折叠: %+v", m.blocks[1])
+	}
+}
+
+// 工具调用开始也算思考结束（先思考、再调工具、再答，是最常见的形状）。
+func TestThinkingCollapsesWhenToolStarts(t *testing.T) {
+	m, _ := newTestModel(60, 20)
+	send(m, RunningMsg{On: true})
+	send(m, LineMsg{Kind: KindThinking, Text: "先看看文件"})
+	send(m, KindMsg{Kind: KindTool})
+	if !m.blocks[0].Collapsed {
+		t.Fatal("工具开始后思考块应立即折叠")
+	}
+}
+
+// 回放/历史里手动展开的旧思考块，不该被下一次思考结束顺手关掉。
+func TestCollapseOnlyTouchesCurrentTurn(t *testing.T) {
+	m, _ := newTestModel(60, 20)
+	// 上一轮的思考块：手动展开
+	send(m, LineMsg{Kind: KindThinking, Text: "旧思考"})
+	send(m, KindMsg{Kind: KindText})
+	send(m, LineMsg{Kind: KindText, Text: "旧答案"})
+	m.blocks[0].Collapsed = false // 用户手动点开
+	m.needRebuild = true
+
+	// 新一轮
+	send(m, RunningMsg{On: true})
+	send(m, LineMsg{Kind: KindThinking, Text: "新思考"})
+	send(m, KindMsg{Kind: KindText})
+
+	if m.blocks[0].Collapsed {
+		t.Fatal("上一轮被手动展开的思考块不该被收回去")
+	}
+	// 找到本轮那块并确认被折叠
+	var cur *Block
+	for _, b := range m.blocks {
+		if b.Kind == KindThinking && len(b.Lines) > 0 && b.Lines[0] == "新思考" {
+			cur = b
+		}
+	}
+	if cur == nil || !cur.Collapsed {
+		t.Fatalf("本轮思考块应折叠: %+v", cur)
+	}
+}

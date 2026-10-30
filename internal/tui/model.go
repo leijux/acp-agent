@@ -172,6 +172,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case KindMsg:
+		// 思考一结束（正文/工具开始）就收起来：长轮次里思考常常几千字，等到整轮
+		// 结束才折叠，正文早被顶出屏幕，用户只看到一行「▸ 12 行 思考」。
+		//
+		// 不判断「刚才是不是思考」：宿主切 kind 时会先发 KindMsg 再产内容，而思考
+		// 可能根本没收过「切到思考」那条通知（直出 LineMsg 也常见）。切到非思考就
+		// 收一遍最省事，函数本身只动「本轮 + 未折叠 + 有内容」的思考块。
+		if msg.Kind != KindThinking {
+			m.collapseFinishedThinking()
+		}
 		m.breakBlk = true
 		return m, nil
 
@@ -781,6 +790,31 @@ func (m *Model) toggleAt(i int) {
 }
 
 // toggleRecent 折叠/展开最近的思考块；有选中块时优先操作它。
+// collapseFinishedThinking 收起本轮已经写完的思考块。
+//
+// 只收本轮（turnFrom 之后）：历史回放里的旧块由回放自己决定初始折叠状态，
+// 用户手动展开过的旧块不该被下一次思考结束顺手关掉。
+func (m *Model) collapseFinishedThinking() {
+	from := 0
+	if m.turnFrom >= 0 {
+		from = m.turnFrom
+	}
+	changed := false
+	for i := from; i < len(m.blocks); i++ {
+		b := m.blocks[i]
+		if b.Kind != KindThinking || b.Collapsed || !b.collapsible() {
+			continue
+		}
+		b.finish() // 记下耗时，折叠标题里要显示
+		b.Collapsed = true
+		changed = true
+	}
+	if changed {
+		m.sel.reset() // 折叠会改行数，旧选区行列全失效
+		m.needRebuild = true
+	}
+}
+
 func (m *Model) toggleRecent() {
 	if m.selBlock >= 0 && m.selBlock < len(m.blocks) && m.blocks[m.selBlock].collapsible() {
 		m.toggleAt(m.selBlock)
