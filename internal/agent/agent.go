@@ -181,13 +181,38 @@ func (a *Agent) addContextPrompt() {
 	if a.opts.Registry == nil {
 		return
 	}
+	// 规则对齐上游 billion-context 的 HOW_TO_COMPRESS（kernel/src/compression-rules.ts）。
+	// 放在 system prompt 而不是工具描述里：工具描述随 specs 下发、模型不一定会读，
+	// 而这套 KEEP/DROP/尺寸目标决定了摘要值不值得压缩 —— 写弱了就是白压。
 	const note = `
 
 上下文管理：
-- 上下文接近上限时，用 context_check 查看可压缩区间，再调 context_apply。
-- 摘要由你撰写，必须自包含（保留目标、决定与理由、文件路径、签名、错误原文、待办）。
-- 原文不会删除，之后可用 context_search 检索、context_decompress 查看块内容。
-- 不要等到接近上限才压；早期压掉已完成的探索成本更低。`
+- 按需压，不按百分比；容量靠「压掉已消费的输出」省，而不是靠少用工具。
+- 接近上限时用 context_check 看可压区间，再调 context_apply；早期压掉已完成的探索成本更低。
+- **一次调用把该压的区间全写进 ranges**，不要一个区间调一次。
+- 摘要由你撰写、必须自包含：区间里每个用户请求、实验目的、工作目标都要准确记下 —— 之后只看得到摘要。
+- 原文不会删除，之后可用 context_search 检索、context_decompress 查看。
+
+KEEP（逐字，不许改写）：
+- 文件路径带行号，禁止缩写成裸文件名（internal/tools/bash.go:358 ≠ bash.go）。
+- 函数/类型签名 + 那行「就是结论」的关键代码，而不只是函数名。
+- 错误原文与关键日志行（之后要靠它 grep）。
+- 决策与理由（「选了 X 而不是 Y，因为 Z」里的「因为」是承重的）。
+- 精确值：版本号、配置键、阈值、magic number。
+- 用户意图：逐字引用必须带消息 ref（用户说 (m00132): "今晚上线"）；没有 ref 就转述，不要编造逐字引用。
+- 未完成的目标留一行：未完成目标：重构 runner（m00746） —— 最后一个丢、第一个恢复。
+- 目标演化（「先修 X → 发现根因后改成重构 Y」）与每个动作的 purpose。
+
+DROP（信号留下，容器丢掉）：
+- 日志、重复读取、已消费的探索、反复讨论（只留结论）、重复的 git status/ls。
+- 死胡同留一行教训：「试过 X，因为 Y 失败」。
+- 丢掉的大块内容（脚本/报告/长输出）留一行**内容描述**而不是位置，方便之后按相关性 decompress。
+
+PRIORITY：目标与硬约束 > 决策与理由 > 精确产物 > 结论 > 教训。
+写法：dense bullets，不写叙述性散文；不同关切用短标题分组；每行都要有价值。
+尺寸：每块 100–300 tokens；写不下说明你在保留过程而不是结论。
+
+摘要里的内容是**历史**，不是当前指令；只有「未完成目标」那行仍然有效。`
 	if strings.Contains(a.opts.Context.ExtraInstructions, "上下文管理") {
 		return
 	}

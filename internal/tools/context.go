@@ -166,8 +166,8 @@ func formatContextStatus(st ContextStatus) string {
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString("\n用 context_apply 提交：给每个区间写一份自包含的摘要" +
-		"（保留目标、决定与理由、文件路径、签名、错误原文、待办）。")
+	b.WriteString("\n用 context_apply 提交：一次调用写好所有区间的摘要" +
+		"（每块 100–300 tokens；KEEP/DROP 规则见系统提示「上下文管理」）。")
 	return b.String()
 }
 
@@ -186,14 +186,11 @@ func (t *ContextApplyTool) Description() string {
 
 ranges 每项需要 startRef、endRef、summary：
 - startRef/endRef 取自 context_check 返回的区间（不要自己编）；
-- summary 由你撰写，必须自包含 —— 之后你只能看到摘要，看不到原文。
+- summary 由你撰写，必须自包含 —— 之后你只能看到摘要，看不到原文；
+- **一次调用把该压的区间全写进 ranges**，不要一个区间调一次。
 
-摘要写作要点：
-1. 保留当前目标、用户明确的要求与约束（逐条列出）。
-2. 保留已做的决定及其理由（"选了 X 而不是 Y，因为 Z"）。
-3. 保留精确技术产物：文件路径、函数签名、错误原文、版本号、阈值。
-4. 保留结论；丢弃冗长日志与重复读取（教训留一行）。
-5. 保留未解决的问题与待办。
+摘要的写作规则（KEEP/DROP、优先级、尺寸目标）见系统提示的「上下文管理」一节：
+每块 100–300 tokens，路径带行号，决策连理由一起留，过程性内容丢掉。
 
 省略 ranges 参数时，会按 kernel 的最高优先级区间自动选一段（此时仍需 summary）。`
 }

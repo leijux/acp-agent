@@ -795,3 +795,29 @@ func TestAgentForwardsThinkingAndTemperature(t *testing.T) {
 		t.Errorf("Temperature = %v, want 0.3", got.Temperature)
 	}
 }
+
+// 系统提示里的上下文压缩规则要够具体。
+//
+// 这套规则原先只有 5 句（"保留目标、决定、路径…"），实测结果是每块写 300-600
+// tokens、把过程也写进去。对齐上游 billion-context 的 HOW_TO_COMPRESS 之后，
+// 至少要有：尺寸目标、禁缩写路径、一次调用压多块、摘要=历史。
+func TestContextPromptCarriesCompressionRules(t *testing.T) {
+	// 摘要规则挂在 Agent 上（addContextPrompt）：需要 Registry 非空才会注入。
+	a := newTestAgent(t, NewScriptedProvider(reply("ok")), func(o *Options) {
+		o.Registry = tools.NewRegistry()
+	})
+	prompt := BuildSystemPrompt(a.opts.Context)
+	for _, want := range []string{
+		"上下文管理",
+		"100–300 tokens",   // 尺寸目标
+		"禁止缩写成裸文件名",      // KEEP：路径带行号
+		"一次调用把该压的区间全写进 ranges", // 批量提交
+		"未完成目标",           // open objectives 结转
+		"摘要里的内容是**历史**",    // 别把旧摘要当新指令
+		"KEEP", "DROP", "PRIORITY",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("系统提示缺少压缩规则要点 %q", want)
+		}
+	}
+}
