@@ -297,3 +297,58 @@ func TestCtrlEnterInsertsNewline(t *testing.T) {
 		}
 	})
 }
+
+// 功能键不能被当成文本插进输入框。
+//
+// v2 里特殊键的 Code 是 iota 私有值（KeyF1…KeyF32），早先的实现有
+// 「Text 为空就用 string(Code) 兜底」，结果按 F1 会插入一个私用区乱码字符。
+func TestSpecialKeysDoNotInsertText(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, runes("ab"))
+	for _, k := range []tea.KeyPressMsg{
+		{Code: tea.KeyF1},
+		{Code: tea.KeyF5},
+		{Code: tea.KeyInsert},
+		{Code: tea.KeyTab},
+	} {
+		send(m, k)
+	}
+	if got := m.in.text(); got != "ab" {
+		t.Fatalf("特殊键不该插入字符，实际 %q", got)
+	}
+}
+
+// abort 后退回的排队消息要能放回输入框（Pi 语义：放回编辑器）。
+func TestPrefillReplacesInput(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	send(m, runes("旧内容"))
+	send(m, PrefillMsg{Text: "顺便看下 README"})
+	if got := m.in.text(); got != "顺便看下 README" {
+		t.Fatalf("输入框 = %q，期望被退回的消息覆盖", got)
+	}
+	// 多行退回也要能显示（折叠成 ⏎），且不提交
+	if view := m.in.view(prompt, 80); strings.Contains(view, "\n") {
+		t.Fatalf("输入行不该含裸换行: %q", view)
+	}
+	send(m, PrefillMsg{Text: "第一行\n第二行"})
+	if got := m.in.text(); got != "第一行\n第二行" {
+		t.Fatalf("多行退回 = %q", got)
+	}
+}
+
+// 权限确认期间的粘贴不能进输入框（否则剪贴板内容会灌进正在询问的界面）。
+func TestPasteIgnoredDuringPermission(t *testing.T) {
+	m, _ := newTestModel(80, 20)
+	reply := make(chan string, 1)
+	send(m, AskMsg{Tool: "write", Reply: reply})
+	send(m, pasteMsg("不该进来"))
+	if got := m.in.text(); got != "" {
+		t.Fatalf("权限询问期间粘贴被写进输入框: %q", got)
+	}
+	// 回答之后粘贴恢复正常
+	send(m, key('y'))
+	send(m, pasteMsg("正常"))
+	if got := m.in.text(); got != "正常" {
+		t.Fatalf("回答后粘贴应恢复，实际 %q", got)
+	}
+}

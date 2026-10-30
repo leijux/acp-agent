@@ -202,6 +202,14 @@ func (a *app) tuiSubmitLoop(ctx context.Context, ui *tui.UI, ctl *turnCtl) {
 			if !ok {
 				return
 			}
+			// 先把「turn 刚结束」这个通知排掉：两个 case 同时就绪时 select 是随机的，
+			// 先取输入会把一条本该开新一轮的消息误当成插话（Steer 后要等下一轮的
+			// 第一个 assistant 结束才生效，用户会看到「发了但没反应」）。
+			select {
+			case <-turnDone:
+				busy = false
+			default:
+			}
 			input = strings.TrimSpace(input)
 			if input == "" {
 				continue
@@ -244,6 +252,22 @@ func (a *app) tuiTurn(ctx context.Context, ui *tui.UI, ctl *turnCtl, input strin
 	case res != nil:
 		a.term.printUsage(res.Usage, time.Since(start))
 	}
+	// abort 会把还在排队的 steering / follow-up 消息退回来（Pi 语义：放回编辑器）。
+	// 不处理就等于把用户刚打的插话静默丢掉。
+	if res != nil && len(res.Abandoned) > 0 {
+		var texts []string
+		for _, m := range res.Abandoned {
+			if t := strings.TrimSpace(agent.TextOf(m)); t != "" {
+				texts = append(texts, t)
+			}
+		}
+		if len(texts) > 0 {
+			ui.Prefill(strings.Join(texts, "\n"))
+			a.setKind(kindSystem)
+			a.term.printf("%s\n", a.term.paint(cDim, "↳ 中断时排队的消息已放回输入框"))
+		}
+	}
+
 	a.term.printf("\n")
 	a.saveSession()
 	ui.Running(false, "")

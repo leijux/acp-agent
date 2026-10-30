@@ -101,6 +101,10 @@ type FreezeMsg struct{}
 // 历史里的思考默认收起，界面才不会被几屏旧思考塔满）。
 type CollapseThinkingMsg struct{}
 
+// PrefillMsg 把文本放回输入框（abort 后把退回的排队消息交还给用户改）。
+// 会覆盖当前输入：调用点只在「这一轮刚被中断」时用，此时输入框本来就是空的。
+type PrefillMsg struct{ Text string }
+
 // ---------- 块 ----------
 
 // Block 是一个语义块。Lines 里存的是宿主渲染好的行（可能带 ANSI）。
@@ -391,6 +395,9 @@ func (u *UI) Freeze() { u.Send(FreezeMsg{}) }
 
 // CollapseThinking 折叠当前已有全部思考块。
 func (u *UI) CollapseThinking() { u.Send(CollapseThinkingMsg{}) }
+
+// Prefill 把文本放进输入框（abort 时退回排队消息用）。
+func (u *UI) Prefill(text string) { u.Send(PrefillMsg{Text: text}) }
 
 // UserLine 记录一条用户输入（作为独立的 user 块）。
 func (u *UI) UserLine(text string) {

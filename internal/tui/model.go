@@ -212,6 +212,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mouse = msg.On
 		return m, nil
 
+	case PrefillMsg:
+		m.in.reset()
+		m.in.insertString(msg.Text)
+		return m, nil
+
 	case CollapseThinkingMsg:
 		m.sel.reset() // 折叠会把行数改一大截，旧选区行列全失效
 		for _, b := range m.blocks {
@@ -243,6 +248,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.PasteMsg:
+		// 权限确认期间只认 y/a/n/d 与 Esc：粘贴也一样，别把剪贴板内容灌进输入框
+		// （v1 里粘贴走 KeyRunes+Paste 会被 onKey 的 perm 检查拦下，v2 拆成独立
+		// 消息后必须在这里补一道）。
+		if m.perm != nil {
+			return m, nil
+		}
 		// 括号粘贴：整段交给输入行（多行/过长会自动折叠成 [txt×N行]）。
 		m.in.paste(msg.Content)
 		m.looseNL = false
@@ -273,7 +284,13 @@ func (m *Model) onKey(k tea.KeyPressMsg) tea.Cmd {
 			m.answer("n")
 			return nil
 		}
-		switch strings.ToLower(key.Text) {
+		// 取 Text，Text 为空时退回 Code（只认 ASCII：功能键的 Code 是私用区
+		// 大值，不能 string() 出来参与比较）。
+		t := strings.ToLower(key.Text)
+		if t == "" && key.Code > 0 && key.Code < 0x80 {
+			t = strings.ToLower(string(key.Code))
+		}
+		switch t {
 		case "y":
 			m.answer("y")
 		case "a":
@@ -421,10 +438,11 @@ func (m *Model) onKey(k tea.KeyPressMsg) tea.Cmd {
 
 	// 其余按文本处理：普通字符、输入法上屏（一次多字符）、以及 coninput 把
 	// Ctrl+J 报成的裸 \n。
+	//
+	// 只用 key.Text，不从 key.Code 兜底：功能键的 Code 是 iota 私有值
+	// （KeyF1…KeyF32），string() 出来是私用区乱码 —— 按 F1 会在输入框里
+	// 插一个看不见的字符。
 	text := key.Text
-	if text == "" && key.Code > 0 {
-		text = string(key.Code)
-	}
 	if text == "" {
 		return nil
 	}
