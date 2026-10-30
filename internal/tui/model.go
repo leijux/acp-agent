@@ -284,7 +284,7 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 
 	switch msg.Type {
 	case tea.KeyEnter:
-		if msg.Alt { // Alt+Enter 不提交（便于敲多行）
+		if msg.Alt { // Alt+Enter 不提交（便于敲多行）；Ctrl-Enter 见 KeyCtrlJ 分支
 			m.in.insert('\n')
 			return nil
 		}
@@ -322,6 +322,17 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		return tea.Quit
+
+	case tea.KeyCtrlJ:
+		// Ctrl+Enter 换行。
+		//
+		// 为什么是 Ctrl+J 而不是 "KeyEnter + Ctrl"：bubbletea v1 的 KeyMsg 只有
+		// Alt 一个修饰位，Windows 的 coninput 把 VK_RETURN 一律映射成 KeyEnter
+		// （不看 ctrl 状态），Unix 上 Ctrl+Enter 与 Enter 都是 \r —— 两边都没有
+		// 可区分的信号。能拿到的只有终端把 Ctrl+Enter 发成 LF（0x0A）这一种，
+		// 也就是 KeyCtrlJ。Alt+Enter 仍然是最可靠的手动换行。
+		m.in.insert('\n')
+		return nil
 
 	case tea.KeyCtrlD:
 		if m.in.empty() {
@@ -399,6 +410,12 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case tea.KeyRunes:
+		// 单个裸换行：Windows 的 coninput 把 Ctrl+J 报成 KeyRunes("\n")，
+		// 下面的文本插入会把它当控制字符过滤掉，所以先单独接住。
+		if !msg.Paste && string(msg.Runes) == "\n" {
+			m.in.insert('\n')
+			return nil
+		}
 		if msg.Paste { // 括号粘贴：整段交给输入行（多行/过长会自动折叠成 [txt×N行]）
 			m.in.paste(string(msg.Runes))
 			m.looseNL = false

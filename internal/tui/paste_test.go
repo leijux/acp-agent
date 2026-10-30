@@ -242,3 +242,42 @@ func TestPasteStateClearedOnSubmit(t *testing.T) {
 		t.Fatalf("用户块 = %q，期望两行 a/b", got)
 	}
 }
+
+// Ctrl+Enter 换行。终端把它发成 LF 时是 KeyCtrlJ；Windows 的 coninput 会把它
+// 报成 KeyRunes("\n")，两条路径都要能换行（而不是提交、也不是被过滤掉）。
+func TestCtrlEnterInsertsNewline(t *testing.T) {
+	t.Run("KeyCtrlJ", func(t *testing.T) {
+		m, _ := newTestModel(80, 20)
+		send(m, runes("第一行"))
+		send(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		send(m, runes("第二行"))
+		if got := m.in.text(); got != "第一行\n第二行" {
+			t.Fatalf("提交文本 = %q，期望含真实换行", got)
+		}
+		if view := m.in.view(prompt, 80); strings.Contains(view, "\n") || !strings.Contains(view, "⏎") {
+			t.Fatalf("渲染应为单行显示 ⏎: %q", view)
+		}
+	})
+
+	t.Run("KeyRunes 裸换行", func(t *testing.T) {
+		m, _ := newTestModel(80, 20)
+		send(m, runes("a"))
+		send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\n'}})
+		send(m, runes("b"))
+		if got := m.in.text(); got != "a\nb" {
+			t.Fatalf("提交文本 = %q，期望含真实换行", got)
+		}
+	})
+
+	// 换行不能把输入提交掉（否则多行输入根本敲不出来）
+	t.Run("不触发提交", func(t *testing.T) {
+		m, ui := newTestModel(80, 20)
+		send(m, runes("x"))
+		send(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		select {
+		case got := <-ui.submit:
+			t.Fatalf("Ctrl+Enter 不该提交，收到 %q", got)
+		default:
+		}
+	})
+}
