@@ -173,9 +173,8 @@ func (b *Block) title() string {
 	if b.Duration > 0 {
 		parts = append(parts, b.Duration.Round(100*time.Millisecond).String())
 	}
-	if b.Collapsed {
-		parts = append(parts, "点击/⌃T 展开")
-	}
+	// 展开方式（点击 / ⌃T）不再写在标题上：折叠箭头本身已经说明「这里有内容」，
+	// 提示每块都重复一遍，长会话里满屏都是同一句话。
 	return fmt.Sprintf("%s%s 思考 · %s%s", escDim, arrow, strings.Join(parts, " · "), escReset)
 }
 
