@@ -217,11 +217,10 @@ acp-agent --session ./x.jsonl  # 指定文件
 - `Esc` 中断当前 turn（空闲时清空输入）；`Ctrl-C` 先清输入、空输入时退出；
   `Ctrl-D` 退出；`Alt-Enter` 插入换行。
 
-  `Ctrl-Enter` 也能换行，但能不能生效取决于终端怎么上报它：bubbletea v1 的按键
-  只带 `Alt` 一个修饰位，Windows 的控制台事件（coninput）把 `VK_RETURN` 一律报成
-  普通 Enter、不看 Ctrl 状态，Unix 上 `Ctrl-Enter` 与 `Enter` 都是 `\r`。所以
-  只有终端把 `Ctrl-Enter` 发成 `LF`（0x0A）时才能识别（等价于 `Ctrl-J`）。
-  **要稳就用 `Alt-Enter`**，它在所有平台都能区分。
+  `Ctrl-Enter` 也能换行。用的是 bubbletea v2 的修饰位（`Key{Code, Text, Mod}`）：
+  支持增强键盘的终端会直接上报 `Enter + Ctrl`；不支持的老终端把 Ctrl-Enter 与
+  Enter 发成同一个 `\r`，这时退化成 `Ctrl-J`（LF）也能换行。若两者都不行
+  （终端既不报修饰键、也不发 LF），**用 `Alt-Enter`**，它在所有平台都能区分。
 - 权限询问（`ask` 模式）在输入行上方以 `允许执行 xxx？[y/a/n/d]` 出现，
   Esc 等于「否」，与 turn 循环在同一界面里，不会丢按。
 

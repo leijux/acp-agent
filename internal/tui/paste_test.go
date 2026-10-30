@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // pasteMsg 构造一次括号粘贴（bubbletea 用 Paste 标记整段输入）。
 func pasteMsg(s string) tea.Msg {
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s), Paste: true}
+	return tea.PasteMsg{Content: s}
 }
 
 // 多行粘贴折叠成 [txt×N行]，提交时展开成原文。
@@ -131,7 +131,7 @@ func TestPasteMixedWithTyping(t *testing.T) {
 func TestAltEnterNewlineRendersAsSymbol(t *testing.T) {
 	m, _ := newTestModel(80, 20)
 	send(m, runes("第一行"))
-	send(m, tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	send(m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	send(m, runes("第二行"))
 
 	if got := m.in.text(); got != "第一行\n第二行" {
@@ -249,7 +249,7 @@ func TestCtrlEnterInsertsNewline(t *testing.T) {
 	t.Run("KeyCtrlJ", func(t *testing.T) {
 		m, _ := newTestModel(80, 20)
 		send(m, runes("第一行"))
-		send(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		send(m, ctrlKey('j'))
 		send(m, runes("第二行"))
 		if got := m.in.text(); got != "第一行\n第二行" {
 			t.Fatalf("提交文本 = %q，期望含真实换行", got)
@@ -262,10 +262,26 @@ func TestCtrlEnterInsertsNewline(t *testing.T) {
 	t.Run("KeyRunes 裸换行", func(t *testing.T) {
 		m, _ := newTestModel(80, 20)
 		send(m, runes("a"))
-		send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\n'}})
+		send(m, tea.KeyPressMsg{Text: "\n"})
 		send(m, runes("b"))
 		if got := m.in.text(); got != "a\nb" {
 			t.Fatalf("提交文本 = %q，期望含真实换行", got)
+		}
+	})
+
+	// v2 起按键带修饰位：支持增强键盘的终端直接上报 Enter+Ctrl。
+	t.Run("Ctrl+Enter（v2 修饰位）", func(t *testing.T) {
+		m, ui := newTestModel(80, 20)
+		send(m, runes("a"))
+		send(m, tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModCtrl})
+		send(m, runes("b"))
+		if got := m.in.text(); got != "a\nb" {
+			t.Fatalf("提交文本 = %q，期望含真实换行", got)
+		}
+		select {
+		case got := <-ui.submit:
+			t.Fatalf("Ctrl+Enter 不该提交，收到 %q", got)
+		default:
 		}
 	})
 
@@ -273,7 +289,7 @@ func TestCtrlEnterInsertsNewline(t *testing.T) {
 	t.Run("不触发提交", func(t *testing.T) {
 		m, ui := newTestModel(80, 20)
 		send(m, runes("x"))
-		send(m, tea.KeyMsg{Type: tea.KeyCtrlJ})
+		send(m, ctrlKey('j'))
 		select {
 		case got := <-ui.submit:
 			t.Fatalf("Ctrl+Enter 不该提交，收到 %q", got)

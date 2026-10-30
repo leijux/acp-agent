@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // drain 取走排队中的消息（界面未 Run 时 Send 只是入队；界面启动后这里为空）。

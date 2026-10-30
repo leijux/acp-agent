@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -207,11 +207,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Println(flat)
 
 	case MouseToggleMsg:
+		// v2 里鼠标模式是 View 上的声明（见 View 的 MouseMode），没有
+		// EnableMouseCellMotion/DisableMouse 这类命令 —— 改个标志、下一帧生效。
 		m.mouse = msg.On
-		if msg.On {
-			return m, func() tea.Msg { return tea.EnableMouseCellMotion() }
-		}
-		return m, func() tea.Msg { return tea.DisableMouse() }
+		return m, nil
 
 	case CollapseThinkingMsg:
 		m.sel.reset() // 折叠会把行数改一大截，旧选区行列全失效
@@ -233,7 +232,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m, m.onKey(msg)
 
 	case loosePasteMsg:
@@ -241,6 +240,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq == m.looseSeq {
 			m.flushLoose()
 		}
+		return m, nil
+
+	case tea.PasteMsg:
+		// 括号粘贴：整段交给输入行（多行/过长会自动折叠成 [txt×N行]）。
+		m.in.paste(msg.Content)
+		m.looseNL = false
 		return m, nil
 
 	case tea.MouseMsg:
@@ -252,39 +257,96 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
+// onKey 处理按键。
+//
+// v2 的键是 Key{Code, Text, Mod}：修饰键全在 Mod 里（v1 只有 Alt 一个布尔），
+// 所以 Ctrl 组合要显式判 —— 这正是换到 v2 的主要理由：v1 里 Ctrl+Enter 与
+// Enter 在 KeyMsg 上完全无法区分。
+func (m *Model) onKey(k tea.KeyPressMsg) tea.Cmd {
+	key := tea.Key(k)
+	ctrl := key.Mod.Contains(tea.ModCtrl)
+	alt := key.Mod.Contains(tea.ModAlt)
+
 	// 权限确认优先：这时只认 y/a/n/d 与 Esc，别把按键灌进输入行。
 	if m.perm != nil {
-		switch msg.Type {
-		case tea.KeyEsc:
+		if key.Code == tea.KeyEscape {
 			m.answer("n")
-		case tea.KeyRunes:
-			switch strings.ToLower(string(msg.Runes)) {
-			case "y":
-				m.answer("y")
-			case "a":
-				m.answer("a")
-			case "n":
-				m.answer("n")
-			case "d":
-				m.answer("d")
-			}
+			return nil
+		}
+		switch strings.ToLower(key.Text) {
+		case "y":
+			m.answer("y")
+		case "a":
+			m.answer("a")
+		case "n":
+			m.answer("n")
+		case "d":
+			m.answer("d")
 		}
 		return nil
 	}
 
+	// Ctrl 组合键先处理：它们既不进输入框，也不该掺和粘贴突发判定。
+	if ctrl {
+		switch key.Code {
+		case 'c':
+			if m.running {
+				m.interrupt()
+				return nil
+			}
+			if !m.in.empty() { // 先清输入，再按一次才退出
+				m.in.reset()
+				return nil
+			}
+			return tea.Quit
+		case 'd':
+			if m.in.empty() {
+				return tea.Quit
+			}
+			m.in.deleteForward()
+			return nil
+		case 'j':
+			// Ctrl+J / 被终端降级成 LF 的 Ctrl+Enter。
+			m.in.insert('\n')
+			return nil
+		case 't':
+			m.toggleRecent()
+			return nil
+		case 'a':
+			m.in.home()
+			return nil
+		case 'e':
+			m.in.end()
+			return nil
+		case 'u':
+			m.in.killToStart()
+			return nil
+		case 'k':
+			m.in.killToEnd()
+			return nil
+		case tea.KeyUp:
+			m.jump(-1)
+			return nil
+		case tea.KeyDown:
+			m.jump(1)
+			return nil
+		}
+	}
+
+	// 粘贴突发判定只对「文本键 + 回车」有意义。
+	isText := key.Text != "" && key.Code != tea.KeyEnter
 	rapid := m.touchKey()
 	tail := m.tailRunes // 上一个键直接插进输入行的字数（落粘贴要抽回去重折）
 	m.tailRunes = 0
 	// 突发结束（或来了个不属于粘贴的按键）：先把攒着的落粘贴折进输入行，
 	// 再让这个键按正常语义处理（回车就是要提交、方向键就是要移光标）。
-	if !rapid || (msg.Type != tea.KeyRunes && msg.Type != tea.KeyEnter) {
+	if !rapid || !isText {
 		m.flushLoose()
 	}
 
-	switch msg.Type {
+	switch key.Code {
 	case tea.KeyEnter:
-		if msg.Alt { // Alt+Enter 不提交（便于敲多行）；Ctrl-Enter 见 KeyCtrlJ 分支
+		if alt || ctrl { // Alt+Enter / Ctrl+Enter 不提交（便于敲多行）
 			m.in.insert('\n')
 			return nil
 		}
@@ -304,53 +366,12 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 		m.submit()
 		return nil
 
-	case tea.KeyEsc:
+	case tea.KeyEscape:
 		if m.running {
 			m.interrupt()
 			return nil
 		}
 		m.in.reset()
-		return nil
-
-	case tea.KeyCtrlC:
-		if m.running {
-			m.interrupt()
-			return nil
-		}
-		if !m.in.empty() { // 先清输入，再按一次才退出
-			m.in.reset()
-			return nil
-		}
-		return tea.Quit
-
-	case tea.KeyCtrlJ:
-		// Ctrl+Enter 换行。
-		//
-		// 为什么是 Ctrl+J 而不是 "KeyEnter + Ctrl"：bubbletea v1 的 KeyMsg 只有
-		// Alt 一个修饰位，Windows 的 coninput 把 VK_RETURN 一律映射成 KeyEnter
-		// （不看 ctrl 状态），Unix 上 Ctrl+Enter 与 Enter 都是 \r —— 两边都没有
-		// 可区分的信号。能拿到的只有终端把 Ctrl+Enter 发成 LF（0x0A）这一种，
-		// 也就是 KeyCtrlJ。Alt+Enter 仍然是最可靠的手动换行。
-		m.in.insert('\n')
-		return nil
-
-	case tea.KeyCtrlD:
-		if m.in.empty() {
-			return tea.Quit
-		}
-		m.in.deleteForward()
-		return nil
-
-	case tea.KeyCtrlT:
-		m.toggleRecent()
-		return nil
-
-	case tea.KeyCtrlUp:
-		m.jump(-1)
-		return nil
-
-	case tea.KeyCtrlDown:
-		m.jump(1)
 		return nil
 
 	case tea.KeyPgUp:
@@ -377,11 +398,11 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 		m.in.right()
 		return nil
 
-	case tea.KeyHome, tea.KeyCtrlA:
+	case tea.KeyHome:
 		m.in.home()
 		return nil
 
-	case tea.KeyEnd, tea.KeyCtrlE:
+	case tea.KeyEnd:
 		m.in.end()
 		return nil
 
@@ -393,78 +414,69 @@ func (m *Model) onKey(msg tea.KeyMsg) tea.Cmd {
 		m.in.deleteForward()
 		return nil
 
-	case tea.KeyCtrlU:
-		m.in.killToStart()
-		return nil
-
-	case tea.KeyCtrlK:
-		m.in.killToEnd()
-		return nil
-
 	case tea.KeySpace:
-		if msg.Alt {
-			m.in.insert(' ')
-			return nil
-		}
 		m.in.insert(' ')
 		return nil
+	}
 
-	case tea.KeyRunes:
-		// 单个裸换行：Windows 的 coninput 把 Ctrl+J 报成 KeyRunes("\n")，
-		// 下面的文本插入会把它当控制字符过滤掉，所以先单独接住。
-		if !msg.Paste && string(msg.Runes) == "\n" {
-			m.in.insert('\n')
-			return nil
-		}
-		if msg.Paste { // 括号粘贴：整段交给输入行（多行/过长会自动折叠成 [txt×N行]）
-			m.in.paste(string(msg.Runes))
-			m.looseNL = false
-			return nil
-		}
-		// 没带括号粘贴标记：只能靠“紧接上一个键（几毫秒内）”识别。
-		// 不能用“一次送来多个字符”当依据：输入法上屏也是一条多字符消息，
-		// 那样会把中文输入延迟到收尾定时器才显示。
-		if rapid {
-			m.adoptTail(tail)
-			for _, r := range string(msg.Runes) {
-				if r >= 0x20 || r == '\t' {
-					m.loose.WriteRune(r)
-				}
-			}
-			m.looseNL = false
-			return m.looseTick()
-		}
-		for _, r := range string(msg.Runes) {
-			if r >= 0x20 || r == '\t' {
-				m.in.insertString(string(r))
-				m.tailRunes++
-			}
-		}
+	// 其余按文本处理：普通字符、输入法上屏（一次多字符）、以及 coninput 把
+	// Ctrl+J 报成的裸 \n。
+	text := key.Text
+	if text == "" && key.Code > 0 {
+		text = string(key.Code)
+	}
+	if text == "" {
 		return nil
+	}
+	if text == "\n" || text == "\r" {
+		m.in.insert('\n')
+		return nil
+	}
+	// 没带括号粘贴标记的粘贴：只能靠「紧接上一个键（几毫秒内）」识别。
+	// 不能用「一次送来多个字符」当依据：输入法上屏也是一条多字符消息，
+	// 那样会把中文输入延迟到收尾定时器才显示。
+	if rapid {
+		m.adoptTail(tail)
+		for _, r := range text {
+			if r >= 0x20 || r == '\t' {
+				m.loose.WriteRune(r)
+			}
+		}
+		m.looseNL = false
+		return m.looseTick()
+	}
+	for _, r := range text {
+		if r >= 0x20 || r == '\t' {
+			m.in.insertString(string(r))
+			m.tailRunes++
+		}
 	}
 	return nil
 }
 
 func (m *Model) onMouse(msg tea.MouseMsg) tea.Cmd {
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
+	mm := msg.Mouse()
+	switch mm.Button {
+	case tea.MouseWheelUp:
 		m.vp.ScrollUp(3)
 		return nil
-	case tea.MouseButtonWheelDown:
+	case tea.MouseWheelDown:
 		m.vp.ScrollDown(3)
 		return nil
 	}
+
 	// 按下前先把 flat/owners 对齐到最新内容：否则行号可能差一行，
 	// 选区会从错的位置开始。拖动过程中不能重建（会把选区清掉）。
-	if msg.Action == tea.MouseActionPress &&
-		(m.needRebuild || m.lastCols != m.contentWidth()) {
-		m.rebuild()
+	if _, isClick := msg.(tea.MouseClickMsg); isClick {
+		if m.needRebuild || m.lastCols != m.contentWidth() {
+			m.rebuild()
+		}
 	}
 
-	p, inBody := m.pointAt(msg.X, msg.Y)
-	switch msg.Action {
-	case tea.MouseActionPress:
-		if msg.Button != tea.MouseButtonLeft {
+	p, inBody := m.pointAt(mm.X, mm.Y)
+	switch msg.(type) {
+	case tea.MouseClickMsg:
+		if mm.Button != tea.MouseLeft {
 			return nil
 		}
 		// 按下只记锚点：是「点一下」还是「拖一段」要等松开才知道。
@@ -473,11 +485,11 @@ func (m *Model) onMouse(msg tea.MouseMsg) tea.Cmd {
 		m.sel = selection{armed: inBody, active: inBody, dragging: true, anchor: p, focus: p}
 		return nil
 
-	case tea.MouseActionMotion:
+	case tea.MouseMotionMsg:
 		if !m.sel.dragging || !m.sel.armed {
 			return nil
 		}
-		y := msg.Y
+		y := mm.Y
 		// 拖到视口上/下边界外：贴边继续选，并据此滚动一格，
 		// 这样一个手势就能选过一屏以上的内容。
 		if y < 1 {
@@ -487,14 +499,14 @@ func (m *Model) onMouse(msg tea.MouseMsg) tea.Cmd {
 			y = m.vpH
 			m.vp.ScrollDown(1)
 		}
-		p, ok := m.pointAt(msg.X, y)
+		p, ok := m.pointAt(mm.X, y)
 		if !ok {
 			return nil
 		}
 		m.sel.focus = p
 		return nil
 
-	case tea.MouseActionRelease:
+	case tea.MouseReleaseMsg:
 		if !m.sel.dragging {
 			return nil
 		}
@@ -809,11 +821,11 @@ func (m *Model) layout() {
 		vpH = 1
 	}
 	m.vpH = vpH
-	m.vp.Width = m.width
-	if m.vp.Width <= 0 {
-		m.vp.Width = 80
+	m.vp.SetWidth(m.width)
+	if m.vp.Width() <= 0 {
+		m.vp.SetWidth(80)
 	}
-	m.vp.Height = vpH
+	m.vp.SetHeight(vpH)
 }
 
 func (m *Model) contentWidth() int {
@@ -895,7 +907,17 @@ func (m *Model) rebuild() {
 	}
 }
 
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
+	v := tea.NewView(m.viewString())
+	if m.mouse {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
+	return v
+}
+
+// viewString 拼出整屏文本；View 只是把它包成 tea.View（v2 的 Model 接口返回
+// tea.View，顺带能在里面声明鼠标模式与键盘增强）。
+func (m *Model) viewString() string {
 	if m.width <= 0 || m.height <= 0 {
 		return "正在初始化…"
 	}

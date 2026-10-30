@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // 两行内容的模型（第一行故意带 ANSI 颜色，确认切列不会切断转义序列）。
@@ -19,16 +19,17 @@ func selModel(t *testing.T, lines ...string) *Model {
 	return m
 }
 
+// v2 把鼠标拆成 Click/Motion/Release 三种消息，Button 与坐标在同名的 Mouse 里。
 func mousePress(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: x, Y: y}
+	return tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y}
 }
 
 func mouseMotion(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{Action: tea.MouseActionMotion, Button: tea.MouseButtonLeft, X: x, Y: y}
+	return tea.MouseMotionMsg{Button: tea.MouseLeft, X: x, Y: y}
 }
 
 func mouseRelease(x, y int) tea.MouseMsg {
-	return tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: x, Y: y}
+	return tea.MouseReleaseMsg{Button: tea.MouseLeft, X: x, Y: y}
 }
 
 // 同一行内拖选：列是显示列，不是 rune 下标。
@@ -141,8 +142,8 @@ func TestSelectionHighlightedInView(t *testing.T) {
 	send(m, mousePress(1, 1))
 	send(m, mouseMotion(4, 1))
 
-	if !strings.Contains(m.View(), escReverse) {
-		t.Fatalf("视口里没有反显高亮:\n%q", m.View())
+	if !strings.Contains(m.viewString(), escReverse) {
+		t.Fatalf("视口里没有反显高亮:\n%q", m.viewString())
 	}
 }
 
@@ -177,7 +178,7 @@ func TestPointAtWithScrollOffset(t *testing.T) {
 		lines = append(lines, fmt.Sprintf("第%d行内容", i))
 	}
 	m := selModel(t, lines...)
-	if m.vp.YOffset == 0 {
+	if m.vp.YOffset() == 0 {
 		t.Fatal("前置条件失败：视口没有滚动")
 	}
 
@@ -185,8 +186,8 @@ func TestPointAtWithScrollOffset(t *testing.T) {
 	if !ok {
 		t.Fatal("pointAt 说这里不在正文区")
 	}
-	if want := m.vp.YOffset; p.row != want {
-		t.Fatalf("flat 行 = %d，期望 %d（YOffset=%d）", p.row, want, m.vp.YOffset)
+	if want := m.vp.YOffset(); p.row != want {
+		t.Fatalf("flat 行 = %d，期望 %d（YOffset=%d）", p.row, want, m.vp.YOffset())
 	}
 	// 选出来的内容必须真的是那一行
 	m.sel = selection{armed: true, active: true, anchor: p, focus: selPoint{row: p.row, col: 99}}

@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -265,9 +265,6 @@ func (u *UI) Run(ctx context.Context) error {
 		tea.WithContext(ctx),
 		tea.WithFPS(u.opts.FPS),
 	}
-	if !u.opts.NoMouse {
-		popts = append(popts, tea.WithMouseCellMotion())
-	}
 	u.prog = tea.NewProgram(u.model, popts...)
 
 	u.mu.Lock()
@@ -468,4 +465,6 @@ func (s *lineSink) flushLine() {
 }
 
 // viewport 在本包内部组装，不对宿主暴露。
-func newViewport() viewport.Model { return viewport.New(0, 0) }
+func newViewport() viewport.Model {
+	return viewport.New(viewport.WithWidth(0), viewport.WithHeight(0))
+}

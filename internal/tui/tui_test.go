@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -29,11 +29,16 @@ func fakeClock(m *Model, step time.Duration) {
 
 func send(m *Model, msg tea.Msg) { m.Update(msg) }
 
-func key(t tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: t} }
+// key 构造一个「无修饰的特殊键」消息（v2 用 Code）。
+func key(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code} }
 
-func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+// ctrlKey 构造 Ctrl+<键>（v2 把修饰键放在 Mod 里）。
+func ctrlKey(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code, Mod: tea.ModCtrl} }
 
-func viewLines(m *Model) []string { return strings.Split(m.View(), "\n") }
+// runes 构造文本输入（v2 用 Text，可一次多字符，如输入法上屏）。
+func runes(s string) tea.KeyPressMsg { return tea.KeyPressMsg{Text: s} }
+
+func viewLines(m *Model) []string { return strings.Split(m.viewString(), "\n") }
 
 // TestCollapseThinkingMsg 回放历史后一键收起已有思考块。
 func TestCollapseThinkingMsg(t *testing.T) {
@@ -48,8 +53,8 @@ func TestCollapseThinkingMsg(t *testing.T) {
 	if m.blocks[1].Collapsed {
 		t.Fatal("正文块不该被折叠")
 	}
-	if !strings.Contains(ansi.Strip(m.View()), "答复") {
-		t.Fatal("正文应从视图里消失了吗: " + ansi.Strip(m.View()))
+	if !strings.Contains(ansi.Strip(m.viewString()), "答复") {
+		t.Fatal("正文应从视图里消失了吗: " + ansi.Strip(m.viewString()))
 	}
 }
 
@@ -72,7 +77,7 @@ func TestAutoCollapseAfterTurn(t *testing.T) {
 	}
 	// 注：不断言 Duration>0 —— Windows 上同一时钟滴答内 time.Since 会是 0。
 	// 正文不受影响
-	send(m, key(tea.KeyCtrlT))
+	send(m, ctrlKey('t'))
 	if m.blocks[0].Collapsed {
 		t.Fatal("Ctrl+T 应能重新展开")
 	}
@@ -93,7 +98,7 @@ func TestViewHeightIsExact(t *testing.T) {
 func TestSubmitSendsText(t *testing.T) {
 	m, ui := newTestModel(60, 16)
 	for _, r := range "你好 world" {
-		send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		send(m, runes(string(r)))
 	}
 	if got := m.in.text(); got != "你好 world" {
 		t.Fatalf("输入行 = %q", got)
@@ -110,8 +115,8 @@ func TestSubmitSendsText(t *testing.T) {
 	if len(m.blocks) == 0 || m.blocks[0].Kind != KindUser {
 		t.Fatalf("用户输入应回显成 user 块: %+v", m.blocks)
 	}
-	if !strings.Contains(m.View(), "你好 world") {
-		t.Fatalf("视图里看不到用户输入:\n%s", m.View())
+	if !strings.Contains(m.viewString(), "你好 world") {
+		t.Fatalf("视图里看不到用户输入:\n%s", m.viewString())
 	}
 }
 
@@ -123,7 +128,7 @@ func TestThinkingCollapse(t *testing.T) {
 	send(m, LineMsg{Kind: KindText, Text: "回答"})
 
 	before := len(m.blocks[0].render(60))
-	send(m, key(tea.KeyCtrlT))
+	send(m, ctrlKey('t'))
 	collapsed := m.blocks[0].render(60)
 	if len(collapsed) != 1 {
 		t.Fatalf("折叠后应只剩标题行，实际 %d 行", len(collapsed))
@@ -135,10 +140,10 @@ func TestThinkingCollapse(t *testing.T) {
 		t.Fatalf("标题行应显示行数: %q", collapsed[0])
 	}
 	// 折叠不能影响正文块
-	if strings.Contains(ansi.Strip(m.View()), "第一步") {
+	if strings.Contains(ansi.Strip(m.viewString()), "第一步") {
 		t.Fatal("折叠后正文仍在屏幕上")
 	}
-	send(m, key(tea.KeyCtrlT))
+	send(m, ctrlKey('t'))
 	if got := len(m.blocks[0].render(60)); got != before {
 		t.Fatalf("展开后行数 = %d，期望 %d", got, before)
 	}
@@ -149,12 +154,12 @@ func TestThinkingCollapse(t *testing.T) {
 func TestClickTogglesThinking(t *testing.T) {
 	m, _ := newTestModel(60, 20)
 	send(m, LineMsg{Kind: KindThinking, Text: "想一想"})
-	m.View() // 触发 rebuild，填好 owners
+	m.viewString() // 触发 rebuild，填好 owners
 
 	// 第 0 行是 header；思考块标题在第 1 行（0-based）。
 	click := []tea.MouseMsg{
-		{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 3, Y: 1},
-		{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 3, Y: 1},
+		tea.MouseClickMsg{Button: tea.MouseLeft, X: 3, Y: 1},
+		tea.MouseReleaseMsg{Button: tea.MouseLeft, X: 3, Y: 1},
 	}
 	for _, msg := range click {
 		send(m, msg)
@@ -178,34 +183,34 @@ func TestJumpBetweenAnswers(t *testing.T) {
 	send(m, LineMsg{Kind: KindText, Text: "回答一"})
 	send(m, LineMsg{Kind: KindUser, Text: "问题二"})
 	send(m, LineMsg{Kind: KindText, Text: "回答二"})
-	m.View()
+	m.viewString()
 
 	if len(m.anchors) < 4 {
 		t.Fatalf("锚点太少: %+v", m.anchors)
 	}
-	send(m, key(tea.KeyCtrlUp))
+	send(m, ctrlKey(tea.KeyUp))
 	if m.selBlock < 0 {
 		t.Fatal("Ctrl+↑ 没有选中任何块")
 	}
 	first := m.selBlock
-	send(m, key(tea.KeyCtrlUp))
+	send(m, ctrlKey(tea.KeyUp))
 	if m.selBlock >= first {
 		t.Fatalf("第二次 Ctrl+↑ 应向上跳：%d → %d", first, m.selBlock)
 	}
 	// 跳转后目标行必须可见：视口偏移不应超过该锚点行
 	for _, a := range m.anchors {
-		if a.block == m.selBlock && m.vp.YOffset > a.line {
-			t.Fatalf("跳转后目标行不可见: offset=%d anchor=%d", m.vp.YOffset, a.line)
+		if a.block == m.selBlock && m.vp.YOffset() > a.line {
+			t.Fatalf("跳转后目标行不可见: offset=%d anchor=%d", m.vp.YOffset(), a.line)
 		}
 	}
 	// 到顶后继续按不应回绕
 	for i := 0; i < 5; i++ {
-		send(m, key(tea.KeyCtrlUp))
+		send(m, ctrlKey(tea.KeyUp))
 	}
 	if m.selBlock != 0 {
 		t.Fatalf("应停在最上面一条，实际 block=%d", m.selBlock)
 	}
-	send(m, key(tea.KeyCtrlDown))
+	send(m, ctrlKey(tea.KeyDown))
 	if m.selBlock == 0 {
 		t.Fatal("Ctrl+↓ 没有向下跳")
 	}
@@ -308,13 +313,13 @@ func TestAskPermissionKeys(t *testing.T) {
 	if m.perm == nil {
 		t.Fatal("没有记录待确认请求")
 	}
-	send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	send(m, runes("z"))
 	select {
 	case c := <-reply:
 		t.Fatalf("无关按键不应回答问题: %q", c)
 	default:
 	}
-	send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	send(m, runes("a"))
 	select {
 	case c := <-reply:
 		if c != "a" {
@@ -331,12 +336,12 @@ func TestAskPermissionKeys(t *testing.T) {
 // TestEscClearsInputThenQuits 语义：空闲 Esc 清输入；Ctrl+C 先清输入再退出。
 func TestEscClearsInput(t *testing.T) {
 	m, _ := newTestModel(60, 16)
-	send(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("abc")})
-	send(m, key(tea.KeyEsc))
+	send(m, runes("abc"))
+	send(m, key(tea.KeyEscape))
 	if !m.in.empty() {
 		t.Fatalf("Esc 没清空输入: %q", m.in.text())
 	}
-	cmd := m.onKey(key(tea.KeyCtrlC))
+	cmd := m.onKey(ctrlKey('c'))
 	if cmd == nil {
 		t.Fatal("输入为空时 Ctrl+C 应退出")
 	}

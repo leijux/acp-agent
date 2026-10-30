@@ -9,17 +9,17 @@ package tui
 import (
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func typeText(m *Model, s string) {
 	for _, r := range s {
-		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m.Update(runes(string(r)))
 	}
 }
 
 // press 用现成的 key()/send() helper 送一个功能键。
-func press(m *Model, t tea.KeyType) { send(m, key(t)) }
+func press(m *Model, code rune) { send(m, key(code)) }
 
 func TestTUIHistoryUpDown(t *testing.T) {
 	m, _ := newTestModel(100, 20)
@@ -136,7 +136,7 @@ func TestTUIHistoryMultilineFolds(t *testing.T) {
 	m, _ := newTestModel(100, 20)
 	// 用 Alt+Enter 造一条多行输入
 	typeText(m, "line1")
-	m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Mod: tea.ModAlt})
 	typeText(m, "line2")
 	press(m, tea.KeyEnter)
 

@@ -90,7 +90,7 @@ func (m *Model) pointAt(x, y int) (selPoint, bool) {
 	if y < 1 || y > m.vpH {
 		return selPoint{}, false
 	}
-	row := m.vp.YOffset + (y - 1)
+	row := m.vp.YOffset() + (y - 1)
 	if row < 0 || row >= len(m.owners) {
 		return selPoint{}, false
 	}
@@ -164,7 +164,7 @@ func (m *Model) highlightSelection(rows []string) []string {
 	out := make([]string, len(rows))
 	copy(out, rows)
 	for i := range out {
-		row := m.vp.YOffset + i
+		row := m.vp.YOffset() + i
 		if row >= len(m.owners) {
 			break
 		}

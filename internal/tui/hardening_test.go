@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -24,7 +24,7 @@ func TestFreezeClearsViewport(t *testing.T) {
 	if m.flat != "" || len(m.blocks) != 0 {
 		t.Fatalf("freeze 后视口没清空: flat=%q blocks=%d", m.flat, len(m.blocks))
 	}
-	if got := ansi.Strip(m.View()); strings.Contains(got, "内容一") {
+	if got := ansi.Strip(m.viewString()); strings.Contains(got, "内容一") {
 		t.Fatalf("freeze 后屏幕上还留着正文（会和 scrollback 重复）:\n%q", got)
 	}
 }
