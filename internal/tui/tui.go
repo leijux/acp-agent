@@ -124,6 +124,10 @@ type Block struct {
 	// 下一条同 Kind 的 LineMsg 是它的收尾，要替换而非追加，
 	// 否则流式输出的最后一行会在屏上出现两遍。
 	partial bool
+
+	// finished 让 finish() 幂等：思考结束时记一次耗时，turn 结束时还会再调一次，
+	// 不拦住就会把「思考结束 → 轮次结束」那段也算进去，标题里的 1.2s 变成 5.6s。
+	finished bool
 }
 
 func newBlock(kind BlockKind) *Block {
@@ -152,9 +156,11 @@ func (b *Block) setTail(s string) {
 }
 
 func (b *Block) finish() {
-	if !b.Started.IsZero() {
-		b.Duration = time.Since(b.Started)
+	if b.finished || b.Started.IsZero() {
+		return
 	}
+	b.Duration = time.Since(b.Started)
+	b.finished = true
 }
 
 // title 是折叠态的标题行：折叠时必须一眼看出「这里有东西被收起来了」。

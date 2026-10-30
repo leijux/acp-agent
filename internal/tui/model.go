@@ -314,6 +314,12 @@ func (m *Model) onKey(k tea.KeyPressMsg) tea.Cmd {
 
 	// Ctrl 组合键先处理：它们既不进输入框，也不该掺和粘贴突发判定。
 	if ctrl {
+		// Ctrl+Shift+C 在多数终端是「复制」，不能当 Ctrl+C（中断/清输入）用；
+		// Ctrl+Shift+D 同理不该退出。只拦这两个破坏性键，别的带 Shift 的组合
+		// （Ctrl+Shift+↑ 等）保持原样。
+		if key.Mod.Contains(tea.ModShift) && (key.Code == 'c' || key.Code == 'd') {
+			return nil
+		}
 		switch key.Code {
 		case 'c':
 			if m.running {

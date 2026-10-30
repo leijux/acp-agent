@@ -407,3 +407,44 @@ func TestCollapseOnlyTouchesCurrentTurn(t *testing.T) {
 		t.Fatalf("本轮思考块应折叠: %+v", cur)
 	}
 }
+
+// 思考结束时记的耗时，不能被 turn 结束时的第二次 finish() 覆盖。
+func TestThinkingDurationNotOverwritten(t *testing.T) {
+	m, _ := newTestModel(60, 20)
+	send(m, RunningMsg{On: true})
+	send(m, LineMsg{Kind: KindThinking, Text: "想一想"})
+	// Windows 的时钟粒度可能让「瞬间完成」的耗时正好是 0，先把起点挪开。
+	m.blocks[0].Started = time.Now().Add(-time.Second)
+	send(m, KindMsg{Kind: KindText}) // 思考结束 → 折叠 + 记耗时
+	d1 := m.blocks[0].Duration
+	if d1 <= 0 {
+		t.Fatal("思考结束时应记下耗时")
+	}
+	send(m, LineMsg{Kind: KindText, Text: "答案"})
+	send(m, RunningMsg{On: false}) // turn 结束，会再 finish 一次
+	if got := m.blocks[0].Duration; got != d1 {
+		t.Fatalf("耗时被覆盖: %v → %v", d1, got)
+	}
+}
+
+// Ctrl+Shift+C 在多数终端是复制，不能触发中断/清输入。
+func TestCtrlShiftCDoesNotInterrupt(t *testing.T) {
+	m, _ := newTestModel(60, 20)
+	var interrupted int
+	m.onInterrupt = func() { interrupted++ }
+	send(m, RunningMsg{On: true})
+	send(m, runes("要保留的输入"))
+
+	send(m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl | tea.ModShift})
+	if interrupted != 0 {
+		t.Fatal("Ctrl+Shift+C 不该中断")
+	}
+	if m.in.text() != "要保留的输入" {
+		t.Fatalf("Ctrl+Shift+C 不该清输入，实际 %q", m.in.text())
+	}
+	// 真正的 Ctrl+C 仍然中断
+	send(m, ctrlKey('c'))
+	if interrupted != 1 {
+		t.Fatalf("Ctrl+C 应中断，interrupted=%d", interrupted)
+	}
+}
