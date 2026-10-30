@@ -34,6 +34,9 @@ import (
 	"github.com/leijux/acp-agent/internal/tui"
 )
 
+// errFlagsReported 表示解析失败已经打印过一行提示，main 不要再重复。
+var errFlagsReported = errors.New("flag 解析失败（已报告）")
+
 // defaultVersion 是未被 -X 注入时的值，同时充当「是否已注入」的哨兵。
 const defaultVersion = "0.1.0"
 
@@ -58,6 +61,9 @@ func main() {
 	if err := run(); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
+		}
+		if errors.Is(err, errFlagsReported) {
+			os.Exit(1)
 		}
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		os.Exit(1)
@@ -84,6 +90,16 @@ type flags struct {
 	noSession      bool
 	noContextFiles bool
 	noSkills       bool
+	// Pi 的 no-* 系列：我们没有这些资源可关，但编排器（Multica 等）会按 Pi 的
+	// 参数原样传进来。不认的后果很严重 —— flag 解析失败会打印整段 usage，
+	// 而调用方在 stdout 为空时会拿 stderr 当模型目录，于是 usage 的每一行都被
+	// 切成 "acp-agent/[flags]" 这样的假模型（真实故障，见 #multica）。
+	noPromptTemplates bool
+	noThemes          bool
+	noExtensions      bool
+	noApprove         bool
+	noTools           bool // 关闭全部工具（含 MCP）
+	noBuiltinTools    bool // 关闭内建工具，保留 MCP
 	// extensions 是 --extension/-e 给出的 Pi 扩展文件。我们不执行扩展 JS，只从
 // 文件里提取 mcpServers（某些编排器用它下发受管 MCP 配置）。
 	extensions    []string
@@ -110,6 +126,11 @@ type flags struct {
 // 只有已知 flag 才说明那个 -p 是无值开关，否则它就是被当成了 prompt 的值。
 func newFlagSet(f *flags) *flag.FlagSet {
 	fs := flag.NewFlagSet("acp-agent", flag.ContinueOnError)
+	// 解析出错时 flag 包默认会往 stderr 打「flag provided but not defined」**并调用
+	// Usage 打印整段用法**。这里的 stderr 会被编排器当成数据（Multica 的模型目录
+	// 探测在 stdout 为空时回退去读 stderr），usage 的每一行都会被切成
+	// "acp-agent/[flags]" 这样的假模型。所以整个输出通道关掉，只留下面的 UseUsage。
+	fs.SetOutput(io.Discard)
 	fs.StringVar(&f.print, "p", "", "非交互模式：执行一次 prompt 后退出（值为 - 时从 stdin 读）")
 	fs.StringVar(&f.print, "print", "", "非交互模式（同 -p）")
 	fs.StringVar(&f.provider, "provider", "", "模型服务商（deepseek/openai/ollama/...）")
@@ -132,7 +153,6 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	// --no-skills / --no-prompt-templates：Pi 探测目录时会带。no-skills 现在是
 	// 真的（关掉 .agents/skills 发现）；prompt 模板仍未实现。
 	fs.BoolVar(&f.noSkills, "no-skills", false, "不加载 .agents/skills（Pi 兼容）")
-	fs.Bool("no-prompt-templates", false, "兼容 Pi：忽略（无 prompt 模板机制）")
 	for _, name := range []string{"extension", "e"} {
 		fs.Func(name, "Pi 扩展文件；只提取其中的 mcpServers 作为 MCP 配置（不执行扩展 JS），可重复", func(v string) error {
 			f.extensions = append(f.extensions, v)
@@ -154,25 +174,49 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.BoolVar(&f.noWeb, "no-web", false, "关闭 web_search/web_fetch")
 	fs.BoolVar(&f.noTUI, "no-tui", false, "用旧版行式 REPL（不用 Bubble Tea 界面）")
 
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "acp-agent %s — 终端编码 agent\n\n", resolveVersion())
-		fmt.Fprintf(os.Stderr, "用法:\n  acp-agent [flags]            交互式 REPL\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent -p \"任务\" [flags]   执行一次后退出\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent \"任务\" [flags]      同上（位置参数等价于 -p）\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent --acp [flags]      作为 ACP agent 服务\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent -p --mode json     Pi 兼容：prompt 读 stdin，stdout 逐行 JSON 事件\n\n")
-		fmt.Fprintf(os.Stderr, "示例:\n")
-		fmt.Fprintf(os.Stderr, "  export DEEPSEEK_API_KEY=sk-...\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent -p \"列出 internal/ 下所有包的用途\"\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent -c \"接着上次的继续改\"\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent --provider ollama --model qwen3-coder\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent --web-search tavily --web-search-key tvly-... -p \"最新 Go 1.28 有什么变化\"\n")
-		fmt.Fprintf(os.Stderr, "  acp-agent --no-web -p \"离线看一下代码\"\n")
-		fmt.Fprintf(os.Stderr, "  echo \"任务\" | acp-agent -p --mode json --session /tmp/s.jsonl\n\n")
-		fmt.Fprintf(os.Stderr, "flags:\n")
-		fs.PrintDefaults()
-	}
+	// Pi 的 no-* 系列：我们没有对应资源可关的接受并忽略；no-tools / no-builtin-tools
+	// 是真语义（走 DisableTools 的 "*"）。必须认全：解析失败会打印整段 usage，
+	// 而编排器（Multica 的模型目录探测）在 stdout 为空时会拿 stderr 当目录解析，
+	// usage 的每一行都会被切成 "acp-agent/[flags]" 这样的假模型。
+	fs.BoolVar(&f.noPromptTemplates, "no-prompt-templates", false, "（兼容 Pi）本实现没有 prompt templates，忽略")
+	fs.BoolVar(&f.noPromptTemplates, "np", false, "（兼容 Pi）同 --no-prompt-templates")
+	fs.BoolVar(&f.noThemes, "no-themes", false, "（兼容 Pi）本实现没有主题，忽略")
+	fs.BoolVar(&f.noExtensions, "no-extensions", false, "（兼容 Pi）忽略（扩展只用来提取 MCP 配置）")
+	fs.BoolVar(&f.noExtensions, "ne", false, "（兼容 Pi）同 --no-extensions")
+	fs.BoolVar(&f.noApprove, "no-approve", false, "（兼容 Pi）忽略")
+	fs.BoolVar(&f.noApprove, "na", false, "（兼容 Pi）同 --no-approve")
+	fs.BoolVar(&f.noTools, "no-tools", false, "不注册任何工具（含 MCP）")
+	fs.BoolVar(&f.noTools, "nt", false, "同 --no-tools")
+	fs.BoolVar(&f.noBuiltinTools, "no-builtin-tools", false, "不注册内建工具，保留 MCP 工具")
+	fs.BoolVar(&f.noBuiltinTools, "nbt", false, "同 --no-builtin-tools")
+
+	// Usage 默认丢弃：解析失败时 flag 包会调它，而那段文本会被编排器当成数据。
+	// 只有 --help（flag.ErrHelp）时 run 才显式打到 stderr。
+	fs.Usage = func() { printUsage(io.Discard, fs) }
 	return fs
+}
+
+// printUsage 打印完整用法。只在 --help 时调用：解析失败只给一行错误
+// （见 run），避免整段 usage 落进 stderr 被编排器当成数据。
+func printUsage(w io.Writer, fs *flag.FlagSet) {
+	fmt.Fprintf(w, "acp-agent %s — 终端编码 agent\n\n", resolveVersion())
+	fmt.Fprintf(w, "用法:\n  acp-agent [flags]            交互式 REPL\n")
+	fmt.Fprintf(w, "  acp-agent -p \"任务\" [flags]   执行一次后退出\n")
+	fmt.Fprintf(w, "  acp-agent \"任务\" [flags]      同上（位置参数等价于 -p）\n")
+	fmt.Fprintf(w, "  acp-agent --acp [flags]      作为 ACP agent 服务\n")
+	fmt.Fprintf(w, "  acp-agent -p --mode json     Pi 兼容：prompt 读 stdin，stdout 逐行 JSON 事件\n\n")
+	fmt.Fprintf(w, "示例:\n")
+	fmt.Fprintf(w, "  export DEEPSEEK_API_KEY=sk-...\n")
+	fmt.Fprintf(w, "  acp-agent -p \"列出 internal/ 下所有包的用途\"\n")
+	fmt.Fprintf(w, "  acp-agent -c \"接着上次的继续改\"\n")
+	fmt.Fprintf(w, "  acp-agent --provider ollama --model qwen3-coder\n")
+	fmt.Fprintf(w, "  acp-agent --web-search tavily --web-search-key tvly-... -p \"最新 Go 1.28 有什么变化\"\n")
+	fmt.Fprintf(w, "  acp-agent --no-web -p \"离线看一下代码\"\n")
+	fmt.Fprintf(w, "  echo \"任务\" | acp-agent -p --mode json --session /tmp/s.jsonl\n\n")
+	fmt.Fprintf(w, "flags:\n")
+	fs.SetOutput(w)
+	fs.PrintDefaults()
+	fs.SetOutput(io.Discard)
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -225,8 +269,16 @@ func run() error {
 		return err
 	}
 	f, err := parseFlags(os.Args[1:])
-	if err != nil {
-		return err
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		// 显式 --help：flag 包已经把 Usage 调到了 Discard，这里补打到 stderr。
+		printUsage(os.Stderr, newFlagSet(&flags{}))
+		return nil
+	case err != nil:
+		// 解析失败只给一行：整段 usage 一旦落进 stderr，编排器（如 Multica 的模型
+		// 目录探测）会把它当数据，usage 的每一行都被切成 "acp-agent/[flags]" 这样的假模型。
+		fmt.Fprintf(os.Stderr, "acp-agent: %v\n（--help 查看完整用法）\n", err)
+		return errFlagsReported
 	}
 	if f.showVersion {
 		fmt.Println(resolveVersion())

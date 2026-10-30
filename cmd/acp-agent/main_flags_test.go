@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,5 +121,51 @@ func TestSaveSession_EmptySessionWritesNothing(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(dataDir, "sessions"))
 	if len(entries) != 0 {
 		t.Errorf("空会话不应产生文件，得到了 %d 个目录/文件", len(entries))
+	}
+}
+
+// Multica 等编排器会按 Pi 的参数传一整套 no-* flag。任何一个不认，flag 解析就会
+// 失败并（历史上）打印整段 usage —— 那段文本会被编排器的模型目录探测当成数据，
+// 于是模型下拉框里出现 "acp-agent/[flags]"、"export/DEEPSEEK_API_KEY=sk-..." 这种
+// 假模型（真实故障）。
+func TestPiNoFlagsAccepted(t *testing.T) {
+	for _, name := range []string{
+		"no-prompt-templates", "np",
+		"no-themes", "no-extensions", "ne",
+		"no-approve", "na",
+		"no-tools", "nt", "no-builtin-tools", "nbt",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseFlags([]string{"--" + name}); err != nil {
+				t.Fatalf("--%s 应被接受（兼容 Pi），实际报错: %v", name, err)
+			}
+		})
+	}
+}
+
+// --list-models 允许出现在 launch prefix 之后（编排器会在前面拼自己的 token）。
+func TestPiCatalogAfterPrefix(t *testing.T) {
+	var buf bytes.Buffer
+	handled, err := handlePiCatalog([]string{"--no-prompt-templates", "--list-models"}, &buf)
+	if err != nil || !handled {
+		t.Fatalf("带前缀的 --list-models 应被识别: handled=%v err=%v", handled, err)
+	}
+	if !strings.HasPrefix(buf.String(), "provider\tmodel") {
+		t.Fatalf("应输出目录表头，实际: %q", buf.String())
+	}
+}
+
+// prompt 里恰好含 --list-models 时不能被当成目录命令。
+func TestPiCatalogIgnoresPromptText(t *testing.T) {
+	for _, args := range [][]string{
+		{"-p", "--list-models"},
+		{"--print", "--list-models"},
+		{"帮我查一下 --list-models 的用法"},
+		{"models", "帮我查一下"},
+	} {
+		var buf bytes.Buffer
+		if handled, _ := handlePiCatalog(args, &buf); handled {
+			t.Fatalf("%q 应被当成 prompt，不是目录命令", args)
+		}
 	}
 }

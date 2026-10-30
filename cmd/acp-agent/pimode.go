@@ -164,22 +164,37 @@ type piCatalogEntry struct {
 //
 // 只认第一个参数：prompt 里恰好出现 --list-models 这样的字符串时不能被当成目录命令。
 func handlePiCatalog(args []string, stdout io.Writer) (bool, error) {
-	if len(args) == 0 {
-		return false, nil
-	}
+	// 目录命令可以在任意位置：编排器会在前面拼 launch prefix（如 ccms start / cmd /c），
+	// 只看 args[0] 会让 --list-models 失效，转而打印 usage —— 而那段 usage 会被
+	// 调用方当成模型目录解析（Multica 就是这么把 acp-agent/[flags] 摆进模型下拉框的）。
+	//
+	// 但要避免把 prompt 里的同名文本吃成命令：一旦遇到 -p/--print 或位置参数就停。
+	cmdIdx := -1
 	asJSON := false
-	switch args[0] {
-	case "--list-models", "-list-models":
-	case "models":
-		// 后面跟着位置参数时按 prompt 处理，不当子命令。
-		if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+	for i, a := range args {
+		switch {
+		case a == "-p" || a == "--print":
 			return false, nil
+		case a == "--list-models" || a == "-list-models":
+			if cmdIdx < 0 {
+				cmdIdx = i
+			}
+		case a == "models":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				return false, nil // models <prompt>：是 prompt，不是子命令
+			}
+			if cmdIdx < 0 {
+				cmdIdx = i
+				asJSON = true
+			}
+		case !strings.HasPrefix(a, "-"):
+			return false, nil // 位置参数（prompt）出现，后面的 --list-models 不算命令
 		}
-		asJSON = true
-	default:
+	}
+	if cmdIdx < 0 {
 		return false, nil
 	}
-	for _, arg := range args[1:] {
+	for _, arg := range args {
 		if arg == "--json" {
 			asJSON = true
 		}

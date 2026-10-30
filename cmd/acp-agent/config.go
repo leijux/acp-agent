@@ -278,6 +278,14 @@ func (c *Config) applyFlags(f *flags) {
 			}
 		}
 	}
+	// 工具全关：DisableTools 里的 "*" 由 tools.DefaultRegistry 解释成「跳过全部」。
+	if f.noBuiltinTools || f.noTools {
+		c.DisableTools = append(c.DisableTools, "*")
+	}
+	if f.noTools {
+		// Pi 的 --no-tools 连 MCP 也不连；--no-builtin-tools 只关内建。
+		c.NoMCP = true
+	}
 	// 子代理禁用 / 指定命令。两者都写入 Subagent，方便配置与 flag 统一处理。
 	if f.noSubagent {
 		c.DisableTools = append(c.DisableTools, "delegate")

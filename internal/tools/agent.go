@@ -207,6 +207,10 @@ func DefaultRegistry(o Options) (*Registry, *BashManager) {
 	for _, d := range o.Disable {
 		disable[d] = true
 	}
+	// "*" 表示「一个内建工具都不要」（Pi 的 --no-tools / --no-builtin-tools）。
+	// MCP 工具不经过这里，由 connectMCP 单独注册 —— 所以 --no-builtin-tools
+	// 自然只关内建、保留 MCP。
+	disableAll := disable["*"]
 
 	r := NewRegistry()
 	bash := NewBashTool(o.Policy)
@@ -228,7 +232,7 @@ func DefaultRegistry(o Options) (*Registry, *BashManager) {
 		NewSubagentTool(o.Subagent, o.Agents...),
 	}
 	for _, t := range candidates {
-		if disable[t.Name()] {
+		if disableAll || disable[t.Name()] {
 			continue
 		}
 		if err := r.Register(t); err != nil {
@@ -237,10 +241,10 @@ func DefaultRegistry(o Options) (*Registry, *BashManager) {
 	}
 	// 没有任何技能时不注册 skill 工具：工具描述本身也占 prompt，
 	// 一个只会回答「没有技能」的工具不值得。
-	if len(o.Skills) > 0 && !disable["skill"] {
+	if len(o.Skills) > 0 && !disableAll && !disable["skill"] {
 		r.MustRegister(NewSkillTool(o.Skills))
 	}
-	if !disable["parallel"] {
+	if !disableAll && !disable["parallel"] {
 		r.MustRegister(NewParallelTool(r, o.MaxParallel))
 	}
 	return r, bash.Manager
