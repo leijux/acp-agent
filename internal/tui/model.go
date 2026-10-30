@@ -10,10 +10,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-const (
-	selMarker = "\x1b[33m◆\x1b[0m"
-	prompt    = "\x1b[1;34m›\x1b[0m "
-)
+// prompt 是输入行前的提示符。
+const prompt = "\x1b[1;34m›\x1b[0m "
 
 // anchor 是 Ctrl+↑/↓ 的跳转目标：一条用户消息或一段助手正文的起始行。
 type anchor struct {
@@ -936,16 +934,10 @@ func (m *Model) rebuild() {
 			m.owners = append(m.owners, i-1)
 			line++
 		}
-		if i == m.selBlock {
-			sb.WriteString(selMarker)
-			sb.WriteByte('\n')
-			m.owners = append(m.owners, i)
-			line++
-		}
 		if blk.anchor() {
 			m.anchors = append(m.anchors, anchor{line: line, block: i})
 		}
-		for _, ln := range blk.render(cols) {
+		for _, ln := range blk.render(cols, i == m.selBlock) {
 			sb.WriteString(ln)
 			sb.WriteByte('\n')
 			m.owners = append(m.owners, i)

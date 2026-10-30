@@ -164,10 +164,17 @@ func (b *Block) finish() {
 }
 
 // title 是折叠态的标题行：折叠时必须一眼看出「这里有东西被收起来了」。
-func (b *Block) title() string {
+//
+// selected 只把箭头染黄（Ctrl+↑/↓ 的当前锚点）。早先是在块前单独插一个黄色
+// 菱形行，但那要占一整行、还把下面所有行号整体推移，噪声比信息多。
+func (b *Block) title(selected bool) string {
 	arrow := "▾"
 	if b.Collapsed {
 		arrow = "▸"
+	}
+	arrowStyle := escDim
+	if selected {
+		arrowStyle = escYellow
 	}
 	parts := []string{fmt.Sprintf("%d 行", len(b.Lines))}
 	if b.Duration > 0 {
@@ -175,18 +182,18 @@ func (b *Block) title() string {
 	}
 	// 展开方式（点击 / ⌃T）不再写在标题上：折叠箭头本身已经说明「这里有内容」，
 	// 提示每块都重复一遍，长会话里满屏都是同一句话。
-	return fmt.Sprintf("%s%s 思考 · %s%s", escDim, arrow, strings.Join(parts, " · "), escReset)
+	return arrowStyle + arrow + escDim + " 思考 · " + strings.Join(parts, " · ") + escReset
 }
 
-// render 返回该块在 cols 宽度下的屏幕行（含标题行）。
-func (b *Block) render(cols int) []string {
+// render 返回该块在 cols 宽度下的屏幕行（含标题行）。selected 只影响标题箭头颜色。
+func (b *Block) render(cols int, selected bool) []string {
 	if b.collapsible() && b.Collapsed {
-		return []string{b.title()}
+		return []string{b.title(selected)}
 	}
 	body := b.body(cols)
 	switch {
 	case b.collapsible():
-		return append([]string{b.title()}, body...)
+		return append([]string{b.title(selected)}, body...)
 	case b.Kind == KindUser:
 		// 用户消息加一个明显的标签行：否则一问一答混在一起分不清。
 		return append([]string{escBold + escBlue + "▌ 你" + escReset}, body...)

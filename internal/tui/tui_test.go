@@ -127,9 +127,9 @@ func TestThinkingCollapse(t *testing.T) {
 	send(m, LineMsg{Kind: KindThinking, Text: "第二步"})
 	send(m, LineMsg{Kind: KindText, Text: "回答"})
 
-	before := len(m.blocks[0].render(60))
+	before := len(m.blocks[0].render(60, false))
 	send(m, ctrlKey('t'))
-	collapsed := m.blocks[0].render(60)
+	collapsed := m.blocks[0].render(60, false)
 	if len(collapsed) != 1 {
 		t.Fatalf("折叠后应只剩标题行，实际 %d 行", len(collapsed))
 	}
@@ -144,7 +144,7 @@ func TestThinkingCollapse(t *testing.T) {
 		t.Fatal("折叠后正文仍在屏幕上")
 	}
 	send(m, ctrlKey('t'))
-	if got := len(m.blocks[0].render(60)); got != before {
+	if got := len(m.blocks[0].render(60, false)); got != before {
 		t.Fatalf("展开后行数 = %d，期望 %d", got, before)
 	}
 }
@@ -446,5 +446,29 @@ func TestCtrlShiftCDoesNotInterrupt(t *testing.T) {
 	send(m, ctrlKey('c'))
 	if interrupted != 1 {
 		t.Fatalf("Ctrl+C 应中断，interrupted=%d", interrupted)
+	}
+}
+
+// 选中思考块时：箭头染黄，且不再插一个黄色菱形行（那会占掉一整行）。
+func TestSelectedThinkingTurnsArrowYellow(t *testing.T) {
+	m, _ := newTestModel(60, 20)
+	send(m, LineMsg{Kind: KindThinking, Text: "想一想"})
+	send(m, KindMsg{Kind: KindText})
+	send(m, LineMsg{Kind: KindText, Text: "答案"})
+	m.selBlock = 0
+
+	view := m.viewString()
+	if strings.Contains(view, "◆") {
+		t.Fatal("选中标记不该再出现菱形")
+	}
+	if !strings.Contains(view, escYellow+"▸"+escDim) {
+		t.Fatalf("选中态的思考箭头应染黄:\n%q", view)
+	}
+
+	// 未选中时箭头是暗色（改 selBlock 后要触发重排，正常路径由 jump/reset 负责）
+	m.selBlock = -1
+	m.needRebuild = true
+	if got := m.viewString(); strings.Contains(got, escYellow+"▸") {
+		t.Fatal("未选中时箭头不该是黄色")
 	}
 }
