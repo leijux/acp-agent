@@ -50,6 +50,9 @@ type grepOpts struct {
 	recursive  bool // -r / -R
 	forceName  bool // -H
 	hideName   bool // -h
+
+	before int // -B：命中行之前显示几行
+	after  int // -A：命中行之后显示几行
 }
 
 func cmdGrep(ctx context.Context, hc interp.HandlerContext, args []string) error {
@@ -186,6 +189,21 @@ func grepOne(ctx context.Context, hc interp.HandlerContext, name string, showNam
 	matchedAny := false
 	count := 0
 	lineNo := 0
+	// 上下文：before 是最近未输出的 N 行（命中时补打），afterLeft 是还要追打的
+	// 行数，lastPrinted 保证同一行不重复出现（相邻命中的上下文会重叠）。
+	var before []string
+	afterLeft := 0
+	lastPrinted := 0
+	// 上下文行用 '-' 分隔（GNU 语义），命中行用 ':'。
+	emit := func(no int, s, eol string, isCtx bool) {
+		if no <= lastPrinted {
+			return
+		}
+		writeGrepLine(hc, name, showName, opts.lineNo, no, s, eol, isCtx)
+		lastPrinted = no
+	}
+	// 上下文只对「逐行输出」的形态有意义（-c/-l/-L/-q 是文件级输出）。
+	wantCtx := !opts.count && !opts.listMatch && !opts.listNo && !opts.quiet
 	for {
 		if err := ctx.Err(); err != nil {
 			return matchedAny, err
@@ -221,10 +239,26 @@ func grepOne(ctx context.Context, hc interp.HandlerContext, name string, showNam
 				count++
 			case opts.onlyMatch && !opts.invert:
 				for _, h := range hits {
-					writeGrepLine(hc, name, showName, opts.lineNo, lineNo, body[h[0]:h[1]], eol)
+					writeGrepLine(hc, name, showName, opts.lineNo, lineNo, body[h[0]:h[1]], eol, false)
 				}
 			default:
-				writeGrepLine(hc, name, showName, opts.lineNo, lineNo, body, eol)
+				if wantCtx && opts.before > 0 {
+					start := lineNo - len(before)
+					for k, b := range before {
+						emit(start+k, b, "\n", true)
+					}
+				}
+				emit(lineNo, body, eol, false)
+				afterLeft = opts.after
+			}
+		} else if wantCtx && afterLeft > 0 {
+			emit(lineNo, body, eol, true)
+			afterLeft--
+		}
+		if wantCtx && opts.before > 0 {
+			before = append(before, body)
+			if len(before) > opts.before {
+				before = before[1:]
 			}
 		}
 		if rerr != nil {
@@ -260,15 +294,20 @@ func splitLineEnding(s string) (body, eol string) {
 	}
 }
 
-func writeGrepLine(hc interp.HandlerContext, name string, showName, lineNo bool, n int, body, eol string) {
+func writeGrepLine(hc interp.HandlerContext, name string, showName, lineNo bool, n int, body, eol string, isCtx bool) {
+	// 上下文行与命中行用不同分隔符（- / :），模型一眼能看出哪行是命中。
+	sep := byte(':')
+	if isCtx {
+		sep = '-'
+	}
 	var b strings.Builder
 	if showName {
 		b.WriteString(name)
-		b.WriteByte(':')
+		b.WriteByte(sep)
 	}
 	if lineNo {
 		b.WriteString(strconv.Itoa(n))
-		b.WriteByte(':')
+		b.WriteByte(sep)
 	}
 	b.WriteString(body)
 	if eol == "" {
@@ -454,12 +493,40 @@ func parseGrepArgs(hc interp.HandlerContext, args []string) (grepOpts, []string,
 			i++
 			patterns = append(patterns, args[i])
 
-		case a == "-A" || a == "-B" || a == "-C" || a == "-m" ||
-			strings.HasPrefix(a, "--after-context") || strings.HasPrefix(a, "--before-context") ||
-			strings.HasPrefix(a, "--context") || strings.HasPrefix(a, "--max-count"):
-			// 不静默忽略：调用方以为拿到了上下文，实际只拿到匹配行，是更坏的结果。
+		case a == "-m" || strings.HasPrefix(a, "--max-count"):
+			// -m 仍然不做：它要「命中 N 次后停止扫描」，而我们的输出是按文件
+			// 顺序流式的，提前停会让结果依赖文件顺序。
 			return opts, nil, nil, usagef(hc,
-				"%s: 内建 grep 不支持上下文/条数选项（-A/-B/-C/-m）；请用带上下文的 read 工具，或装真 grep", a)
+				"%s: 内建 grep 不支持 -m；可以管道接 head 或者缩小范围", a)
+
+		case a == "-A" || a == "-B" || a == "-C" ||
+			strings.HasPrefix(a, "--after-context") || strings.HasPrefix(a, "--before-context") ||
+			strings.HasPrefix(a, "--context"):
+			var val string
+			flag := a
+			// 注意别用 i 做短变量：外层 for 的 i 是参数下标，遮蔽掉之后
+			// 「取下一个参数」会取错位置。
+			if eq := strings.IndexByte(a, '='); eq > 0 {
+				flag, val = a[:eq], a[eq+1:]
+			} else {
+				if i+1 >= len(args) {
+					return opts, nil, nil, usagef(hc, "grep: option requires an argument -- %q", a)
+				}
+				i++
+				val = args[i]
+			}
+			cnt, cerr := strconv.Atoi(strings.TrimSpace(val))
+			if cerr != nil || cnt < 0 {
+				return opts, nil, nil, usagef(hc, "grep: invalid context length %q", val)
+			}
+			switch {
+			case flag == "-A" || strings.HasPrefix(flag, "--after-context"):
+				opts.after = cnt
+			case flag == "-B" || strings.HasPrefix(flag, "--before-context"):
+				opts.before = cnt
+			default: // -C / --context：(cnt, cnt)
+				opts.before, opts.after = cnt, cnt
+			}
 
 		default:
 			// 组合短选项（-in、-rn、-iE…），遇到带值的 e 就地把剩余部分当 pattern。
@@ -496,6 +563,30 @@ func parseGrepArgs(hc interp.HandlerContext, args []string) (grepOpts, []string,
 					opts.forceName = true
 				case 'h':
 					opts.hideName = true
+				case 'A', 'B', 'C':
+					// 组合形式里的带值选项：-A3 / -rC2。值必须是剩余部分或下一个参数。
+					val := rest[j+1:]
+					if val == "" {
+						if i+1 >= len(args) {
+							return opts, nil, nil, usagef(hc, "grep: option requires an argument -- %q", string(c))
+						}
+						i++
+						val = args[i]
+					}
+					cnt, cerr := strconv.Atoi(val)
+					if cerr != nil || cnt < 0 {
+						return opts, nil, nil, usagef(hc, "grep: invalid context length %q", val)
+					}
+					switch c {
+					case 'A':
+						opts.after = cnt
+					case 'B':
+						opts.before = cnt
+					default:
+						opts.before, opts.after = cnt, cnt
+					}
+					j = len(rest)
+
 				case 'e':
 					if j+1 < len(rest) {
 						patterns = append(patterns, rest[j+1:])

@@ -451,6 +451,7 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 			// 写网络（fetch 非 GET/HEAD）只在 auto 下放行：js 不是改动型工具，
 			// ask 下放行就等于绕过了 bash 那条确认路径。
 			AllowNetworkWrite: mode == modeAuto,
+		AllowScriptWrite:  mode == modeAuto,
 		},
 		// auto 模式已全部放行，root 边界只会让模型绕道 bash（bash 的命令
 		// 本身不受 Root 约束）；ask/readonly 保留边界。

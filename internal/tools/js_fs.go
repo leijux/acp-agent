@@ -57,6 +57,7 @@ func installFS(vm *goja.Runtime, p Policy) error {
 		"stat":           fs.stat(vm),
 		"exists":         fs.exists(vm),
 		"glob":           fs.glob(vm),
+		"writeFile":      fs.writeFile(vm),
 	}
 	names := make([]string, 0, len(methods))
 	for name := range methods {
@@ -143,6 +144,33 @@ func (fs *jsFS) readFileBase64(vm *goja.Runtime) func(goja.FunctionCall) goja.Va
 	return func(call goja.FunctionCall) goja.Value {
 		data := fs.readRaw(vm, "readFileBase64", jsArg(call, 0))
 		return vm.ToValue(base64.StdEncoding.EncodeToString(data))
+	}
+}
+
+// writeFile 写一个文件（fs.writeFile(path, content) → 写入字节数）。
+//
+// 只在 Policy.AllowScriptWrite 打开时可用，且路径同样受 Root 约束；写盘复用
+// write 工具的 LockFile，所以与并发的 write/edit 不会互相踩。
+func (fs *jsFS) writeFile(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		if fs.policy.ReadOnly {
+			throwJS(vm, "当前策略为只读，禁止写文件")
+		}
+		if !fs.policy.AllowScriptWrite {
+			throwJS(vm, "fs.writeFile 需要 permissions=auto；在 ask 模式下请用 write/edit 工具"+
+				"（那条路有确认与 diff 审计）")
+		}
+		abs := fs.resolve(vm, jsArg(call, 0))
+		content := jsArg(call, 1)
+		unlock := LockFile(abs)
+		defer unlock()
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			throwJS(vm, fmt.Sprintf("创建目录失败: %v", err))
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			throwJS(vm, fmt.Sprintf("写入失败: %v", err))
+		}
+		return vm.ToValue(len(content))
 	}
 }
 

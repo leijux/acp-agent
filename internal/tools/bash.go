@@ -161,6 +161,28 @@ const killGrace = 2 * time.Second
 // maxForegroundOutput 是前台/接管输出的内存上限（超出部分丢弃并标记）。
 const maxForegroundOutput = 4 << 20
 
+// maxForegroundLines 是前台输出的**行数**预算。
+//
+// 4MB 的字节上限只管内存，不管 token：`ls -R` 几千行、每行几十字节，体积远
+// 没到 4MB，但一次就能把上下文吃光（实测在 Temp 里误敲一次 ls -a，几万 token
+// 直接进上下文）。所以再加一道按行的闸。
+const maxForegroundLines = 2000
+
+var nlByte = []byte{'\n'}
+
+// headLines 返回 p 中前 n 行（含每行结尾的 \n）；不足 n 行时原样返回。
+func headLines(p []byte, n int) []byte {
+	idx := 0
+	for i := 0; i < n; i++ {
+		j := bytes.IndexByte(p[idx:], '\n')
+		if j < 0 {
+			return p
+		}
+		idx += j + 1
+	}
+	return p[:idx]
+}
+
 // sharedOutput 是可被前台与后台共享的输出缓冲。
 // 前台超时接管时，写入端（解释器）已经在往它写，后台会话只是接管读取，
 // 因此不会丢掉已经产生、但尚未被前台取走的输出。
@@ -168,7 +190,9 @@ type sharedOutput struct {
 	mu    sync.Mutex
 	b     bytes.Buffer
 	limit int
-	drop  bool
+	lines int  // 已缓冲的完整行数（用于行数预算）
+	drop  bool // 字节上限被突破
+	dropLines bool // 行数预算被突破
 	// onWrite 在每次写入后调用（锁外），用来唤醒被接管会话的等待者。
 	onWrite func()
 }
@@ -188,9 +212,32 @@ func (o *sharedOutput) setOnWrite(fn func()) {
 }
 
 func (o *sharedOutput) Write(p []byte) (int, error) {
+	orig := len(p)
 	o.mu.Lock()
 	hook := o.onWrite
 	// 超过上限后仍然返回 len(p)：写端不能因为缓冲区满了而阻塞或报错。
+	if o.drop || o.dropLines {
+		o.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		return orig, nil
+	}
+	if nl := bytes.Count(p, nlByte); o.lines+nl > maxForegroundLines {
+		keep := maxForegroundLines - o.lines
+		if keep > 0 {
+			head := headLines(p, keep)
+			o.b.Write(head)
+			o.lines += keep
+		}
+		o.dropLines = true
+		o.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		return orig, nil
+	}
+	o.lines += bytes.Count(p, nlByte)
 	if room := o.limit - o.b.Len(); room < len(p) {
 		o.drop = true
 		if room > 0 {
@@ -214,9 +261,7 @@ func (o *sharedOutput) String() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	s := o.b.String()
-	if o.drop {
-		s += "\n[输出超过上限，已截断]"
-	}
+	s += o.truncNote()
 	return s
 }
 
@@ -229,10 +274,19 @@ func (o *sharedOutput) Slice(from int) string {
 		return ""
 	}
 	out := string(b[from:])
-	if o.drop {
-		out += "\n[输出超过上限，已截断]"
-	}
+	out += o.truncNote()
 	return out
+}
+
+// truncNote 是截断说明（调用方必须持锁）。
+func (o *sharedOutput) truncNote() string {
+	if o.dropLines {
+		return fmt.Sprintf("\n[输出超过 %d 行，已截断：请用 bash_output 增量读，或给命令加 head/grep 过滤]", maxForegroundLines)
+	}
+	if o.drop {
+		return "\n[输出超过上限，已截断]"
+	}
+	return ""
 }
 
 // Len 返回已缓冲的字节数。
@@ -770,7 +824,19 @@ func (t *BashOutputTool) Execute(ctx context.Context, a Args) (Result, error) {
 		return ErrorResult("%v", err), nil
 	}
 
-	text, truncated := Truncate(strings.TrimRight(res.Text, "\n"), 0, 0)
+	raw := strings.TrimRight(res.Text, "\n")
+	// 后台缓冲能到 4MB，一次全量读出来同样能炸上下文（比如 sleep 后的目录树）。
+	lineNote := ""
+	if nl := strings.Count(raw, "\n") + 1; nl > maxForegroundLines {
+		raw = string(headLines([]byte(raw), maxForegroundLines))
+		lineNote = fmt.Sprintf("\n[本次只返回前 %d 行（共 %d 行）：用 cursor 继续读，或加 filter 过滤]",
+			maxForegroundLines, nl)
+	}
+	text, truncated := Truncate(raw, 0, 0)
+	if lineNote != "" {
+		text = strings.TrimRight(text, "\n") + lineNote
+		truncated = true
+	}
 	if text == "" {
 		switch {
 		case res.Canceled:

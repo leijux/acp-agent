@@ -31,7 +31,7 @@ results := ex.Execute(ctx, []tools.Call{
 | `bash` | ✅ | 执行命令；超时或 `background:true` 转后台，返回 `sessionId` |
 | `bash_output` | ✅ | 读后台输出：正则 `filter`、`cursor` 增量读、`wait=output/exit` 阻塞等待（见下方「后台任务的等待」） |
 | `bash_kill` | ❌ | 杀整个进程组 / 进程树 |
-| `js` | ✅ | 内置 goja 执行 JavaScript：纯计算、JSON 变换、字符串/正则处理，只读 `fs`，同步 `fetch`（出网受超时/次数/字节预算约束） |
+| `js` | ✅ | 内置 goja 执行 JavaScript：纯计算、JSON 变换、字符串/正则处理，`fs` 默认只读（`permissions=auto` 下可 `fs.writeFile`），同步 `fetch`（出网受超时/次数/字节预算约束） |
 | `skill` | ✅ | 加载 `.agents/skills` 里的技能：无参列清单、`name` 读 SKILL.md 正文、`name`+`file` 读随附脚本/文档。**未发现技能时不注册**（见下方「Skills」） |
 | `todo` | ❌ | 内存态任务清单（replace/add/update/list） |
 | `web_search` | ✅ | 多 query 并发检索；后端在 `internal/web`（duckduckgo 免 key / searxng / tavily / brave / exa） |
@@ -225,6 +225,7 @@ go env GOMOD                                 默认 50ms   native 71ms
 | `mkdir` | `-p` | |
 | `rm` | `-r/-R/-f/-v` | 危险命令仍由 `Policy.CheckCommand` 在入口拦 |
 | `cp` | `-r/-R -f -n` | 默认跟随符号链接；不实现 `-p/-a`；目标是已存在目录时拷成 `dst/<basename>` |
+| `mv` | `-f -n` | 同卷走 `os.Rename`，跨卷退化成复制 + 删源（复制失败时源保持不动）；拒绝把目录移进自身 |
 | `grep` | `-i -v -n -c -l -L -o -q -w -x -F -E -r/-R -h -H -e` | 见下「内建 grep 的取舍」 |
 
 不在表里的命令（`sed`、`awk`、`wc`、`tr`、`sort`、`which`…）仍然要求系统里有真实
@@ -238,7 +239,8 @@ go env GOMOD                                 默认 50ms   native 71ms
 
 | 项 | 内建行为 | 原因 |
 |---|---|---|
-| `-A/-B/-C/-m` | **明确报错退出 2** | 静默当普通匹配更坏：调用方会以为拿到了上下文 |
+| `-A/-B/-C` | **支持**（上下文行用 `-` 分隔，相邻命中的重叠区段去重） | 与 GNU 对齐；模型看上下文是常态 |
+| `-m` | **明确报错退出 2** | 它要「命中 N 次后停止扫描」，而输出是按文件顺序流式的，提前停会让结果依赖文件顺序 |
 | 正则方言 | 默认按扩展正则（ERE，Go RE2） | GNU 默认 BRE 里 `\+`/`\?`/`\{n,m\}` 才特殊，这里反过来；模型写 ERE 远多于 BRE |
 | 二进制文件 | 按字面行扫，不报 `Binary file … matches` | 省一次预扫；日志/代码场景不依赖它 |
 | 递归时符号链接目录 | 不跟随 | `filepath.WalkDir` 的默认语义，避免环 |

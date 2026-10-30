@@ -272,15 +272,24 @@ func TestJSTool_FSEscapesRejected(t *testing.T) {
 	}
 }
 
-// 没有写接口：沙箱不该能改文件。
-func TestJSTool_FSWriteNotAvailable(t *testing.T) {
+// 写接口只有 fs.writeFile，而且默认（ask 模式）调用即抛错、不落盘。
+func TestJSTool_FSWriteGuarded(t *testing.T) {
 	root := t.TempDir()
 	p := Policy{Root: root}
 	r := runJSWithPolicy(t, p, Args{
 		"script": `[typeof fs.writeFile, typeof fs.appendFile, typeof fs.unlink, typeof fs.mkdir].join(",")`,
 	})
-	if got := r.Text(); !strings.Contains(got, "undefined,undefined,undefined,undefined") {
-		t.Fatalf("沙箱里出现了写接口: %q", got)
+	if got := r.Text(); !strings.Contains(got, "function,undefined,undefined,undefined") {
+		t.Fatalf("只有 writeFile 该存在: %q", got)
+	}
+	r = runJSWithPolicy(t, p, Args{
+		"script": `try { fs.writeFile("x.txt", "y"); "no-throw" } catch (e) { "caught:" + e }`,
+	})
+	if got := r.Text(); !strings.Contains(got, "caught:") || !strings.Contains(got, "permissions=auto") {
+		t.Fatalf("未授权时 writeFile 应抛错并给出替代方案: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, "x.txt")); err == nil {
+		t.Fatal("被拒绝的写入不该落盘")
 	}
 }
 

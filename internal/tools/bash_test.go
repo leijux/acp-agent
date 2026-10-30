@@ -286,3 +286,25 @@ func TestBashUnknownSession(t *testing.T) {
 		t.Fatal("未知 session 应报错")
 	}
 }
+
+// 前台输出的行数预算：几千行必须被拦住（字节上限 4MB 挡不住 token 爆炸）。
+func TestBashOutputLineBudget(t *testing.T) {
+	bt, _ := newBash(t)
+	// 内建解释器没有 seq/yes，用 shell 自己的 while + 算术。
+	script := `i=1; while [ $i -le 5000 ]; do echo "line$i"; i=$((i+1)); done`
+	res, err := bt.Execute(ctx_(), Args{"command": script})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := res.Text()
+	lines := strings.Count(text, "\n") + 1
+	if lines > maxForegroundLines+5 {
+		t.Fatalf("输出 %d 行，超过行数预算 %d", lines, maxForegroundLines)
+	}
+	if !strings.Contains(text, "输出超过") || !strings.Contains(text, "bash_output") {
+		t.Fatalf("缺少截断提示:\n%s", text[max(0, len(text)-200):])
+	}
+	if !res.Truncated {
+		t.Fatal("应标记 Truncated")
+	}
+}

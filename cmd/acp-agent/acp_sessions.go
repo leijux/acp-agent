@@ -37,6 +37,7 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 		Policy: tools.Policy{
 			Root: root, MaxReadBytes: 2 << 20,
 			AllowNetworkWrite: allowOutside, // 与 auto 同步：只有全放行模式才能写网络
+			AllowScriptWrite:  allowOutside, // 同上
 		},
 		AllowOutside: allowOutside,
 		MaxParallel:  8,

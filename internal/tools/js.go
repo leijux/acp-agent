@@ -43,7 +43,8 @@ func (*JSTool) Description() string {
 		"适合计算、JSON 变换、字符串/正则处理、日期换算。" +
 		"可用 console.log/info/warn/error 输出（会被收集）；脚本最后一个表达式的值作为结果返回。" +
 		"只读文件系统可用：fs.readFile(path)、fs.readDir(path)、fs.stat(path)、fs.exists(path)、" +
-		"fs.glob(pattern)（pattern 相对 fs.root，**不能写文件**，写盘请用 write/edit）。" +
+		"fs.glob(pattern)（pattern 相对 fs.root）；permissions=auto 时可用 fs.writeFile(path, content) 落盘，" +
+		"其余模式写盘请用 write/edit（那条路有确认与 diff 审计）。" +
 		"网络请求用同步的 fetch(url, {method, headers, body|json, timeout, maxBytes})，" +
 		"返回 {status, ok, url, headers, text, json, size, truncated}（不是 Promise，不能 await；" +
 		"非 2xx 不抛错，看 ok/status）。非 GET/HEAD 请求需要 permissions=auto；" +

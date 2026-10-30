@@ -26,6 +26,14 @@ type Policy struct {
 	// bash 会弹窗，走 js 却不弹，那就是个后门。关掉时 fetch 的报错会把模型
 	// 引到 bash 那条需要确认的路上。
 	AllowNetworkWrite bool
+	// AllowScriptWrite 允许 js 的 fs.writeFile 写盘。
+	//
+	// 和 AllowNetworkWrite 同理：js 不是改动型工具（Mutates=false），如果无条件
+	// 让它写文件，就等于绕过了 write/edit 的确认弹窗与 diff 审计。只有
+	// `permissions=auto`（已全放行）打开；关着时报错会把模型引到 write 工具那条
+	// 需要确认的路上。写盘本身仍然复用 write 的路径锁（LockFile），同一文件并发
+	// 写不会互相踩。
+	AllowScriptWrite bool
 }
 
 // DefaultPolicy 以 cwd 为根。

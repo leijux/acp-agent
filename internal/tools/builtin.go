@@ -624,7 +624,7 @@ func (t *LSTool) Execute(ctx context.Context, a Args) (Result, error) {
 		} else {
 			fmt.Fprintf(&b, "%s%s%s\n", indent, name, suffix)
 		}
-		if count > 5000 {
+		if count > 500 {
 			return filepath.SkipAll
 		}
 		return nil
@@ -636,8 +636,8 @@ func (t *LSTool) Execute(ctx context.Context, a Args) (Result, error) {
 	if out == "" {
 		out = "(空目录)"
 	}
-	if count > 5000 {
-		out += "\n[条目过多已截断，请缩小范围]"
+	if count > 500 {
+		out += "\n[条目超过 500 已截断：用 glob 精确匹配，或加 path/depth 缩小范围；需要内容用 grep]"
 	}
 	out = t.Policy.Rel(abs) + ":\n" + out
 	return Result{

@@ -141,11 +141,40 @@ func TestShellBuiltinGrep(t *testing.T) {
 		}
 	})
 
-	t.Run("unsupported_context_flag", func(t *testing.T) {
-		// -A/-B/-C 必须明确报错，不能静默当普通匹配（否则调用方以为拿到了上下文）
-		got := run(t, "grep -C 2 error logs/a.log || echo REJECTED")
-		if !strings.Contains(got, "REJECTED") || !strings.Contains(got, "不支持") {
-			t.Fatalf("-C 应被明确拒绝: %q", got)
+	t.Run("context_lines", func(t *testing.T) {
+		run(t, "printf 'l1\nl2\nTARGET\nl4\nl5\n' > ctx.txt")
+		// 上下文行用 '-' 分隔、命中行用 ':'（GNU 语义）
+		got := run(t, "grep -n -C 1 TARGET ctx.txt")
+		want := []string{"2-l2", "3:TARGET", "4-l4"}
+		for _, w := range want {
+			if !strings.Contains(got, w) {
+				t.Fatalf("缺少 %q:\n%s", w, got)
+			}
+		}
+		// -A / -B 单独用
+		if got := run(t, "grep -n -A 2 TARGET ctx.txt"); strings.Contains(got, "2-l2") || !strings.Contains(got, "4-l4") {
+			t.Fatalf("-A 2 不该带前文:\n%s", got)
+		}
+		if got := run(t, "grep -n -B 2 TARGET ctx.txt"); !strings.Contains(got, "1-l1") || strings.Contains(got, "5-l5") {
+			t.Fatalf("-B 2 不该带后文:\n%s", got)
+		}
+		// 相邻命中的上下文重叠只输出一次
+		run(t, "printf 'TARGET a\nmid\nTARGET b\n' > ctx2.txt")
+		got = run(t, "grep -C 2 TARGET ctx2.txt")
+		if n := strings.Count(got, "mid"); n != 1 {
+			t.Fatalf("重叠上下文重复输出（%d 次）:\n%s", n, got)
+		}
+		// -C 的后向不应越过文件末尾
+		if got := run(t, "grep -A 9 TARGET ctx2.txt"); strings.Count(got, "TARGET") != 2 {
+			t.Fatalf("越界上下文出错:\n%s", got)
+		}
+	})
+
+	t.Run("max_count_still_rejected", func(t *testing.T) {
+		// -m 仍然不做（会依赖文件顺序），但要在报错里给替代写法
+		got := run(t, "grep -m 1 error logs/a.log || echo REJECTED")
+		if !strings.Contains(got, "REJECTED") || !strings.Contains(got, "head") {
+			t.Fatalf("-m 应被拒绝并提示替代方案: %q", got)
 		}
 	})
 
