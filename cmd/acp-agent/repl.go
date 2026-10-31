@@ -740,11 +740,13 @@ func (a *app) reloadMCP(ctx context.Context) (servers, toolsN int, err error) {
 	}
 	// 先摘掉旧工具：名字可能与新配置无关，留着就是幽灵工具。
 	if a.mcp != nil {
+		// 名字必须在 Close **之前**取：Close 会把 m.tools 清空（manager.go 的
+		// Close 里 m.tools = map[string][]tools.Tool{}）。先 Close 再问 Tools()
+		// 拿到的是空列表 → 旧工具一个都没摘 → 新连接注册时全部因同名被跳过，
+		// 表现出来就是「/reload mcp 好像没生效」。
+		stale := mcpToolNames(a.mcp.Tools())
 		a.mcp.Close()
-		// 只摘 mcp__* 前缀：Manager.Tools() 返回远端**全部**工具，其中包含与内建
-		// 重名、注册时被跳过（RegisterInto 的 skipped）的那些。按名字无条件
-		// Unregister 会把内建 read/grep 之类一起删掉 —— 一次 /reload mcp 就少几个工具。
-		a.rawReg.Unregister(mcpToolNames(a.mcp.Tools())...)
+		a.rawReg.Unregister(stale...)
 		a.mcp = nil
 	}
 	mgr, err := connectMCP(ctx, a.cfg, a.rawReg, a.term, true)

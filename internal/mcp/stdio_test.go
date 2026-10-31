@@ -323,3 +323,25 @@ func (s stubTool) Parameters() map[string]any {
 func (s stubTool) Execute(context.Context, tools.Args) (tools.Result, error) {
 	return tools.Result{}, nil
 }
+
+// Close 会清空工具表 —— 这条行为是「/reload 必须先取名字再 Close」的依据。
+// 先 Close 后问 Tools() 会拿到空列表，旧工具摘不掉，新连接注册时全部因同名被
+// 跳过，表现出来就是「重载好像没生效」。
+func TestManagerCloseClearsTools(t *testing.T) {
+	cfg := &Config{MCPServers: map[string]ServerConfig{"fake": fakeServerConfig(t)}}
+	mgr := NewManager(cfg, WithConnectTimeout(30*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := mgr.Connect(ctx); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if len(mgr.Tools()) == 0 {
+		t.Fatal("连接后应有工具")
+	}
+	if err := mgr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := len(mgr.Tools()); got != 0 {
+		t.Fatalf("Close 之后工具表应为空（调用方必须在此之前取名字），实际 %d", got)
+	}
+}
