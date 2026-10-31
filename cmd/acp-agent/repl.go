@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/leijux/acp-agent/internal/tools"
+	"github.com/leijux/acp-agent/internal/skills"
 	"context"
 	"errors"
 	"fmt"
@@ -362,6 +364,7 @@ const replHelp = `
   /init            生成 AGENTS.md 模板
   /mouse [on|off]  开关鼠标（开着才能点折叠与拖选复制，但会抢终端原生拖选）
   /freeze          把当前内容写进终端 scrollback（之后可用终端滚动回看）
+  /reload [what]   重新加载 MCP 与技能（what: mcp / skills / all，默认全部）
   /exit 或 Ctrl-D  退出
   其它输入        发送给模型
 （运行中按 Esc 中断当前任务，Ctrl-C 退出）
@@ -615,6 +618,34 @@ func (a *app) command(ctx context.Context, input string) (bool, error) {
 		}
 		return false, nil
 
+	case "/reload":
+		// 支持 /reload（全部）、/reload mcp、/reload skills。
+		// 为什么需要：MCP server 与 .agents/skills 都可能在本进程运行期间被改
+		// （装了个新 server、加了个新技能），以前只能退出重开。
+		target := strings.ToLower(strings.TrimSpace(arg))
+		doMCP := target == "" || target == "all" || target == "mcp"
+		doSkills := target == "" || target == "all" || target == "skills"
+		if !doMCP && !doSkills {
+			return false, fmt.Errorf("/reload 支持：mcp / skills / all（当前 %q）", arg)
+		}
+		if doSkills {
+			added, removed, err := a.reloadSkills()
+			if err != nil {
+				return false, err
+			}
+			a.term.printf("%s\n", a.term.paint(cDim,
+				fmt.Sprintf("技能已重载：%d 个（+%d -%d）", added+removed, added, removed)))
+		}
+		if doMCP {
+			servers, toolsN, err := a.reloadMCP(ctx)
+			if err != nil {
+				return false, err
+			}
+			a.term.printf("%s\n", a.term.paint(cDim,
+				fmt.Sprintf("MCP 已重载：%d 个 server，%d 个工具", servers, toolsN)))
+		}
+		return false, nil
+
 	case "/freeze":
 		if a.ui == nil {
 			return false, fmt.Errorf("/freeze 只在交互界面（默认）下有效")
@@ -646,3 +677,79 @@ func (a *app) writeAgentsTemplate(extra string) error {
 }
 
 // （会话文件的检索与分配见 sessions.go 的 sessionStore。）
+
+// reloadSkills 重新发现 .agents/skills，并把结果同步到系统提示与 skill 工具。
+//
+// 返回 (总数, 变化数)：变化数只用于提示里显示 ±，不参与逻辑。
+func (a *app) reloadSkills() (total, changed int, err error) {
+	before := map[string]bool{}
+	for _, s := range a.agent.Skills() {
+		before[s.Name] = true
+	}
+	skillSet := skills.Discover(skills.Options{
+		Root:       a.cfg.Root,
+		ExtraPaths: a.cfg.Skills,
+		Disabled:   a.cfg.DisableSkills,
+	})
+	after := map[string]bool{}
+	for _, s := range skillSet.Skills {
+		after[s.Name] = true
+	}
+	for name := range after {
+		if !before[name] {
+			changed++ // 新增
+		}
+	}
+	for name := range before {
+		if !after[name] {
+			changed++ // 移除
+		}
+	}
+
+	// 系统提示里的 Skills 段由 BuildSystemPrompt 每次请求现算，这里改数据即可。
+	a.agent.SetSkills(skillSet.Skills)
+
+	// 工具表跟着变：没有技能就不该留一个只会回「没有技能」的工具。
+	a.rawReg.Unregister("skill")
+	if len(skillSet.Skills) > 0 {
+		if err := a.rawReg.Register(tools.NewSkillTool(skillSet.Skills)); err != nil {
+			return len(skillSet.Skills), changed, fmt.Errorf("注册 skill 工具失败: %w", err)
+		}
+	}
+	return len(skillSet.Skills), changed, nil
+}
+
+// reloadMCP 断开现有 MCP 连接，重新加载配置并连接。
+//
+// 配置来源与启动时完全一致（--mcp-config / --mcp-json / 默认文件链 / --extension），
+// 所以改完 .mcp.json 直接 /reload mcp 就能生效。
+func (a *app) reloadMCP(ctx context.Context) (servers, toolsN int, err error) {
+	if a.cfg.NoMCP {
+		return 0, 0, fmt.Errorf("启动时带了 --no-mcp，重载也不会连接 MCP")
+	}
+	// 先摘掉旧工具：名字可能与新配置无关，留着就是幽灵工具。
+	if a.mcp != nil {
+		names := make([]string, 0)
+		for _, t := range a.mcp.Tools() {
+			names = append(names, t.Name())
+		}
+		a.mcp.Close()
+		a.rawReg.Unregister(names...)
+		a.mcp = nil
+	}
+	mgr, err := connectMCP(ctx, a.cfg, a.rawReg, a.term)
+	if err != nil {
+		return 0, 0, err
+	}
+	a.mcp = mgr
+	if mgr == nil {
+		return 0, 0, nil
+	}
+	connected := 0
+	for _, st := range mgr.Status() {
+		if st.Connected {
+			connected++
+		}
+	}
+	return connected, len(mgr.Tools()), nil
+}

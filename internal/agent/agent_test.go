@@ -821,3 +821,34 @@ func TestContextPromptCarriesCompressionRules(t *testing.T) {
 		}
 	}
 }
+
+// /reload 的两个前提：Agent 能热替换技能名单（系统提示现算），
+// Registry 能摘掉旧工具再注册新的（否则 MCP 重连会留下幽灵工具）。
+func TestSetSkillsUpdatesSystemPrompt(t *testing.T) {
+	a := newTestAgent(t, NewScriptedProvider(reply("ok")), func(o *Options) {
+		o.Registry = tools.NewRegistry()
+	})
+	if strings.Contains(BuildSystemPrompt(a.opts.Context), "demo-skill") {
+		t.Fatal("初始不该有技能")
+	}
+	a.SetSkills([]skills.Skill{{Name: "demo-skill", Description: "演示", Path: "/tmp/demo/SKILL.md"}})
+	prompt := BuildSystemPrompt(a.opts.Context)
+	if !strings.Contains(prompt, "demo-skill") {
+		t.Fatal("SetSkills 之后系统提示应包含技能名单（每次请求现算）")
+	}
+	if got := a.Skills(); len(got) != 1 || got[0].Name != "demo-skill" {
+		t.Fatalf("Skills() 快照不对: %+v", got)
+	}
+}
+
+func TestRegistryUnregisterRemovesTool(t *testing.T) {
+	r := tools.NewRegistry()
+	r.MustRegister(tools.NewTodoTool())
+	if _, ok := r.Get("todo"); !ok {
+		t.Fatal("注册失败")
+	}
+	r.Unregister("todo")
+	if _, ok := r.Get("todo"); ok {
+		t.Fatal("Unregister 之后工具应消失")
+	}
+}

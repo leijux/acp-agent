@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/leijux/acp-agent/internal/skills"
 	"github.com/leijux/acp-agent/internal/tools"
 )
 
@@ -260,6 +261,24 @@ func (a *Agent) Turns() int {
 
 // Model 返回当前模型。
 func (a *Agent) Model() Model { return a.opts.Model }
+
+// Skills 返回当前技能名单（只读快照）。
+func (a *Agent) Skills() []skills.Skill {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]skills.Skill(nil), a.opts.Context.Skills...)
+}
+
+// SetSkills 替换技能名单。
+//
+// 系统提示每次请求都由 BuildSystemPrompt 现算（agent.go 里构 system message 时），
+// 所以这里改完下一次请求就生效，不需要重建 Agent —— /reload 靠这个。
+// skill 工具本身由调用方（CLI）在 Registry 里增删。
+func (a *Agent) SetSkills(list []skills.Skill) {
+	a.mu.Lock()
+	a.opts.Context.Skills = list
+	a.mu.Unlock()
+}
 
 // SetModel 切换模型并记录到会话树。
 func (a *Agent) SetModel(m Model) error {
