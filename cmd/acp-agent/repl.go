@@ -364,7 +364,7 @@ const replHelp = `
   /init            生成 AGENTS.md 模板
   /mouse [on|off]  开关鼠标（开着才能点折叠与拖选复制，但会抢终端原生拖选）
   /freeze          把当前内容写进终端 scrollback（之后可用终端滚动回看）
-  /reload [what]   重新加载 MCP 与技能（what: mcp / skills / all，默认全部）
+  /reload          重新加载 MCP 与技能（两者一起，不区分）
   /exit 或 Ctrl-D  退出
   其它输入        发送给模型
 （运行中按 Esc 中断当前任务，Ctrl-C 退出）
@@ -619,32 +619,25 @@ func (a *app) command(ctx context.Context, input string) (bool, error) {
 		return false, nil
 
 	case "/reload":
-		// 支持 /reload（全部）、/reload mcp、/reload skills。
+		// MCP 与技能一起重载，不区分（参数被忽略：两者都是"重新读磁盘"，
+		// 没有只重载一半的合理场景）。
 		// 为什么需要：MCP server 与 .agents/skills 都可能在本进程运行期间被改
 		// （装了个新 server、加了个新技能），以前只能退出重开。
-		target := strings.ToLower(strings.TrimSpace(arg))
-		doMCP := target == "" || target == "all" || target == "mcp"
-		doSkills := target == "" || target == "all" || target == "skills"
-		if !doMCP && !doSkills {
-			return false, fmt.Errorf("/reload 支持：mcp / skills / all（当前 %q）", arg)
-		}
-		if doSkills {
-			added, removed, err := a.reloadSkills()
-			if err != nil {
-				return false, err
-			}
+		var errs []error
+		if total, changed, err := a.reloadSkills(); err != nil {
+			errs = append(errs, fmt.Errorf("技能: %w", err))
+		} else {
 			a.term.printf("%s\n", a.term.paint(cDim,
-				fmt.Sprintf("技能已重载：%d 个（+%d -%d）", added+removed, added, removed)))
+				fmt.Sprintf("技能已重载：%d 个（变化 %d）", total, changed)))
 		}
-		if doMCP {
-			servers, toolsN, err := a.reloadMCP(ctx)
-			if err != nil {
-				return false, err
-			}
+		if servers, toolsN, err := a.reloadMCP(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("MCP: %w", err))
+		} else {
 			a.term.printf("%s\n", a.term.paint(cDim,
 				fmt.Sprintf("MCP 已重载：%d 个 server，%d 个工具", servers, toolsN)))
 		}
-		return false, nil
+		// 一边失败不影响另一边：两者都已尽力执行，把错误一起报上去。
+		return false, errors.Join(errs...)
 
 	case "/freeze":
 		if a.ui == nil {
@@ -691,7 +684,7 @@ func mcpToolNames(list []tools.Tool) []string {
 
 // reloadSkills 重新发现 .agents/skills，并把结果同步到系统提示与 skill 工具。
 //
-// 返回 (总数, 变化数)：变化数只用于提示里显示 ±，不参与逻辑。
+// 返回 (总数, 变化数)：变化数只用于提示里显示「变化 N」，不参与逻辑。
 func (a *app) reloadSkills() (total, changed int, err error) {
 	before := map[string]bool{}
 	for _, s := range a.agent.Skills() {
