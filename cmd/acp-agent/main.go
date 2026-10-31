@@ -520,7 +520,7 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 
 	// MCP 工具在 wrapRegistry **之前**注册，这样远程工具和内置工具一样
 	// 受同一套权限门禁约束（远程工具默认 mutating，必须确认）。
-	mgr, err := connectMCP(ctx, cfg, reg, term)
+	mgr, err := connectMCP(ctx, cfg, reg, term, false)
 	if err != nil {
 		return nil, err
 	}

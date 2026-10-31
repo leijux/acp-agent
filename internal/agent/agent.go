@@ -274,6 +274,10 @@ func (a *Agent) Skills() []skills.Skill {
 // 系统提示每次请求都由 BuildSystemPrompt 现算（agent.go 里构 system message 时），
 // 所以这里改完下一次请求就生效，不需要重建 Agent —— /reload 靠这个。
 // skill 工具本身由调用方（CLI）在 Registry 里增删。
+//
+// 调用约束：**不要在有 run 进行时调用**。RunMessages 里读 a.opts.Context 是无锁的
+// （它一直只读，加锁会把整条热路径锁住）。CLI 侧已保证串行：TUI 里运行中的命令
+// 走 pending，轮次结束才执行；行式 REPL 本身就是同步的。
 func (a *Agent) SetSkills(list []skills.Skill) {
 	a.mu.Lock()
 	a.opts.Context.Skills = list

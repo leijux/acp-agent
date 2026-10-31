@@ -678,6 +678,17 @@ func (a *app) writeAgentsTemplate(extra string) error {
 
 // （会话文件的检索与分配见 sessions.go 的 sessionStore。）
 
+// mcpToolNames 取 manager 工具里属于 MCP 的那些名字（mcp__<server>__<tool>）。
+func mcpToolNames(list []tools.Tool) []string {
+	out := make([]string, 0, len(list))
+	for _, t := range list {
+		if strings.HasPrefix(t.Name(), "mcp__") {
+			out = append(out, t.Name())
+		}
+	}
+	return out
+}
+
 // reloadSkills 重新发现 .agents/skills，并把结果同步到系统提示与 skill 工具。
 //
 // 返回 (总数, 变化数)：变化数只用于提示里显示 ±，不参与逻辑。
@@ -729,15 +740,14 @@ func (a *app) reloadMCP(ctx context.Context) (servers, toolsN int, err error) {
 	}
 	// 先摘掉旧工具：名字可能与新配置无关，留着就是幽灵工具。
 	if a.mcp != nil {
-		names := make([]string, 0)
-		for _, t := range a.mcp.Tools() {
-			names = append(names, t.Name())
-		}
 		a.mcp.Close()
-		a.rawReg.Unregister(names...)
+		// 只摘 mcp__* 前缀：Manager.Tools() 返回远端**全部**工具，其中包含与内建
+		// 重名、注册时被跳过（RegisterInto 的 skipped）的那些。按名字无条件
+		// Unregister 会把内建 read/grep 之类一起删掉 —— 一次 /reload mcp 就少几个工具。
+		a.rawReg.Unregister(mcpToolNames(a.mcp.Tools())...)
 		a.mcp = nil
 	}
-	mgr, err := connectMCP(ctx, a.cfg, a.rawReg, a.term)
+	mgr, err := connectMCP(ctx, a.cfg, a.rawReg, a.term, true)
 	if err != nil {
 		return 0, 0, err
 	}

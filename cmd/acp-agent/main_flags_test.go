@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/leijux/acp-agent/internal/tools"
+	"context"
 	"bytes"
 	"os"
 	"path/filepath"
@@ -168,4 +170,37 @@ func TestPiCatalogIgnoresPromptText(t *testing.T) {
 			t.Fatalf("%q 应被当成 prompt，不是目录命令", args)
 		}
 	}
+}
+
+// /reload mcp 只能摘自己注册的 mcp__* 工具：Manager.Tools() 返回远端全部工具，
+// 其中包含与内建重名、注册时被跳过的项。按名字无条件 Unregister 会把内建
+// read/grep 一起删掉。
+func TestMCPToolNamesOnlyPrefix(t *testing.T) {
+	list := []tools.Tool{
+		fakeTool{name: "mcp__engram__search"},
+		fakeTool{name: "read"},          // 远端重名、注册时被跳过
+		fakeTool{name: "mcp__gh__pr_create"},
+		fakeTool{name: "grep"},
+	}
+	got := mcpToolNames(list)
+	want := []string{"mcp__engram__search", "mcp__gh__pr_create"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+type fakeTool struct{ name string }
+
+func (f fakeTool) Name() string                       { return f.name }
+func (f fakeTool) Description() string                { return "" }
+func (f fakeTool) Parameters() map[string]any         { return nil }
+func (f fakeTool) ConcurrencySafe() bool               { return true }
+func (f fakeTool) Mutates() bool                      { return false }
+func (f fakeTool) Execute(context.Context, tools.Args) (tools.Result, error) {
+	return tools.Result{}, nil
 }

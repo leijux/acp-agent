@@ -18,7 +18,15 @@ import (
 //   - 注册发生在 wrapRegistry 之前（调用方保证），所以远程工具和内置
 //     工具共享同一套权限门禁。
 //   - 返回的 Manager 由 app 持有，退出时 Close 回收子进程树。
-func connectMCP(ctx context.Context, cfg Config, reg *tools.Registry, term *terminal) (*mcp.Manager, error) {
+// connectMCP 加载 MCP 配置并连接。
+//
+// quiet 为真时不往 term 打启动日志：/reload 发生在 TUI 渲染期间，直接写 stderr
+// 会把界面顶花（启动路径在 ui.Run 之前，没这个问题）。
+func connectMCP(ctx context.Context, cfg Config, reg *tools.Registry, term *terminal, quiet bool) (*mcp.Manager, error) {
+	logf := term.logf
+	if quiet {
+		logf = func(string, ...any) {}
+	}
 	if cfg.NoMCP {
 		return nil, nil
 	}
@@ -36,18 +44,18 @@ func connectMCP(ctx context.Context, cfg Config, reg *tools.Registry, term *term
 	mgr := mcp.NewManager(mcpCfg,
 		mcp.WithConnectTimeout(30*time.Second),
 		mcp.WithServerErrorHandler(func(name string, err error) {
-			term.logf("MCP %s: %v\n", name, err)
+			logf("MCP %s: %v\n", name, err)
 		}),
 	)
 	// Connect 返回聚合错误（部分 server 失败），这些不该挡住启动。
 	if err := mgr.Connect(ctx); err != nil {
-		term.logf("MCP: %v\n", err)
+		logf("MCP: %v\n", err)
 	}
 
 	if skipped, err := mgr.RegisterInto(reg); err != nil {
-		term.logf("MCP: 注册工具失败: %v\n", err)
+		logf("MCP: 注册工具失败: %v\n", err)
 	} else if len(skipped) > 0 {
-		term.logf("MCP: 以下工具与内置工具重名，已跳过: %v\n", skipped)
+		logf("MCP: 以下工具与内置工具重名，已跳过: %v\n", skipped)
 	}
 
 	// 远端 tools/list_changed 时同步 Registry。
@@ -57,7 +65,7 @@ func connectMCP(ctx context.Context, cfg Config, reg *tools.Registry, term *term
 	// 模型看到的工具表 —— 不需要也不应该再去通知视图。
 	mgr.SetToolsChangedHandler(func([]tools.Tool) {
 		if err := mgr.SyncRegistry(reg); err != nil {
-			term.logf("MCP: 同步工具失败: %v\n", err)
+			logf("MCP: 同步工具失败: %v\n", err)
 		}
 	})
 
@@ -68,7 +76,7 @@ func connectMCP(ctx context.Context, cfg Config, reg *tools.Registry, term *term
 				connected++
 			}
 		}
-		term.logf("MCP: %d 个 server，%d 个工具（%s）\n",
+		logf("MCP: %d 个 server，%d 个工具（%s）\n",
 			connected, len(mgr.Tools()), describeSources(cfg, mcpCfg))
 	}
 	return mgr, nil
