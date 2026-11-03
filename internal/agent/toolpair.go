@@ -140,8 +140,11 @@ func normalizeToolPairs(msgs []Message) []Message {
 				}
 				kept = append(kept, blk)
 			}
-			if len(live) == 0 && !hasVisibleContent(kept) {
-				continue // 「我要调工具」的壳子已剥空
+			if len(live) == 0 && !hasTextContent(kept) {
+				// 「我要调工具」的壳子，或者只剩思考块：上游硬规则是
+				// content 与 tool_calls 至少有一个，否则报
+				// "Invalid assistant message: content or tool_calls must be set"。
+				continue
 			}
 			if len(kept) == len(v.Content) {
 				out = append(out, v)
@@ -163,20 +166,15 @@ func normalizeToolPairs(msgs []Message) []Message {
 	return out
 }
 
-// hasVisibleContent 判断内容块里是否还有值得发给模型的东西。
+// hasTextContent 判断还有没有可发的正文。
 //
-// 思考块也算：DeepSeek 带 tools 的请求要求原样回传 reasoning_content。
-func hasVisibleContent(blocks []Block) bool {
+// 只数 TextBlock：思考块不算。思考块走独立字段（DeepSeek 的 reasoning_content），
+// content 仍然为空 —— 而「content 空且没有 tool_calls」的 assistant 消息会被
+// 上游直接 400（content or tool_calls must be set）。
+func hasTextContent(blocks []Block) bool {
 	for _, blk := range blocks {
-		switch b := blk.(type) {
-		case TextBlock:
-			if strings.TrimSpace(b.Text) != "" {
-				return true
-			}
-		case ThinkingBlock:
-			if strings.TrimSpace(b.Thinking) != "" {
-				return true
-			}
+		if b, ok := blk.(TextBlock); ok && strings.TrimSpace(b.Text) != "" {
+			return true
 		}
 	}
 	return false

@@ -636,3 +636,54 @@ func TestAPIError_ContextOverflow(t *testing.T) {
 		})
 	}
 }
+
+// 空 assistant（没有正文也没有 tool_calls）不能发给上游：
+// 上游会直接 400 "Invalid assistant message: content or tool_calls must be set"。
+func TestOpenAIMessages_SkipsEmptyAssistant(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("请求不是合法 JSON: %v", err)
+			return
+		}
+		for _, m := range req.Messages {
+			if m["role"] != "assistant" {
+				continue
+			}
+			_, hasCalls := m["tool_calls"]
+			if txt, ok := m["content"].(string); !ok || txt == "" {
+				if !hasCalls {
+					t.Errorf("发出了空 assistant（content 空且无 tool_calls）: %s", body)
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	prov := provider.NewDeepSeek(provider.OpenAIConfig{BaseURL: srv.URL, APIKey: "k"})
+
+	msgs := []agent.Message{
+		&agent.UserMessage{Content: []agent.Block{agent.TextBlock{Text: "读文件"}}},
+		// 只剥剩思考块的空壳（normalizeToolPairs 之外的另一个来源）
+		&agent.AssistantMessage{Content: []agent.Block{agent.ThinkingBlock{Thinking: "想一想"}}},
+		// 只有 tool_calls、没有正文：必须保留（合法）
+		&agent.AssistantMessage{Content: []agent.Block{
+			agent.ToolCallBlock{ID: "c1", Name: "read", Arguments: map[string]any{"path": "a"}},
+		}},
+		&agent.ToolResultMessage{ToolCallID: "c1", Content: []agent.Block{agent.TextBlock{Text: "x"}}},
+	}
+	req := agent.Request{
+		Model:         provider.ResolveModel("deepseek", "deepseek-flash"),
+		Messages:      msgs,
+		Tools:         []agent.ToolSpec{{Name: "read", Description: "read"}},
+		ThinkingLevel: "off",
+	}
+	if _, err := prov.Stream(context.Background(), req, &agent.SinkFunc{}); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+}

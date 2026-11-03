@@ -240,8 +240,16 @@ func openAIMessages(system string, msgs []agent.Message, replayReasoning bool) (
 			out = append(out, map[string]any{"role": "user", "content": content})
 
 		case *agent.AssistantMessage:
+			txt := blocksText(v.Content)
+			calls := v.ToolCalls()
+			// 上游硬规则：content 与 tool_calls 至少有一个，否则
+			// "Invalid assistant message: content or tool_calls must be set"。
+			// 空壳（例如只剥剩思考块、或模型返回了空回复）直接不发。
+			if txt == "" && len(calls) == 0 {
+				continue
+			}
 			entry := map[string]any{"role": "assistant"}
-			if txt := blocksText(v.Content); txt != "" {
+			if txt != "" {
 				entry["content"] = txt
 			} else {
 				entry["content"] = nil
@@ -251,7 +259,7 @@ func openAIMessages(system string, msgs []agent.Message, replayReasoning bool) (
 					entry["reasoning_content"] = think
 				}
 			}
-			if calls := v.ToolCalls(); len(calls) > 0 {
+			if len(calls) > 0 {
 				tcs := make([]map[string]any, 0, len(calls))
 				for _, c := range calls {
 					args, err := json.Marshal(c.Arguments)

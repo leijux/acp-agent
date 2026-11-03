@@ -352,3 +352,32 @@ func TestNormalizeToolPairsConsecutiveAssistants(t *testing.T) {
 		t.Fatalf("输出 %d 条，want 4", len(out))
 	}
 }
+
+// 只剩思考块的 assistant：剥掉 tool_calls 后 content 为空，上游会报
+// "Invalid assistant message: content or tool_calls must be set"。
+// 思考块不算「可发正文」，整条必须丢掉。
+func TestNormalizeToolPairsDropsThinkingOnlyShell(t *testing.T) {
+	asst := &AssistantMessage{
+		Content: []Block{
+			ThinkingBlock{Thinking: "先看看目录再决定"},
+			ToolCallBlock{ID: "c1", Name: "ls", Arguments: map[string]any{"path": "."}},
+		},
+	}
+	msgs := []Message{
+		&UserMessage{Content: []Block{TextBlock{Text: "看看"}}},
+		asst,
+		&CompactionSummaryMessage{Summary: "摘要"},
+		&UserMessage{Content: []Block{TextBlock{Text: "继续"}}},
+	}
+	out := normalizeToolPairs(msgs)
+	assertToolPairsValid(t, out)
+
+	for _, m := range out {
+		if am, ok := m.(*AssistantMessage); ok {
+			t.Fatalf("只剩思考的 assistant 不应发出去，实际 %+v", am.Content)
+		}
+	}
+	if len(out) != 3 {
+		t.Fatalf("输出 %d 条，want 3（user + summary + user）", len(out))
+	}
+}
