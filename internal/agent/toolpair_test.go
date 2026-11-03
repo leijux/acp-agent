@@ -301,3 +301,54 @@ func TestCompactionBlockStartingAtToolResultKeepsPairs(t *testing.T) {
 		t.Fatalf("assistant 的文本应在剥离 tool_calls 后保留: %+v", out)
 	}
 }
+
+// 空 tool_call id / 空 tool_call_id：replay、import 与部分网关会产出这种形状。
+// 空 id 既不能当「已响应」，也不能原样发出去（上游同样 400）。
+func TestNormalizeToolPairsEmptyIDs(t *testing.T) {
+	asst := asstWithCalls("c1", "")
+	asst.Content = append([]Block{TextBlock{Text: "查一下"}}, asst.Content...)
+	msgs := []Message{
+		&UserMessage{Content: []Block{TextBlock{Text: "查"}}},
+		asst,
+		toolRes("c1"),
+		toolRes(""),
+	}
+	out := normalizeToolPairs(msgs)
+	assertToolPairsValid(t, out)
+
+	if len(out) != 3 { // user + assistant(只剩 c1) + 一条 tool(c1)
+		t.Fatalf("输出 %d 条，want 3", len(out))
+	}
+	got := out[1].(*AssistantMessage)
+	if calls := got.ToolCalls(); len(calls) != 1 || calls[0].ID != "c1" {
+		t.Fatalf("应只保留 c1，实际 %+v", calls)
+	}
+	if got.Text() != "查一下" {
+		t.Fatalf("文本被弄丢了: %q", got.Text())
+	}
+}
+
+// 连续两个 assistant：前一个的 tool_calls 不可能被后面的 tool 消息响应。
+func TestNormalizeToolPairsConsecutiveAssistants(t *testing.T) {
+	first := asstWithCalls("c1")
+	first.Content = append([]Block{TextBlock{Text: "先跑 ls"}}, first.Content...)
+	msgs := []Message{
+		&UserMessage{Content: []Block{TextBlock{Text: "跑"}}},
+		first,
+		asstWithCalls("c2"),
+		toolRes("c2"),
+	}
+	out := normalizeToolPairs(msgs)
+	assertToolPairsValid(t, out)
+
+	got := out[1].(*AssistantMessage)
+	if len(got.ToolCalls()) != 0 {
+		t.Fatalf("第一个 assistant 的 c1 不可能被响应，应剥掉: %+v", got.ToolCalls())
+	}
+	if got.Text() != "先跑 ls" {
+		t.Fatalf("文本被弄丢了: %q", got.Text())
+	}
+	if len(out) != 4 {
+		t.Fatalf("输出 %d 条，want 4", len(out))
+	}
+}

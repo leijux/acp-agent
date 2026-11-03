@@ -135,3 +135,17 @@ func (e *Emitter) Emit(ev Event) {
 		}
 	}
 }
+
+// CompactionSkipEvent 表示压缩检查跑过了，但 kernel 没有给出可压区间。
+//
+// 不是错误：上下文里还没有足够大的可压单元（新会话、或历史几乎都是一条
+// 大消息）。单独成为一个事件，是为了让「水位到了但压不动」可观测，而不是
+// 每轮抛一条 error notice。
+type CompactionSkipEvent struct {
+	// Reason 是触发检查的原因："threshold" / "overflow"。
+	Reason string
+	// Usage 是当时的占用比例（0..1）。
+	Usage float64
+}
+
+func (CompactionSkipEvent) EventName() string { return "session_compact_skipped" }

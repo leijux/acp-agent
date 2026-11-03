@@ -642,7 +642,6 @@ func (e *APIError) Error() string {
 var overflowKeywords = []string{
 	"maximum context length",
 	"context_length_exceeded",
-	"context length",
 	"reduce the length of the messages",
 	"prompt is too long",
 	"too many tokens",
@@ -652,9 +651,14 @@ var overflowKeywords = []string{
 // ContextOverflow 报告这个错误是否是「请求超过上下文窗口」。
 //
 // 实现 agent.OverflowDetector：上层（agent.Run）据此触发压缩重试。
-// 判定不看 Retryable —— 超限重试原样重试没用，必须先缩上下文。
+// 判定不看 Retryable —— 超限重试原样重发没用，必须先缩上下文。
+//
+// StatusCode == 0 也要算：部分网关把超限放在 200 的 SSE error chunk 里
+// （openai.go 里那个 chunk.Error 分支就是 StatusCode 0）。
 func (e *APIError) ContextOverflow() bool {
-	if e.StatusCode != 400 && e.StatusCode != 413 {
+	switch e.StatusCode {
+	case 0, 400, 413, 422:
+	default:
 		return false
 	}
 	msg := strings.ToLower(e.Message)

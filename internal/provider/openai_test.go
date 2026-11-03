@@ -606,11 +606,32 @@ func TestAPIError_ContextOverflow(t *testing.T) {
 			err:  &provider.APIError{StatusCode: 502, Message: "maximum context length exceeded"},
 			want: false,
 		},
+		{
+			// 部分网关把超限放在 200 的 SSE error chunk 里，走的是 StatusCode 0。
+			name: "流内 error chunk",
+			err:  &provider.APIError{StatusCode: 0, Message: "This model's maximum context length is 1048576 tokens"},
+			want: true,
+		},
+		{
+			// 参数名里带 context length 的普通 400 不能被当成可压缩信号。
+			name: "参数错误里的 context length",
+			err:  &provider.APIError{StatusCode: 400, Message: `{"error":{"message":"invalid value for context length parameter"}}`},
+			want: false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if got := c.err.ContextOverflow(); got != c.want {
 				t.Fatalf("ContextOverflow() = %v, want %v", got, c.want)
+			}
+			// 真正的恢复链路走的是 interface 断言（agent 不能反向依赖 provider），
+			// 这里也必须过一遍，否则方法名一改整条链路静默失效。
+			if got := agent.IsContextOverflow(c.err); got != c.want {
+				t.Fatalf("agent.IsContextOverflow() = %v, want %v", got, c.want)
+			}
+			// 包一层（例如 Retry 包装器）也要能识别。
+			if got := agent.IsContextOverflow(fmt.Errorf("wrapped: %w", c.err)); got != c.want {
+				t.Fatalf("包装后的 IsContextOverflow() = %v, want %v", got, c.want)
 			}
 		})
 	}

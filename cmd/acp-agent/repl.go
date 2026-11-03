@@ -512,6 +512,11 @@ func (a *app) command(ctx context.Context, input string) (bool, error) {
 		before := a.agent.ContextTokens()
 		res, err := a.agent.Compact(ctx, "", "manual")
 		if err != nil {
+			// kernel 拿不出可压区间不是错误：新会话 / 历史都是一条大消息时就是这样。
+			if errors.Is(err, agent.ErrNothingToCompact) {
+				a.term.printf("%s\n", a.term.paint(cDim, "（无可压缩区间，不用压）"))
+				return false, nil
+			}
 			return false, err
 		}
 		after := a.agent.ContextTokens()

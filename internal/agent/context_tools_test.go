@@ -306,10 +306,13 @@ func TestAutoCompactCheckRunsOnPlainTurn(t *testing.T) {
 		o.Registry = tools.NewRegistry()
 		o.ContextWindow = 2_000
 	})
-	var errs int
+	var hits int
 	a.On(func(ev Event) {
-		if _, ok := ev.(ErrorEvent); ok {
-			errs++
+		switch ev.(type) {
+		case ErrorEvent, CompactionSkipEvent, CompactionStartEvent:
+			// 任何一个都证明压缩检查真的跑了。skip 是常态：窗口被压到 2k 后
+			// 历史里根本凑不出可压单元，那时不该向用户报 error。
+			hits++
 		}
 	})
 	fillContext(t, a, 10)
@@ -317,11 +320,11 @@ func TestAutoCompactCheckRunsOnPlainTurn(t *testing.T) {
 		t.Skipf("未到强制压缩水位，usage=%.2f", a.contextUsage())
 	}
 
-	before := errs
+	before := hits
 	if _, err := a.Run(context.Background(), "继续描述一下"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if errs == before {
+	if hits == before {
 		t.Fatal("纯对话轮没有触发压缩检查（没走到 Compact）")
 	}
 }

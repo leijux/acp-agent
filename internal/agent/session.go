@@ -302,10 +302,6 @@ func (s *Session) messagesLocked() []Message {
 			// 保留起点丢失时退化为「压缩 entry 之后」。
 			idx = lastCompact + 1
 		}
-		if idx < len(branch) {
-			// 同上：起点不能落在工具轮中间。
-			idx = pairStartIndex(branch, idx)
-		}
 		start = idx
 	}
 
@@ -343,10 +339,11 @@ func (s *Session) compactionBlocksLocked(branch []*Entry) (map[int][]*Entry, map
 			}
 		}
 		if min >= 0 {
-			// 摘要不能落在工具轮中间：assistant(tool_calls) 与它的 tool 消息之间
-			// 插进一条 user 角色的摘要，上游会判定「insufficient tool messages」。
-			at := pairStartIndex(branch, min)
-			insert[at] = append(insert[at], e)
+			// 插入点可以落在一条 tool result 上（kernel 的区间可以从工具结果
+			// 开始），摘要会因此出现在 assistant(tool_calls) 与它的 tool 消息
+			// 之间。这里不去挪位置：挪到工具轮之前只会让插入次序变乱，真正的
+			// 兜底在投影层 normalizeToolPairs（剥掉没有响应的 tool_calls）。
+			insert[min] = append(insert[min], e)
 		}
 	}
 	if len(insert) == 0 {

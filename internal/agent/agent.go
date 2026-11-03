@@ -433,21 +433,25 @@ func (a *Agent) RunMessages(ctx context.Context, input Message) (*RunResult, err
 		a.emit.Emit(TurnStartEvent{Turn: assistantCount})
 
 		// 2) 组装并发送请求
-		msg, err := a.stream(runCtx, res)
+		msg, err := a.stream(runCtx, res, false)
 		steps++
+		// 上下文超限不是「这次请求写得不好」，而是历史真的太长了：压缩后
+		// 用一个更小的 max_tokens 就地重发一次（不另起一轮，也不占 step）。
+		// 不能把 400 落成历史——那条错误消息本身还会把上下文再撑大一点，
+		// 下一条用户消息必然复现同样的 400。
+		if err != nil && runCtx.Err() == nil && !overflowRetried &&
+			!a.opts.DisableAutoCompact && IsContextOverflow(err) {
+			overflowRetried = true
+			if r, cerr := a.Compact(runCtx, "", "overflow"); cerr == nil && r != nil {
+				msg, err = a.stream(runCtx, res, true)
+			} else if cerr != nil && !errors.Is(cerr, ErrNothingToCompact) {
+				a.emit.Emit(ErrorEvent{Err: fmt.Errorf("上下文超限后压缩失败: %w", cerr)})
+			}
+		}
 		if err != nil {
 			if runCtx.Err() != nil {
 				res.Aborted = true
 				break
-			}
-			// 上下文超限不是「这次请求写得不好」，而是历史真的太长了：先把
-			// 历史压下去再重发一次。不能把 400 落成历史——那条错误消息本身
-			// 还会把上下文再撑大一点，下一条用户消息必然复现同样的 400。
-			if !overflowRetried && IsContextOverflow(err) {
-				overflowRetried = true
-				if r, cerr := a.Compact(runCtx, "", "overflow"); cerr == nil && r != nil {
-					continue
-				}
 			}
 			// provider 失败：记录一条 error 状态的 assistant 消息，保持会话树完整。
 			em := &AssistantMessage{
@@ -559,8 +563,14 @@ func (a *Agent) maybeAutoCompact(ctx context.Context, res *RunResult) {
 	}
 	switch {
 	case a.shouldCompact():
+		// 拿不出可压区间不是错误（新会话 / 没有足够大的可压单元）：只发一个
+		// skip 事件，不要每轮向客户端刷一条 error notice。
 		if _, err := a.Compact(ctx, "", "threshold"); err != nil {
-			a.emit.Emit(ErrorEvent{Err: err})
+			if errors.Is(err, ErrNothingToCompact) {
+				a.emit.Emit(CompactionSkipEvent{Reason: "threshold", Usage: a.contextUsage()})
+			} else {
+				a.emit.Emit(ErrorEvent{Err: err})
+			}
 		}
 	case !a.opts.DisableContextTools && a.shouldNudge():
 		if msg := a.contextNudgeMessage(); msg != nil {
@@ -587,7 +597,7 @@ func runMessagesSince(s *Session, startIdx int) []Message {
 }
 
 // stream 发起一次模型请求，并把流式增量转成事件。
-func (a *Agent) stream(ctx context.Context, _ *RunResult) (*AssistantMessage, error) {
+func (a *Agent) stream(ctx context.Context, _ *RunResult, shrinkOutput bool) (*AssistantMessage, error) {
 	partial := &AssistantMessage{Content: nil, StopReason: StopPending, At: now()}
 	started := false
 	sink := &SinkFunc{
@@ -613,6 +623,11 @@ func (a *Agent) stream(ctx context.Context, _ *RunResult) (*AssistantMessage, er
 	}
 
 	req := a.buildRequest()
+	if shrinkOutput {
+		// 超限重试：除了压缩历史，再把输出预算砍半 —— 估算可能偏低，
+		// 只靠压缩不一定够，而同一份 max_tokens 重发很可能再撞一次。
+		req.MaxTokens = max(a.minOutput(), req.MaxTokens/2)
+	}
 	msg, err := a.opts.Provider.Stream(ctx, req, sink)
 	if err != nil {
 		return nil, err

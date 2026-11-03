@@ -97,9 +97,13 @@ func normalizeToolPairs(msgs []Message) []Message {
 	}
 
 	// 第一遍：每个 assistant 后面紧跟的那段 tool 消息认领了哪些 id。
+	// 只给「后面真的跟着 tool 消息」的位置分配 map（绝大多数 assistant 没有）。
 	answered := make([]map[string]bool, len(msgs))
 	for i, m := range msgs {
 		if _, ok := m.(*AssistantMessage); !ok {
+			continue
+		}
+		if _, ok := nextToolResult(msgs, i); !ok {
 			continue
 		}
 		set := map[string]bool{}
@@ -127,7 +131,9 @@ func normalizeToolPairs(msgs []Message) []Message {
 			kept := make([]Block, 0, len(v.Content))
 			for _, blk := range v.Content {
 				if tc, ok := blk.(ToolCallBlock); ok {
-					if !answered[i][tc.ID] {
+					// 空 id 一律剥掉：上游会把它当成一条无法响应的 tool_call，
+					// 而 replay/import 出来的历史里确实可能是空的。
+					if tc.ID == "" || !answered[i][tc.ID] {
 						continue // 没有 tool 消息响应：剥掉，否则上游 400
 					}
 					live[tc.ID] = true
@@ -145,8 +151,8 @@ func normalizeToolPairs(msgs []Message) []Message {
 			c.Content = kept
 			out = append(out, &c)
 		case *ToolResultMessage:
-			if !live[v.ToolCallID] {
-				continue // 孤儿：父被压缩/分支切走了
+			if v.ToolCallID == "" || !live[v.ToolCallID] {
+				continue // 空 id / 孤儿：父被压缩、分支切走，或 id 对不上
 			}
 			out = append(out, m)
 		default:
@@ -176,42 +182,12 @@ func hasVisibleContent(blocks []Block) bool {
 	return false
 }
 
-// pairStartIndex 把「落在工具轮中间」的位置回退到该轮的 assistant。
-//
-// 压缩摘要插入点若正好是一条 tool result（kernel 的区间可以从工具结果开始），
-// 摘要就会出现在 assistant(tool_calls) 与它的 tool 消息之间 —— 上游判定为
-// 「insufficient tool messages following tool_calls message」直接 400。
-// 宁可把摘要提到整轮之前：位置差几条消息无所谓，配对完整性是硬约束。
-func pairStartIndex(branch []*Entry, i int) int {
-	for i > 0 && i < len(branch) {
-		tr, ok := branch[i].Message.(*ToolResultMessage)
-		if !ok || branch[i].Type != EntryMessage || tr.ToolCallID == "" {
-			return i
-		}
-		// 往前找声明了这个 tool_call 的 assistant。
-		parent := -1
-		for j := i - 1; j >= 0; j-- {
-			if branch[j].Type != EntryMessage || branch[j].Message == nil {
-				continue
-			}
-			am, ok := branch[j].Message.(*AssistantMessage)
-			if !ok {
-				continue
-			}
-			for _, tc := range am.ToolCalls() {
-				if tc.ID == tr.ToolCallID {
-					parent = j
-					break
-				}
-			}
-			if parent >= 0 {
-				break
-			}
-		}
-		if parent < 0 {
-			return i
-		}
-		i = parent
+
+// nextToolResult 返回紧邻 i 之后的那条 tool 消息（没有则 false）。
+func nextToolResult(msgs []Message, i int) (*ToolResultMessage, bool) {
+	if i+1 >= len(msgs) {
+		return nil, false
 	}
-	return i
+	tr, ok := msgs[i+1].(*ToolResultMessage)
+	return tr, ok
 }

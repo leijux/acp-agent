@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -24,17 +25,22 @@ const (
 	// 主动模式（模型自己调用 context_apply）正常运行时不应走到这里；
 	// 它是模型不肯压缩时的安全网，避免上下文撞上硬上限。
 	//
-	// 注意：真正先刹车的是 inputBudget（窗口 − 输出预留 − 预留），
-	// 它比本水位更早触发（1M 窗口 / 384k 输出的模型约 73%）。
+	// 注意：真正先刹车的是 outputAllowance 跌破 preferredOutputTokens，
+	// 它比本水位更早触发，具体水位见 outputAllowance。
 	HardCompactUsage = 0.90
 
 	// minOutputTokens 是 max_tokens 的下限。上下文挤到没有输出空间时
 	// 也发这个值而不是 0：0 会让 provider 省掉该字段，服务端改用默认上限，
-	// 反而更容易超窗。小值最多让回复被截断，随时可以 /compact 恢复。
+	// 反而更容易超窗。实际下限还会随窗口缩小（见 minOutput）。
 	minOutputTokens = 512
 	// inputSafetyPct 是输入估算的保守系数（百分比）。估算走字符启发式，
 	// 对代码/JSON 仍偏向低估，所以扣输出空间时按偏大值算。
 	inputSafetyPct = 115
+	// preferredOutputShare 是「值得为输出保留的份额」：窗口 / 8。
+	//
+	// 它只用于定压缩水位（输出快被挤扁了就压），**不是** max_tokens 的
+	// 天花板：上下文还空着时发满模型声明上限完全合法（sum 检验过得去）。
+	preferredOutputShare = 8
 )
 
 // SummaryPrompt 是生成压缩摘要用的系统提示（对齐 Pi 的 compaction prompt）。
@@ -58,15 +64,17 @@ const SummaryPrompt = `你是会话压缩器。把给定的对话历史压缩成
 //
 // 条件 2 是真正先刹车的那个：上游按 messages + completion 求和判窗口，
 // 一个 1M 窗口 / 384k 输出的模型输入天花板只有约 63%，光靠 90% 水位永远
-// 够不到（这正是 667184 + 384000 > 1048576 那次 400 的成因）。
+// 够不到（输入天花板只有约 63%，命中的是 667184 + 384000 > 1048576）。
 //
 // 这只是廉价的快速判断，避免每轮都跑一次 kernel 渲染。真正的决策（压哪一段、
 // 压多少）由 kernel 的 nudge 给出，见 Compact。
 func (a *Agent) shouldCompact() bool {
-	if a.contextUsage() >= HardCompactUsage {
+	used := a.contextTokens()
+	if a.opts.ContextWindow > 0 &&
+		float64(used)/float64(a.opts.ContextWindow) >= HardCompactUsage {
 		return true
 	}
-	return a.contextTokens() >= a.inputBudget()
+	return a.outputAllowance(used) < a.preferredOutputTokens()
 }
 
 // shouldNudge 判断是否该提醒模型可以主动压缩（SoftCompactUsage）。
@@ -105,49 +113,73 @@ func (a *Agent) estimateInputTokens(sys string, msgs []Message, tools []ToolSpec
 // ContextTokens 暴露当前上下文估算值（供状态栏/测试用）。
 func (a *Agent) ContextTokens() int { return a.contextTokens() }
 
-// idealOutputTokens 返回「不考虑当前占用」时愿意留给输出的 token 数。
+// minOutput 返回 max_tokens 的下限。
 //
-// 上限取窗口的 1/4，而不是模型声明的 MaxOutput：DeepSeek 这类 1M 窗口 /
-// 384k 输出的组合，把 384k 全留给输出等于把输入天花板压到 63%，而压缩
-// 水位是窗口的 90% —— 撞 400 之前永远到不了压缩水位。
-func (a *Agent) idealOutputTokens() int {
-	win := a.opts.ContextWindow
-	limit := win / 4
+// 下限本身也必须随窗口缩放：窗口 1024 时发 512 就可能把输入顶出窗口，
+// 而上游要的是 messages + completion ≤ 窗口。
+func (a *Agent) minOutput() int {
+	if limit := a.opts.ContextWindow / 8; limit < minOutputTokens {
+		return limit
+	}
+	return minOutputTokens
+}
+
+// outputReserve 返回给「估算偏差 + 下一轮思考」留的余量，随窗口缩放。
+//
+// 不能直接用 Options.ReserveTokens：它默认 16384 且与窗口无关，8k/32k 的
+// 本地模型会被这个绝对量吃成负数（max_tokens 永远停在下限）。
+func (a *Agent) outputReserve() int {
+	limit := a.opts.ContextWindow / 8
+	if a.opts.ReserveTokens < limit {
+		return a.opts.ReserveTokens
+	}
+	return limit
+}
+
+// outputAllowance 返回「给定输入估算下，还能留给输出的 token 数」。
+//
+// 上游的硬约束是输入 + completion ≤ 窗口，输入按保守系数放大后解出右边：
+//
+//	max_tokens ≤ 窗口 − used×inputSafetyPct/100 − outputReserve
+//
+// 它既是 max_tokens 的唯一上界来源（再加上模型自己的声明上限），也是压缩
+// 水位的依据 —— 两边用同一个式子，才不会出现「输出已经跌到下限、压缩还没
+// 触发」的错位。
+func (a *Agent) outputAllowance(used int) int {
+	avail := a.opts.ContextWindow - used*inputSafetyPct/100 - a.outputReserve()
+	if floor := a.minOutput(); avail < floor {
+		return floor
+	}
+	return avail
+}
+
+// preferredOutputTokens 是「值得为输出保留的份额」：min(模型上限, 窗口/8)。
+//
+// 输出低于它就意味着该压缩了。不拿模型声明的值当水位：deepseek-flash 声明
+// 384k 输出（窗口的 37%），拿它当水位等于逼着在 60% 占用就压缩。
+func (a *Agent) preferredOutputTokens() int {
 	out := a.opts.Model.MaxOutputTokens
-	if out <= 0 || out > limit {
+	if limit := a.opts.ContextWindow / preferredOutputShare; out <= 0 || out > limit {
 		out = limit
 	}
 	return out
 }
 
-// inputBudget 返回输入侧的安全水位：估算占用超过它就压缩。
+// outputBudget 是本次请求实际可用的 max_tokens。
 //
-// 语义对齐上游 Pi 的 contextWindow − reserveTokens，但必须再扣掉输出预留，
-// 否则「输出预留冲掉输入天花板」的老问题会以另一种形式回来。
-func (a *Agent) inputBudget() int {
-	win := a.opts.ContextWindow
-	budget := win - a.opts.ReserveTokens - a.idealOutputTokens()
-	// 极小窗口（测试、小模型）下 reserve 与输出预留会把预算压成负数，
-	// 那样任何历史都不允许存在；兜底为半个窗口。
-	if floor := win / 2; budget < floor {
-		budget = floor
-	}
-	return budget
-}
-
-// outputBudget 把本次请求的 max_tokens 收敛到「窗口 − 估算输入 − 预留」。
-//
-// 上游按 messages + completion 求和判窗口，所以 max_tokens 不能恒等于模型
-// 输出上限：667184(输入) + 384000(输出) > 1048576 就是一次 HTTP 400
-// invalid_request_error，而那时上下文才用掉一半。
+// 只受两件事约束：模型声明的上限、以及窗口剩余空间（outputAllowance）。
+// 旧实现恒发模型上限，于是 667184(输入) + 384000(输出) > 1048576 直接 400；
+// 但反向的错误同样不能犯：拿「理想输出」当天花板会把长生成白白截短。
 func (a *Agent) outputBudget(used int) int {
-	out := a.idealOutputTokens()
-	avail := a.opts.ContextWindow - used*inputSafetyPct/100 - a.opts.ReserveTokens
-	if avail < out {
+	out := a.opts.Model.MaxOutputTokens
+	if out <= 0 {
+		out = a.opts.ContextWindow / 4
+	}
+	if avail := a.outputAllowance(used); avail < out {
 		out = avail
 	}
-	if out < minOutputTokens {
-		out = minOutputTokens
+	if floor := a.minOutput(); out < floor {
+		out = floor
 	}
 	return out
 }
@@ -166,13 +198,20 @@ type CompactionResult struct {
 	Summarized []Message
 }
 
+// ErrNothingToCompact 表示 kernel 判断当前没有可压缩区间。
+//
+// 它不是错误：上下文里还没有足够大的可压单元（新会话、或全都是一条大消息）。
+// 调用方应把它当成「这一轮不需要压」而不是向用户报错 —— 否则水位提前到
+// 输出快被挤扁时，每轮都会刷一条 error notice。
+var ErrNothingToCompact = errors.New("agent: 没有可压缩区间")
+
 // Compact 执行一次压缩：kernel 划定区间 → 模型生成摘要 → 落成压缩块。
 //
 // reason 为 "manual" / "threshold" / "overflow"；instructions 是可选的人工侧重
 // （对应 /compact <instructions>）。
 //
-// 返回 (nil, nil) 在旧实现里表示「kernel 认为不需要压缩」，现在拿不出区间会
-// 直接报错（见下方注释）；调用方仍按「nil 结果 = 没压」处理。
+// 返回 err 满足 errors.Is(err, ErrNothingToCompact) 时表示「kernel 没有给出
+// 可压区间」（即本次没压，不是失败）。
 func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*CompactionResult, error) {
 	// 串行化 kernel 复合操作：手动 /compact 可能与正在执行的 context_apply 重叠。
 	a.ctxMu.Lock()
@@ -212,8 +251,8 @@ func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*Comp
 		// 「要不要把提示文本注入对话」的节流开关（frequency / iterationThreshold /
 		// growthFloor），拿它做门禁会在区间充足时因为节流窗口没到而整轮跳过。
 		return nil, fmt.Errorf(
-			"agent: kernel 没有给出可压缩区间（上下文占用 %.0f%%，%d tokens）",
-			usage*100, tokensBefore,
+			"%w（上下文占用 %.0f%%，%d tokens）",
+			ErrNothingToCompact, usage*100, tokensBefore,
 		)
 	}
 
