@@ -5,6 +5,9 @@ coverage.out
 coverage.html
 *.exe
 
+# 临时/草稿目录（工具与测试会往里写东西，不进仓库）
+tmp/
+
 # go-task 的 checksum 缓存
 .task/
 
