@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -183,8 +184,11 @@ func (p *ScriptedProvider) Stream(ctx context.Context, req Request, sink Sink) (
 	return msg, nil
 }
 
-// EstimateTokens 粗略估算文本 token 数：CJK 字符 1 token，其余按 4 字符 1 token。
-// 与 Pi 的估算口径接近，用于压缩阈值判断（不是精确计费）。
+// EstimateTokens 粗略估算文本 token 数：CJK 字符 1 token，其余按 3 字符 1 token。
+//
+// 分母取 3 而不是 4：代码 / JSON / 日志的真实 tokenizer 大约 2.8–3.5 字符一个
+// token，按 4 算会系统性低估 20% 以上。低估的代价不是「少算点账」，而是
+// 「以为还剩空间」→ 请求真的超窗被上游 400（纯散文场景下略微高估是安全的）。
 func EstimateTokens(s string) int {
 	var cjk, other int
 	for _, r := range s {
@@ -199,31 +203,87 @@ func EstimateTokens(s string) int {
 			other++
 		}
 	}
-	return cjk + (other+3)/4
+	return cjk + (other+2)/3
 }
+
+// imageTokens 是单张图片的保守估算。
+//
+// 真实值随分辨率与厂商口径变化（OpenAI 单图 85–1445 token 起），这里给一个
+// 固定中位数。旧实现按
+// "非 assistant 消息一律走 TextOf" 计算，而 TextOf/blocksText 只取 TextBlock，
+// 图片直接被当成 0 token —— 长会话里几张截图就足以让估算与真实值差出上万。
+const imageTokens = 1_100
 
 // EstimateMessagesTokens 估算一组消息的 token 数，含固定开销。
 func EstimateMessagesTokens(msgs []Message) int {
 	total := 0
 	for _, m := range msgs {
 		total += 4 // 角色/分隔开销
-		switch v := m.(type) {
-		case *AssistantMessage:
-			for _, blk := range v.Content {
-				switch b := blk.(type) {
-				case TextBlock:
-					total += EstimateTokens(b.Text)
-				case ThinkingBlock:
-					total += EstimateTokens(b.Thinking)
-				case ToolCallBlock:
-					total += EstimateTokens(b.Name) + 8
-					for k, val := range b.Arguments {
-						total += EstimateTokens(k) + EstimateTokens(fmt.Sprint(val))
-					}
-				}
+		total += EstimateBlocksTokens(messageBlocks(m))
+	}
+	return total
+}
+
+// messageBlocks 取出消息的内容块（文本类消息没有块，退化成单块文本）。
+func messageBlocks(m Message) []Block {
+	switch v := m.(type) {
+	case *SystemMessage:
+		return v.Content
+	case *UserMessage:
+		return v.Content
+	case *AssistantMessage:
+		return v.Content
+	case *ToolResultMessage:
+		return v.Content
+	case *CustomMessage:
+		return v.Content
+	case *BashExecutionMessage:
+		return []Block{TextBlock{Text: v.Output}}
+	case *CompactionSummaryMessage:
+		return []Block{TextBlock{Text: v.Summary}}
+	case *BranchSummaryMessage:
+		return []Block{TextBlock{Text: v.Summary}}
+	}
+	return nil
+}
+
+// EstimateBlocksTokens 估算一组内容块的 token 数（含思考、工具调用与图片）。
+func EstimateBlocksTokens(blocks []Block) int {
+	total := 0
+	for _, blk := range blocks {
+		switch b := blk.(type) {
+		case TextBlock:
+			total += EstimateTokens(b.Text)
+		case ThinkingBlock:
+			total += EstimateTokens(b.Thinking)
+		case ToolCallBlock:
+			total += EstimateTokens(b.Name) + 8
+			for k, val := range b.Arguments {
+				total += EstimateTokens(k) + EstimateTokens(fmt.Sprint(val))
 			}
-		default:
-			total += EstimateTokens(TextOf(m))
+		case ImageBlock, *ImageBlock:
+			total += imageTokens
+		}
+	}
+	return total
+}
+
+// EstimateToolSpecsTokens 估算工具定义的 token 数。
+//
+// 工具定义是每次请求都实发的内容（见 buildRequest 的 Tools 字段），但历史上
+// contextTokens 完全没算它：20+ 个工具带着长描述和 JSON schema，轻松上万
+// token，这是「界面显示还有一半、真实请求已经超限」的主要来源之一。
+func EstimateToolSpecsTokens(tools []ToolSpec) int {
+	total := 0
+	for _, t := range tools {
+		total += 8
+		total += EstimateTokens(t.Name)
+		total += EstimateTokens(t.Description)
+		if t.Parameters == nil {
+			continue
+		}
+		if raw, err := json.Marshal(t.Parameters); err == nil {
+			total += EstimateTokens(string(raw))
 		}
 	}
 	return total

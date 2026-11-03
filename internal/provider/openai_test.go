@@ -382,8 +382,8 @@ func TestLookupModel_PrefixMatch(t *testing.T) {
 
 func TestResolveModel_DeepSeekDefaults(t *testing.T) {
 	m := provider.ResolveModel("deepseek", "deepseek-flash")
-	if m.ContextWindow != 1_000_000 {
-		t.Errorf("ContextWindow = %d, want 1000000", m.ContextWindow)
+	if m.ContextWindow != 1_048_576 {
+		t.Errorf("ContextWindow = %d, want 1048576", m.ContextWindow)
 	}
 	if m.MaxOutputTokens != 384_000 {
 		t.Errorf("deepseek-flash 输出上限 = %d, want 384000", m.MaxOutputTokens)
@@ -393,7 +393,7 @@ func TestResolveModel_DeepSeekDefaults(t *testing.T) {
 	}
 
 	pro := provider.ResolveModel("deepseek", "deepseek-v4-pro")
-	if pro.ContextWindow != 1_000_000 || pro.MaxOutputTokens != 384_000 {
+	if pro.ContextWindow != 1_048_576 || pro.MaxOutputTokens != 384_000 {
 		t.Errorf("v4-pro = %d/%d", pro.ContextWindow, pro.MaxOutputTokens)
 	}
 	if pro.SupportsImages {
@@ -568,5 +568,50 @@ func TestOpenAIMessages_ReplaysReasoningWithTools(t *testing.T) {
 	}
 	if _, err := prov.Stream(context.Background(), req, &agent.SinkFunc{}); err != nil {
 		t.Fatalf("Complete: %v", err)
+	}
+}
+
+// 识别「上下文超限」：agent.Run 靠它触发压缩重试，误判会导致 400 落进历史。
+func TestAPIError_ContextOverflow(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *provider.APIError
+		want bool
+	}{
+		{
+			// 线上原文：1M 窗口实测，messages + completion 超限。
+			name: "upstream 400",
+			err: &provider.APIError{StatusCode: 400, Message: `{"error":{"message":"This model's maximum context length is 1048576 tokens. ` +
+				`However, you requested 1051184 tokens (667184 in the messages, 384000 in the completion). ` +
+				`Please reduce the length of the messages or completion."}}`},
+			want: true,
+		},
+		{
+			name: "deepseek code",
+			err:  &provider.APIError{StatusCode: 400, Message: `{"error":{"code":"context_length_exceeded"}}`},
+			want: true,
+		},
+		{
+			name: "413 payload too large",
+			err:  &provider.APIError{StatusCode: 413, Message: "prompt is too long"},
+			want: true,
+		},
+		{
+			name: "400 但不是超限（不能误判成可压缩）",
+			err:  &provider.APIError{StatusCode: 400, Message: `{"error":{"message":"invalid api key"}}`},
+			want: false,
+		},
+		{
+			name: "5xx 不算超限",
+			err:  &provider.APIError{StatusCode: 502, Message: "maximum context length exceeded"},
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.err.ContextOverflow(); got != c.want {
+				t.Fatalf("ContextOverflow() = %v, want %v", got, c.want)
+			}
+		})
 	}
 }

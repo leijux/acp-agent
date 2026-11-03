@@ -18,12 +18,23 @@ const (
 	// SoftCompactUsage 是「提示模型主动压缩」的占用比例，对齐上游的
 	// minContextLimitPct = 0.45：到这个水位就应告知模型可以压缩了。
 	SoftCompactUsage = 0.45
-	// HardCompactUsage 是宿主强制压缩的兜底比例，对齐上游的
+	// HardCompactUsage 是宿主强制压缩的绝对兜底比例，对齐上游的
 	// maxContextLimitPct = 0.75 之上再留一层余量。
 	//
 	// 主动模式（模型自己调用 context_apply）正常运行时不应走到这里；
 	// 它是模型不肯压缩时的安全网，避免上下文撞上硬上限。
+	//
+	// 注意：真正先刹车的是 inputBudget（窗口 − 输出预留 − 预留），
+	// 它比本水位更早触发（1M 窗口 / 384k 输出的模型约 73%）。
 	HardCompactUsage = 0.90
+
+	// minOutputTokens 是 max_tokens 的下限。上下文挤到没有输出空间时
+	// 也发这个值而不是 0：0 会让 provider 省掉该字段，服务端改用默认上限，
+	// 反而更容易超窗。小值最多让回复被截断，随时可以 /compact 恢复。
+	minOutputTokens = 512
+	// inputSafetyPct 是输入估算的保守系数（百分比）。估算走字符启发式，
+	// 对代码/JSON 仍偏向低估，所以扣输出空间时按偏大值算。
+	inputSafetyPct = 115
 )
 
 // SummaryPrompt 是生成压缩摘要用的系统提示（对齐 Pi 的 compaction prompt）。
@@ -39,15 +50,23 @@ const SummaryPrompt = `你是会话压缩器。把给定的对话历史压缩成
 
 直接输出摘要正文，不要加前缀说明。`
 
-// shouldCompact 判断是否达到「宿主强制压缩」的兜底水位（HardCompactUsage）。
+// shouldCompact 判断是否达到「宿主强制压缩」的水位。
+//
+// 两个条件满足任一即压缩：
+//  1. 占用达到 HardCompactUsage（绝对兜底，模型死活不肯压时用）；
+//  2. 估算占用超过 inputBudget —— 再长下去就只能靠压缩 max_tokens 换空间了。
+//
+// 条件 2 是真正先刹车的那个：上游按 messages + completion 求和判窗口，
+// 一个 1M 窗口 / 384k 输出的模型输入天花板只有约 63%，光靠 90% 水位永远
+// 够不到（这正是 667184 + 384000 > 1048576 那次 400 的成因）。
 //
 // 这只是廉价的快速判断，避免每轮都跑一次 kernel 渲染。真正的决策（压哪一段、
 // 压多少）由 kernel 的 nudge 给出，见 Compact。
-//
-// 主动模式下常驻路径是 shouldNudge（SoftCompactUsage），本函数只在模型
-// 迟迟不压缩时兜底。
 func (a *Agent) shouldCompact() bool {
-	return a.contextUsage() >= HardCompactUsage
+	if a.contextUsage() >= HardCompactUsage {
+		return true
+	}
+	return a.contextTokens() >= a.inputBudget()
 }
 
 // shouldNudge 判断是否该提醒模型可以主动压缩（SoftCompactUsage）。
@@ -68,12 +87,70 @@ func (a *Agent) ContextUsage() float64 { return a.contextUsage() }
 
 // contextTokens 估算当前会发送给模型的 token 数。
 func (a *Agent) contextTokens() int {
-	msgs := ProjectMessages(a.opts.Session.Messages())
-	return a.opts.TokenCounter(msgs) + EstimateTokens(BuildSystemPrompt(a.opts.Context))
+	return a.estimateInputTokens(
+		BuildSystemPrompt(a.opts.Context),
+		ProjectMessages(a.opts.Session.Messages()),
+		toolSpecs(a.opts.Registry),
+	)
+}
+
+// estimateInputTokens 估算一次请求的输入侧 token：system prompt + 消息 + 工具定义。
+//
+// 三者都是实发内容，必须一起算。只算消息会让估算系统性偏低，而低估的
+// 唯一后果是「以为还有空间」——然后被上游 400。
+func (a *Agent) estimateInputTokens(sys string, msgs []Message, tools []ToolSpec) int {
+	return a.opts.TokenCounter(msgs) + EstimateTokens(sys) + EstimateToolSpecsTokens(tools)
 }
 
 // ContextTokens 暴露当前上下文估算值（供状态栏/测试用）。
 func (a *Agent) ContextTokens() int { return a.contextTokens() }
+
+// idealOutputTokens 返回「不考虑当前占用」时愿意留给输出的 token 数。
+//
+// 上限取窗口的 1/4，而不是模型声明的 MaxOutput：DeepSeek 这类 1M 窗口 /
+// 384k 输出的组合，把 384k 全留给输出等于把输入天花板压到 63%，而压缩
+// 水位是窗口的 90% —— 撞 400 之前永远到不了压缩水位。
+func (a *Agent) idealOutputTokens() int {
+	win := a.opts.ContextWindow
+	limit := win / 4
+	out := a.opts.Model.MaxOutputTokens
+	if out <= 0 || out > limit {
+		out = limit
+	}
+	return out
+}
+
+// inputBudget 返回输入侧的安全水位：估算占用超过它就压缩。
+//
+// 语义对齐上游 Pi 的 contextWindow − reserveTokens，但必须再扣掉输出预留，
+// 否则「输出预留冲掉输入天花板」的老问题会以另一种形式回来。
+func (a *Agent) inputBudget() int {
+	win := a.opts.ContextWindow
+	budget := win - a.opts.ReserveTokens - a.idealOutputTokens()
+	// 极小窗口（测试、小模型）下 reserve 与输出预留会把预算压成负数，
+	// 那样任何历史都不允许存在；兜底为半个窗口。
+	if floor := win / 2; budget < floor {
+		budget = floor
+	}
+	return budget
+}
+
+// outputBudget 把本次请求的 max_tokens 收敛到「窗口 − 估算输入 − 预留」。
+//
+// 上游按 messages + completion 求和判窗口，所以 max_tokens 不能恒等于模型
+// 输出上限：667184(输入) + 384000(输出) > 1048576 就是一次 HTTP 400
+// invalid_request_error，而那时上下文才用掉一半。
+func (a *Agent) outputBudget(used int) int {
+	out := a.idealOutputTokens()
+	avail := a.opts.ContextWindow - used*inputSafetyPct/100 - a.opts.ReserveTokens
+	if avail < out {
+		out = avail
+	}
+	if out < minOutputTokens {
+		out = minOutputTokens
+	}
+	return out
+}
 
 // CompactionResult 是压缩结果。
 type CompactionResult struct {
@@ -94,7 +171,8 @@ type CompactionResult struct {
 // reason 为 "manual" / "threshold" / "overflow"；instructions 是可选的人工侧重
 // （对应 /compact <instructions>）。
 //
-// 返回 (nil, nil) 表示 kernel 认为当前不需要压缩（不应视为错误）。
+// 返回 (nil, nil) 在旧实现里表示「kernel 认为不需要压缩」，现在拿不出区间会
+// 直接报错（见下方注释）；调用方仍按「nil 结果 = 没压」处理。
 func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*CompactionResult, error) {
 	// 串行化 kernel 复合操作：手动 /compact 可能与正在执行的 context_apply 重叠。
 	a.ctxMu.Lock()
@@ -126,19 +204,17 @@ func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*Comp
 		if nudge != nil {
 			usage = nudge.ContextUsage
 		}
+		// 阈值/溢出触发的自动压缩是兜底；拿不出区间时必须报出来：
+		// 沉默会把问题推给下一次请求（max_tokens 被挤到下限 → 回复无故截断），
+		// 用户看不到「该 /new 或手动 /compact 了」这个信号。
+		//
+		// 判据是 CompressibleRanges 而不是 nudge.ShouldInject：后者在上游只是
+		// 「要不要把提示文本注入对话」的节流开关（frequency / iterationThreshold /
+		// growthFloor），拿它做门禁会在区间充足时因为节流窗口没到而整轮跳过。
 		return nil, fmt.Errorf(
 			"agent: kernel 没有给出可压缩区间（上下文占用 %.0f%%，%d tokens）",
 			usage*100, tokensBefore,
 		)
-	}
-	// 阈值触发的自动压缩尊重 kernel 的判断；手动 /compact 一律执行。
-	//
-	// 注意判断依据是 CompressibleRanges 是否为空，不是 nudge.ShouldInject：
-	// ShouldInject 在上游是「是否把提示文本注入对话」的节流开关（受 frequency /
-	// iterationThreshold / growthFloor 控制），不是「该不该压缩」。用它做门禁会
-	// 在上下文已经很高、区间也够的时候因为节流窗口没到而整轮跳过。
-	if reason != "manual" && len(nudge.CompressibleRanges) == 0 {
-		return nil, nil
 	}
 
 	// 一次只压 kernel 排名第一的区间：每个区间都要一次模型调用，

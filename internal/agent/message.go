@@ -8,7 +8,8 @@
 //     tool result 或排队消息需要模型响应，就继续下一轮；否则本次 run 结束。
 //   - steering 消息插在当前 assistant turn 之后；follow-up 消息在 agent 完成手上
 //     所有工作之后才进入；abort 停止当前 run 并把排队消息退回编辑器。
-//   - 压缩（compaction）在 contextTokens > contextWindow - reserveTokens 时触发，
+//   - 压缩（compaction）在 contextTokens >= inputBudget（窗口 − 输出预留 −
+//     预留，见 compact.go）时触发，另以 HardCompactUsage（90%）作绝对兜底；
 //     从后往前累计 keepRecentTokens 找到切点，切点只允许落在 user / assistant /
 //     bashExecution / custom 消息上，**绝不切在 toolResult 上**（必须与它的
 //     tool call 待在一起）。

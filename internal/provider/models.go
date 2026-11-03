@@ -60,27 +60,29 @@ var builtinModels = []ModelInfo{
 	{ID: "gemini-2.5-flash", ContextWindow: 1_048_576, MaxOutput: 65_536, Input: 0.3, Output: 2.5, CacheRead: 0.075, SupportsImages: true, SupportsThinking: true},
 
 	// ---------- 国产 / 开源 ----------
-	// DeepSeek V4 系列（2026）：1M 上下文 / 384K 输出，思考模式默认开启。
+	// DeepSeek V4 系列（2026）：1M 上下文（上游实际报 1048576）/ 384K 输出，思考模式默认开启。
+	// 窗口写 1_048_576 而不是 1_000_000：窗口是压缩水位与 max_tokens 收敛的分母，
+	// 写小 48k 会让输入天花板比真实值更紧。
 	// 价格单位人民币/百万 token；Input/Output/CacheRead 是高峰价，*OffPeak 是空闲价。
 	// 高峰：北京时间周一~周五 9:00-12:00、14:00-18:00（不含法定节假日）。
 	{
-		ID: "deepseek-flash", ContextWindow: 1_000_000, MaxOutput: 384_000, Currency: "CNY",
+		ID: "deepseek-flash", ContextWindow: 1_048_576, MaxOutput: 384_000, Currency: "CNY",
 		Input: 2, Output: 8, CacheRead: 0.04,
 		InputOffPeak: 1, OutputOffPeak: 4, CacheReadOffPeak: 0.02,
 		SupportsImages: true, SupportsThinking: true,
 	},
 	{
-		ID: "deepseek-v4-pro", ContextWindow: 1_000_000, MaxOutput: 384_000, Currency: "CNY",
+		ID: "deepseek-v4-pro", ContextWindow: 1_048_576, MaxOutput: 384_000, Currency: "CNY",
 		Input: 9, Output: 27, CacheRead: 0.30,
 		InputOffPeak: 4.5, OutputOffPeak: 13.5, CacheReadOffPeak: 0.15,
 		SupportsThinking: true,
 	},
 	// 旧名：仍可调用，实际由 V4.1-Flash 提供服务并按 Flash 价计费。
-	{ID: "deepseek-v4-flash", ContextWindow: 1_000_000, MaxOutput: 384_000, Currency: "CNY",
+	{ID: "deepseek-v4-flash", ContextWindow: 1_048_576, MaxOutput: 384_000, Currency: "CNY",
 		Input: 2, Output: 8, CacheRead: 0.04,
 		InputOffPeak: 1, OutputOffPeak: 4, CacheReadOffPeak: 0.02,
 		SupportsImages: true, SupportsThinking: true, Deprecated: "deepseek-flash"},
-	{ID: "deepseek-v4-flash-vision-exp", ContextWindow: 1_000_000, MaxOutput: 384_000, Currency: "CNY",
+	{ID: "deepseek-v4-flash-vision-exp", ContextWindow: 1_048_576, MaxOutput: 384_000, Currency: "CNY",
 		Input: 2, Output: 8, CacheRead: 0.04,
 		InputOffPeak: 1, OutputOffPeak: 4, CacheReadOffPeak: 0.02,
 		SupportsImages: true, SupportsThinking: true, Deprecated: "deepseek-flash"},

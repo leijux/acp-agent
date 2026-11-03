@@ -239,8 +239,8 @@ func TestBuildProvider_DeepSeekDefaults(t *testing.T) {
 	if model2.ID != "deepseek-flash" {
 		t.Errorf("默认模型 = %q, want deepseek-flash", model2.ID)
 	}
-	if model2.ContextWindow != 1_000_000 {
-		t.Errorf("ContextWindow = %d, want 1000000", model2.ContextWindow)
+	if model2.ContextWindow != 1_048_576 {
+		t.Errorf("ContextWindow = %d, want 1048576", model2.ContextWindow)
 	}
 	if model2.MaxOutputTokens != 384_000 {
 		t.Errorf("MaxOutputTokens = %d, want 384000", model2.MaxOutputTokens)

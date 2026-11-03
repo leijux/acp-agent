@@ -633,3 +633,35 @@ func (e *APIError) Error() string {
 	}
 	return fmt.Sprintf("provider/%s: %s", e.Provider, e.Message)
 }
+
+// overflowKeywords 是各家「上下文超限」错误的关键词。
+//
+// 文案不稳（OpenAI: "maximum context length is N tokens"；DeepSeek / 网关:
+// "context_length_exceeded"、"reduce the length of the messages"），所以按
+// 关键词而不是精确匹配判定。
+var overflowKeywords = []string{
+	"maximum context length",
+	"context_length_exceeded",
+	"context length",
+	"reduce the length of the messages",
+	"prompt is too long",
+	"too many tokens",
+	"exceeds the context window",
+}
+
+// ContextOverflow 报告这个错误是否是「请求超过上下文窗口」。
+//
+// 实现 agent.OverflowDetector：上层（agent.Run）据此触发压缩重试。
+// 判定不看 Retryable —— 超限重试原样重试没用，必须先缩上下文。
+func (e *APIError) ContextOverflow() bool {
+	if e.StatusCode != 400 && e.StatusCode != 413 {
+		return false
+	}
+	msg := strings.ToLower(e.Message)
+	for _, k := range overflowKeywords {
+		if strings.Contains(msg, k) {
+			return true
+		}
+	}
+	return false
+}

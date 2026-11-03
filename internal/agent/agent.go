@@ -86,7 +86,7 @@ func (o *Options) normalize() error {
 		o.ContextWindow = 200_000
 	}
 	if o.ReserveTokens <= 0 {
-		o.ReserveTokens = 16_384
+		o.ReserveTokens = defaultReserveTokens
 	}
 	if o.TokenCounter == nil {
 		o.TokenCounter = EstimateMessagesTokens
@@ -415,6 +415,9 @@ func (a *Agent) RunMessages(ctx context.Context, input Message) (*RunResult, err
 
 	assistantCount := 0
 	steps := 0
+	// overflowRetried 保证「上下文超限 → 压缩 → 重试」最多发生一次，
+	// 避免 kernel 拿不出区间时循环重试。
+	overflowRetried := false
 
 	for {
 		if runCtx.Err() != nil {
@@ -436,6 +439,15 @@ func (a *Agent) RunMessages(ctx context.Context, input Message) (*RunResult, err
 			if runCtx.Err() != nil {
 				res.Aborted = true
 				break
+			}
+			// 上下文超限不是「这次请求写得不好」，而是历史真的太长了：先把
+			// 历史压下去再重发一次。不能把 400 落成历史——那条错误消息本身
+			// 还会把上下文再撑大一点，下一条用户消息必然复现同样的 400。
+			if !overflowRetried && IsContextOverflow(err) {
+				overflowRetried = true
+				if r, cerr := a.Compact(runCtx, "", "overflow"); cerr == nil && r != nil {
+					continue
+				}
 			}
 			// provider 失败：记录一条 error 状态的 assistant 消息，保持会话树完整。
 			em := &AssistantMessage{
@@ -654,18 +666,14 @@ func appendThinking(blocks []Block, delta string) []Block {
 func (a *Agent) buildRequest() Request {
 	sys := BuildSystemPrompt(a.opts.Context)
 	msgs := ProjectMessages(a.opts.Session.Messages())
+	tools := toolSpecs(a.opts.Registry)
 
-	ctxWin := a.opts.ContextWindow
-	maxOut := a.opts.Model.MaxOutputTokens
-	if maxOut <= 0 {
-		maxOut = ctxWin / 4
-	}
 	return Request{
 		SystemPrompt:  sys,
 		Messages:      msgs,
-		Tools:         toolSpecs(a.opts.Registry),
+		Tools:         tools,
 		Model:         a.opts.Model,
-		MaxTokens:     maxOut,
+		MaxTokens:     a.outputBudget(a.estimateInputTokens(sys, msgs, tools)),
 		Purpose:       "chat",
 		ThinkingLevel: a.opts.ThinkingLevel,
 		Temperature:   a.opts.Temperature,
