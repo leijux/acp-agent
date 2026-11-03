@@ -167,7 +167,10 @@ func ProjectMessages(msgs []Message) []Message {
 			out = append(out, m)
 		}
 	}
-	return out
+	// 最后一道关：上面的 conversion 会增减消息（Bash 被 ExcludeFromContext 丢掉、
+	// Custom 变成 user），可能把原本被分隔的 assistant / tool 消息拉成相邻。
+	// 配对规范化放在这里，保证实际发出去的载荷一定合法。
+	return normalizeToolPairs(out)
 }
 
 // toolSpecs 把 tools.Registry 转成模型可见的工具定义。

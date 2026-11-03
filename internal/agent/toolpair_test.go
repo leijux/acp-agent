@@ -25,7 +25,7 @@ func toolRes(callID string) *ToolResultMessage {
 }
 
 // 投影层兜底：父被折叠后，残留的 tool 结果必须被丢掉，不能发给 provider。
-func TestDropOrphanToolResults(t *testing.T) {
+func TestNormalizeToolPairsDropsOrphans(t *testing.T) {
 	msgs := []Message{
 		&UserMessage{Content: []Block{TextBlock{Text: "跑两条命令"}}},
 		asstWithCalls("c1", "c2"),
@@ -35,7 +35,7 @@ func TestDropOrphanToolResults(t *testing.T) {
 		toolRes("c1"), // ← 事故原型：父已经不在可见消息里
 		&UserMessage{Content: []Block{TextBlock{Text: "继续"}}},
 	}
-	out := dropOrphanToolResults(msgs)
+	out := normalizeToolPairs(msgs)
 
 	var kept []Message
 	for _, m := range out {
@@ -58,7 +58,7 @@ func TestDropOrphanToolResults(t *testing.T) {
 }
 
 // 配对完整时一条都不能少。
-func TestDropOrphanToolResultsKeepsPaired(t *testing.T) {
+func TestNormalizeToolPairsKeepsPaired(t *testing.T) {
 	msgs := []Message{
 		&UserMessage{Content: []Block{TextBlock{Text: "go"}}},
 		asstWithCalls("c1", "c2", "c3"),
@@ -68,7 +68,7 @@ func TestDropOrphanToolResultsKeepsPaired(t *testing.T) {
 		toolRes("c4"),
 		toolRes("c3"), // 迟到的结果：父 c3 已被后面的 assistant 顶掉
 	}
-	out := dropOrphanToolResults(msgs)
+	out := normalizeToolPairs(msgs)
 	if len(out) != 6 {
 		t.Fatalf("输出条数 = %d, want 6（迟到的 c3 应被丢弃）", len(out))
 	}
@@ -165,5 +165,139 @@ func TestSessionMessagesDropOrphanAfterCompaction(t *testing.T) {
 	}
 	if !hasSummary || !hasSecond {
 		t.Fatalf("摘要或后续消息丢了: %+v", out)
+	}
+}
+
+// ---------- 反方向：assistant 的 tool_calls 没有响应 ----------
+
+// assertToolPairsValid 校验 OpenAI 兼容接口的两条硬性规则：
+//   - 每条 role=tool 都能找到紧邻其前的 tool_calls；
+//   - 每个 tool_call_id 都有紧随其后的 tool 消息响应。
+func assertToolPairsValid(t *testing.T, msgs []Message) {
+	t.Helper()
+	pending := map[string]bool{}
+	fail := func(why string, next any) {
+		var ids []string
+		for id := range pending {
+			ids = append(ids, id)
+		}
+		t.Fatalf("%s（下一条是 %T，未响应 %v）", why, next, ids)
+	}
+	for _, m := range msgs {
+		if _, isTool := m.(*ToolResultMessage); !isTool && len(pending) > 0 {
+			fail("上一条 assistant 的 tool_calls 没有被响应", m)
+		}
+		switch v := m.(type) {
+		case *AssistantMessage:
+			pending = map[string]bool{}
+			for _, tc := range v.ToolCalls() {
+				pending[tc.ID] = true
+			}
+		case *ToolResultMessage:
+			if !pending[v.ToolCallID] {
+				t.Fatalf("孤儿 tool 结果 %q", v.ToolCallID)
+			}
+			delete(pending, v.ToolCallID)
+		}
+	}
+	if len(pending) > 0 {
+		fail("末尾仍有未响应的 tool_calls", "EOF")
+	}
+}
+
+// 摘要把 tool 结果折掉、assistant 留在外面 —— 事故原型（本轮报错原文：
+// "insufficient tool messages following tool_calls message"）。
+func TestNormalizeToolPairsStripsUnansweredCalls(t *testing.T) {
+	msgs := []Message{
+		&UserMessage{Content: []Block{TextBlock{Text: "跑两条命令"}}},
+		asstWithCalls("c1", "c2"), // 只有工具调用，没有文本
+		&CompactionSummaryMessage{Summary: "摘要：上面的工具结果已压缩"},
+		toolRes("c1"), // 父与摘要之间隔了摘要 → 算没响应
+		&UserMessage{Content: []Block{TextBlock{Text: "继续"}}},
+	}
+	out := normalizeToolPairs(msgs)
+	assertToolPairsValid(t, out)
+
+	for _, m := range out {
+		if _, ok := m.(*AssistantMessage); ok {
+			t.Fatal("只剩「我要调工具」的空壳 assistant，应整条丢掉")
+		}
+		if tr, ok := m.(*ToolResultMessage); ok {
+			t.Fatalf("孤儿 tool 结果 %q 应被丢掉", tr.ToolCallID)
+		}
+	}
+	if len(out) != 3 { // user + summary + user
+		t.Fatalf("输出 %d 条，want 3", len(out))
+	}
+}
+
+// assistant 有文本 + 部分结果缺失：只剥掉没响应的调用，文本必须留住。
+func TestNormalizeToolPairsStripsPartialAndKeepsText(t *testing.T) {
+	asst := asstWithCalls("c1", "c2")
+	asst.Content = append([]Block{TextBlock{Text: "我先看看目录"}}, asst.Content...)
+
+	msgs := []Message{
+		&UserMessage{Content: []Block{TextBlock{Text: "看看"}}},
+		asst,
+		toolRes("c1"), // c2 的结果丢了
+		&UserMessage{Content: []Block{TextBlock{Text: "继续"}}},
+	}
+	out := normalizeToolPairs(msgs)
+	assertToolPairsValid(t, out)
+
+	got, ok := out[1].(*AssistantMessage)
+	if !ok {
+		t.Fatalf("第 2 条应是 assistant，实际 %T", out[1])
+	}
+	if calls := got.ToolCalls(); len(calls) != 1 || calls[0].ID != "c1" {
+		t.Fatalf("应只保留 c1，实际 %+v", calls)
+	}
+	if got.Text() != "我先看看目录" {
+		t.Fatalf("文本被弄丢了: %q", got.Text())
+	}
+	if len(asst.ToolCalls()) != 2 {
+		t.Fatal("不能就地改原消息（session 里的 entry 是共享的）")
+	}
+}
+
+// 端到端：压缩块只盖住「tool 结果」时，摘要不能插进工具轮中间。
+func TestCompactionBlockStartingAtToolResultKeepsPairs(t *testing.T) {
+	s := NewSession()
+	asst := asstWithCalls("c1")
+	asst.Content = append([]Block{TextBlock{Text: "跑一下 ls"}}, asst.Content...)
+	for _, m := range []Message{
+		&UserMessage{Content: []Block{TextBlock{Text: "第一步"}}},
+		asst,
+		toolRes("c1"),
+		&UserMessage{Content: []Block{TextBlock{Text: "第二步"}}},
+	} {
+		if _, err := s.Append(m); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	// 块只吃了 e3（tool 结果）：kernel 的区间可以从工具结果开始。
+	if _, err := s.AppendCompactionBlock("b1", strings.Repeat("摘要内容", 20), []string{"e3"}, 100, 50); err != nil {
+		t.Fatalf("AppendCompactionBlock: %v", err)
+	}
+
+	out := s.Messages()
+	assertToolPairsValid(t, out)
+
+	var hasSummary, hasText bool
+	for _, m := range out {
+		switch v := m.(type) {
+		case *CompactionSummaryMessage:
+			hasSummary = true
+		case *AssistantMessage:
+			if v.Text() == "跑一下 ls" {
+				hasText = true
+			}
+		}
+	}
+	if !hasSummary {
+		t.Fatal("摘要不见了")
+	}
+	if !hasText {
+		t.Fatalf("assistant 的文本应在剥离 tool_calls 后保留: %+v", out)
 	}
 }

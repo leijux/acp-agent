@@ -271,7 +271,7 @@ func (s *Session) messagesLocked() []Message {
 				out = append(out, m)
 			}
 		}
-		return dropOrphanToolResults(out)
+		return normalizeToolPairs(out)
 	}
 
 	// 旧格式。
@@ -302,6 +302,10 @@ func (s *Session) messagesLocked() []Message {
 			// 保留起点丢失时退化为「压缩 entry 之后」。
 			idx = lastCompact + 1
 		}
+		if idx < len(branch) {
+			// 同上：起点不能落在工具轮中间。
+			idx = pairStartIndex(branch, idx)
+		}
 		start = idx
 	}
 
@@ -310,7 +314,7 @@ func (s *Session) messagesLocked() []Message {
 			out = append(out, m)
 		}
 	}
-	return dropOrphanToolResults(out)
+	return normalizeToolPairs(out)
 }
 
 // compactionBlocksLocked 返回活动分支上的压缩块：
@@ -339,7 +343,10 @@ func (s *Session) compactionBlocksLocked(branch []*Entry) (map[int][]*Entry, map
 			}
 		}
 		if min >= 0 {
-			insert[min] = append(insert[min], e)
+			// 摘要不能落在工具轮中间：assistant(tool_calls) 与它的 tool 消息之间
+			// 插进一条 user 角色的摘要，上游会判定「insufficient tool messages」。
+			at := pairStartIndex(branch, min)
+			insert[at] = append(insert[at], e)
 		}
 	}
 	if len(insert) == 0 {
