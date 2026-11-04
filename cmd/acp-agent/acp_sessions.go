@@ -31,7 +31,9 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 	skillSet := skills.Discover(skills.Options{
 		Root:       root,
 		ExtraPaths: a.cfg.Skills,
+		Files:      a.cfg.SkillFiles,
 		Disabled:   a.cfg.DisableSkills,
+		NoPiDirs:   a.cfg.NoPiSkills,
 	})
 	reg, bashMgr := tools.DefaultRegistry(tools.Options{
 		Policy: tools.Policy{

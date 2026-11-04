@@ -3,32 +3,81 @@ package mcp
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
 func TestDefaultPathsLayout(t *testing.T) {
 	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
 	t.Setenv("ACP_AGENT_CONFIG_DIR", filepath.Join(dir, "cfg"))
+	// Pi 原生文件在 home 下：把 home 钉到临时目录，测试才不依赖开发机上的 ~/.pi。
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
 	paths := DefaultPaths(filepath.Join(dir, "work"))
-	if len(paths) != 2 {
-		t.Fatalf("paths = %v，期望 2 条", paths)
+	want := []string{
+		filepath.Join(home, ".pi", "agent", "mcp.json"), // Pi 原生（机器级，最低）
+		filepath.Join(dir, "work", ".mcp.json"),         // 仓库级
+		filepath.Join(dir, "cfg", ".mcp.json"),          // 用户级
+		filepath.Join(dir, "work", ".pi", "mcp.json"),   // per-agent（最高）
 	}
-	if want := filepath.Join(dir, "work", ".mcp.json"); paths[0] != want {
-		t.Errorf("paths[0] = %q, want %q", paths[0], want)
+	if !slices.Equal(paths, want) {
+		t.Fatalf("paths = %v\nwant = %v", paths, want)
 	}
-	if want := filepath.Join(dir, "cfg", ".mcp.json"); paths[1] != want {
-		t.Errorf("paths[1] = %q, want %q", paths[1], want)
+}
+
+// 同名 server 的覆盖顺序：Pi 原生 < 仓库 .mcp.json < 用户级 < per-agent .pi/mcp.json。
+func TestDefaultPathPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	work := filepath.Join(dir, "work")
+	t.Setenv("ACP_AGENT_CONFIG_DIR", filepath.Join(dir, "cfg"))
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for _, p := range []string{
+		filepath.Join(home, ".pi", "agent"),
+		work,
+		filepath.Join(work, ".pi"),
+	} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(home, ".pi", "agent", "mcp.json"), `{"mcpServers":{"dup":{"command":"pi-home"}}}`)
+	writeFile(t, filepath.Join(work, ".mcp.json"), `{"mcpServers":{"dup":{"command":"repo"}}}`)
+	writeFile(t, filepath.Join(work, ".pi", "mcp.json"), `{"mcpServers":{"dup":{"command":"agent"}}}`)
+
+	cfg, err := LoadFiles(DefaultPaths(work)...)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if got := cfg.MCPServers["dup"].Command; got != "agent" {
+		t.Errorf(".pi/mcp.json 应压过其他文件，得到 %q", got)
+	}
+
+	// 没有 per-agent 文件时，仓库 .mcp.json 压过 Pi 原生。
+	if err := os.Remove(filepath.Join(work, ".pi", "mcp.json")); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadFiles(DefaultPaths(work)...)
+	if err != nil {
+		t.Fatalf("LoadFiles: %v", err)
+	}
+	if got := cfg.MCPServers["dup"].Command; got != "repo" {
+		t.Errorf("仓库 .mcp.json 应压过 ~/.pi/agent/mcp.json，得到 %q", got)
 	}
 }
 
 func TestDefaultPathsFallsBackToUserConfigDir(t *testing.T) {
 	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
 	t.Setenv("ACP_AGENT_CONFIG_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", dir) // Linux；Windows 走 APPDATA
 	t.Setenv("APPDATA", dir)         // Windows
-	t.Setenv("HOME", dir)            // macOS
+	t.Setenv("HOME", home)           // macOS / Linux
+	t.Setenv("USERPROFILE", home)    // Windows
 
 	cfgDir := ConfigDir()
 	if cfgDir == "" {
@@ -39,7 +88,11 @@ func TestDefaultPathsFallsBackToUserConfigDir(t *testing.T) {
 	}
 
 	paths := DefaultPaths("")
-	if len(paths) != 1 || paths[0] != filepath.Join(cfgDir, ".mcp.json") {
+	want := []string{
+		filepath.Join(home, ".pi", "agent", "mcp.json"),
+		filepath.Join(cfgDir, ".mcp.json"),
+	}
+	if !slices.Equal(paths, want) {
 		t.Errorf("workDir 为空时只应返回用户级路径，得到 %v", paths)
 	}
 }

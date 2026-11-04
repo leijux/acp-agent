@@ -401,4 +401,45 @@ func TestSkillsWiredIntoAgent(t *testing.T) {
 			t.Fatalf("Disabled 时应发现 0 个，实际 %d", len(got))
 		}
 	})
+
+	// 编排器（Multica）把 per-agent 技能写进 .pi/skills：默认读，--no-pi-skills 关。
+	t.Run("pi skills", func(t *testing.T) {
+		dir := t.TempDir()
+		makeSkill(dir)
+		piDir := filepath.Join(dir, ".pi", "skills", "agent-skill")
+		if err := os.MkdirAll(piDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := "---\nname: agent-skill\ndescription: 这个智能体专属。\n---\nbody\n"
+		if err := os.WriteFile(filepath.Join(piDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		defer srv.Close()
+
+		a, _ := newTestApp(t, Config{
+			Provider: "deepseek", Model: "deepseek-chat", Root: dir,
+			Permissions: permAuto, MaxTurns: 3,
+		}, srv.URL)
+		names := map[string]bool{}
+		for _, s := range a.agent.Skills() {
+			names[s.Name] = true
+		}
+		if !names["agent-skill"] {
+			t.Fatalf(".pi/skills 未进 agent: %v", names)
+		}
+		if !names["pdf-tools"] {
+			t.Fatalf(".agents/skills 不应因为读 .pi 而丢: %v", names)
+		}
+
+		a2, _ := newTestApp(t, Config{
+			Provider: "deepseek", Model: "deepseek-chat", Root: dir,
+			Permissions: permAuto, MaxTurns: 3, NoPiSkills: true,
+		}, srv.URL)
+		for _, s := range a2.agent.Skills() {
+			if s.Name == "agent-skill" {
+				t.Fatal("--no-pi-skills 时不该读 .pi/skills")
+			}
+		}
+	})
 }

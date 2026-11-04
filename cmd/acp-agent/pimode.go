@@ -104,14 +104,23 @@ func applyModelSelector(cfg *Config) {
 	cfg.Provider, cfg.Model = p, m
 }
 
-// applyRunMode 校验 --mode 并把它翻译成配置。--mode rpc 是 Pi 的 JSON-RPC
-// 探测面，我们没实现；它带着超时预算，失败后会回退到 --list-models，所以明确
-// 报错比挂了强。
+// applyRunMode 校验 --mode 并把它翻译成配置。
+//
+// 两种模式都是 Pi 协议的兼容面：
+//   - json：一次跑完、stdout 逐行事件流（任务执行）；需要 -p。
+//   - rpc：常驻 JSON-RPC（stdin 命令 / stdout 回应）。同一个模式承担两件事：
+//     探测（get_state / get_available_models）与任务执行 + steering
+//     （prompt / steer + agent_settled）。不需要 -p。
 func applyRunMode(f *flags, cfg *Config) error {
 	switch f.mode {
 	case "":
 	case piModeRPC:
-		return errors.New("--mode rpc 未实现（模型目录请用 --list-models 或 models --json）")
+		if f.acpMode {
+			return errors.New("--acp 与 --mode rpc 不能同时使用")
+		}
+		// 探测场景不带 -p；任务场景的任务正文走 prompt 命令。带了 -p 也忽略：
+		// 编排器版本演化时不应因为多一个无意义 flag 直接挂。
+		cfg.RPCMode = true
 	case piModeJSON:
 		// 这个模式的前提是「一次运行、prompt 从 stdin 来」。漏了 -p 会掉进
 		// REPL/TUI，人读界面和事件流就撞在同一个 stdout 上了。
@@ -133,10 +142,10 @@ func applyRunMode(f *flags, cfg *Config) error {
 		cfg.Session = ""
 		cfg.NoSession = true
 	}
-	// 编排列器不会有人回答权限询问：非交互时 ask 会把所有改动型工具直接拒掉。
-	// 所以 JSON 模式下把 ask 提成 auto（显式 readonly 保留）。
-	// 用 parsePermMode 判定而不是字符串比较："Ask" / " ask " 也是 ask。
-	if cfg.JSONMode {
+	// 编排器不会有人回答权限询问：无人值守时 ask 会把所有改动型工具直接拒掉。
+	// json（一次性任务）与 rpc（探测/任务）都是无人值守，统一提成 auto
+	// （显式 readonly 保留）。用 parsePermMode 判定："Ask" / " ask " 也是 ask。
+	if cfg.JSONMode || cfg.RPCMode {
 		if mode, err := parsePermMode(cfg.Permissions); err == nil && mode == modeAsk {
 			cfg.Permissions = permAuto
 		}
@@ -361,6 +370,13 @@ func piExtensionMCPServers(path string) (map[string]json.RawMessage, error) {
 
 // piExtensionServersAt 尝试把 data[i:] 开头的 "…" 字面量解析成 mcpServers。
 // 第二个返回值是这个字面量之后的位置，供调用方继续往后找下一个 JSON.parse。
+//
+// 认两种形状（都是真实编排器生成过的）：
+//
+//	{"mcpServers":{…}}        旧版 / 手写的扩展
+//	{"<name>":{…}}             Multica MUL-7812 生成的 mcp-extension.mjs：
+//	                           它直接把 mcpServers 的**内层 map** 序列化进去，
+//	                           再交给 pi.registerMcpServer(name, config)
 func piExtensionServersAt(data []byte, i int) (map[string]json.RawMessage, int) {
 	rest := bytes.TrimLeft(data[i:], " \t\r\n")
 	if len(rest) == 0 || rest[0] != '"' {
@@ -378,15 +394,42 @@ func piExtensionServersAt(data []byte, i int) (map[string]json.RawMessage, int) 
 		if err := json.Unmarshal(rest[:j+1], &inner); err != nil {
 			return nil, i // 这一段不是合法字面量：跳到下一个 JSON.parse 再试
 		}
-		var doc struct {
-			MCPServers map[string]json.RawMessage `json:"mcpServers"`
+		if servers := piServersFromLiteral(inner); servers != nil {
+			return servers, i
 		}
-		if err := json.Unmarshal([]byte(inner), &doc); err != nil || len(doc.MCPServers) == 0 {
-			return nil, i
-		}
-		return doc.MCPServers, i
+		return nil, i
 	}
 	return nil, i
+}
+
+// piServersFromLiteral 从 JSON.parse 的字符串内容里取出 server 名 → 配置。
+// 两种形状都认，见 piExtensionServersAt。
+func piServersFromLiteral(inner string) map[string]json.RawMessage {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(inner), &doc); err != nil || len(doc) == 0 {
+		return nil
+	}
+	if raw, ok := doc["mcpServers"]; ok {
+		var wrapped map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &wrapped); err == nil && len(wrapped) > 0 {
+			return wrapped
+		}
+		return nil
+	}
+	// 裸 map：只收值看起来像 server 配置（JSON 对象）的键，避开扩展脚本里
+	// 其他常量的干扰。
+	servers := make(map[string]json.RawMessage, len(doc))
+	for name, raw := range doc {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			continue
+		}
+		servers[name] = raw
+	}
+	if len(servers) == 0 {
+		return nil
+	}
+	return servers
 }
 
 // mergePiExtensions 把若干 Pi 扩展里的 MCP server 叠加进配置。
@@ -409,7 +452,7 @@ func mergePiExtensions(cfg *Config, paths []string) {
 		}
 		if len(servers) == 0 {
 			// 调用方明确给了 --extension 却什么都没读到，不能静默。
-			fmt.Fprintf(os.Stderr, "警告: Pi 扩展 %s 里没找到 mcpServers，本次不注入受管 MCP\n", path)
+			fmt.Fprintf(os.Stderr, "警告: Pi 扩展 %s 里没找到 MCP server 配置（mcpServers 或裸 map），本次不注入受管 MCP\n", path)
 			continue
 		}
 		contributed := 0

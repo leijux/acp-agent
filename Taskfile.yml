@@ -16,9 +16,17 @@ vars:
   # 可执行文件后缀。注意 Task 的 OS 变量：裸名 OS 才是 "windows"，
   # 带点的 .OS 是 "Windows_NT"；.exeExt 在本版本不可靠，一律自己算。
   EXE: '{{if eq OS "windows"}}.exe{{end}}'
-  # 版本号：优先取 git 描述，非 git 仓库回退源码里的默认值。
+  # 版本号 = **能力级别**（源码里的 defaultVersion），后面跟 git 描述当构建标识。
+  #
+  # 编排器（Multica 的 pi backend）只取第一段 semver（`v?N.N.N`）做能力判定：
+  # ≥0.99.0 才下发受管 MCP，≥1.4.0 才协商 steering（argv 换成 --mode rpc）。
+  # 所以**前缀必须是能力级别**，不能直接拿 tag——旧 tag（v1.0.0）会把能力判低。
+  # 形如 `1.4.0+local.v1.0.0-3-gabc-dirty`：正则只吃到 1.4.0，后缀仅供追溯。
+  # 改这个数字时同步改 cmd/acp-agent/main.go 的 defaultVersion（有测试守）。
   VERSION:
-    sh: git describe --tags --always --dirty 2>/dev/null || echo 0.1.0
+    sh: |
+      v=$(git describe --tags --always --dirty 2>/dev/null)
+      echo "1.4.0+${v:-local}"
   # -s -w 去符号表；-X 注入 cmd/acp-agent 的 version 变量。
   LDFLAGS: -s -w -X main.version={{.VERSION}}
   # 默认构建的 build tag：**空** = 轻量版（约 20MB，中文分词器退化为

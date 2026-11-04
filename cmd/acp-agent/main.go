@@ -38,7 +38,19 @@ import (
 var errFlagsReported = errors.New("flag 解析失败（已报告）")
 
 // defaultVersion 是未被 -X 注入时的值，同时充当「是否已注入」的哨兵。
-const defaultVersion = "0.1.0"
+//
+// 版本串不只是给人看的：编排器（Multica 的 pi backend）会把它当 semver 解析
+// （`v?(\d+)\.(\d+)\.(\d+)`）并套两道能力门：
+//
+//   - ≥ 0.99.0：才允许向 Pi 协议族下发受管 MCP（低于此会报
+//     "pi MCP requires a newer version" 并让任务失败）；
+//   - ≥ 1.4.0：才协商 task supplement（steering），argv 换成 `--mode rpc`。
+//     我们已经实现了那条面（prompt / steer / agent_settled），所以可以越过。
+//
+// 不能再往上拍了：再高的门槛对应的是我们没实现的能力（比如 extension 弹窗、
+// 压缩通知）。改它之前先看 version_test.go 的
+// TestDefaultVersionSatisfiesRuntimeGates。
+const defaultVersion = "1.4.0"
 
 // version 由构建时注入（-X main.version=...），这里是 go run/源码直用的默认值。
 var version = defaultVersion
@@ -90,6 +102,10 @@ type flags struct {
 	noSession      bool
 	noContextFiles bool
 	noSkills       bool
+	noPiSkills     bool
+	// skillFiles 是 Pi 的 --skill（可重复）：调用方显式点名的 SKILL.md。
+	// Multica MUL-8421 起用它下发 per-agent 技能（不再依赖项目目录里的 .pi/skills）。
+	skillFiles []string
 	// Pi 的 no-* 系列：我们没有这些资源可关，但编排器（Multica 等）会按 Pi 的
 	// 参数原样传进来。不认的后果很严重 —— flag 解析失败会打印整段 usage，
 	// 而调用方在 stdout 为空时会拿 stderr 当模型目录，于是 usage 的每一行都被
@@ -147,12 +163,22 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.StringVar(&f.thinking, "thinking", "", "思考等级：off/minimal/low/medium/high/max（默认 medium）")
 	fs.Float64Var(&f.temperature, "temperature", 0, "采样温度（推理模型自动忽略）")
 	fs.BoolVar(&f.acpMode, "acp", false, "以 ACP agent 模式运行（stdio JSON-RPC）")
-	fs.StringVar(&f.mode, "mode", "", "输出模式：json（逐行 JSON 事件流，供 Multica 等编排器）；rpc 不支持")
+	fs.StringVar(&f.mode, "mode", "", "输出模式：json（逐行 JSON 事件流，供 Multica 等编排器）；rpc（探测：get_state / get_available_models）")
 	fs.BoolVar(&f.noSession, "no-session", false, "不落盘会话文件（Pi 兼容）")
 	fs.BoolVar(&f.noContextFiles, "no-context-files", false, "不注入 AGENTS.md/CLAUDE.md 等上下文文件（Pi 兼容）")
 	// --no-skills / --no-prompt-templates：Pi 探测目录时会带。no-skills 现在是
 	// 真的（关掉 .agents/skills 发现）；prompt 模板仍未实现。
-	fs.BoolVar(&f.noSkills, "no-skills", false, "不加载 .agents/skills（Pi 兼容）")
+	fs.BoolVar(&f.noSkills, "no-skills", false, "不加载技能（Pi 兼容）")
+	// 默认读 Pi 私有布局（<root>/.pi/skills、~/.pi/agent/skills）：那是编排器
+	// （Multica 等）下发 per-agent 技能的唯一天道；万一仓库里恰好有 .pi/skills
+	// 不想被读，用这个 flag 关掉。
+	fs.BoolVar(&f.noPiSkills, "no-pi-skills", false, "不读 Pi 私有技能目录（.pi/skills、~/.pi/agent/skills）")
+	// Pi 的 --skill <path>（可重复）：显式加载这几份 SKILL.md，不靠目录发现。
+	// 编排器（Multica 等）按这个形状下发 per-agent 技能，不认会直接解析失败。
+	fs.Func("skill", "显式加载的技能文件或目录（Pi 兼容，可重复）", func(v string) error {
+		f.skillFiles = append(f.skillFiles, v)
+		return nil
+	})
 	for _, name := range []string{"extension", "e"} {
 		fs.Func(name, "Pi 扩展文件；只提取其中的 mcpServers 作为 MCP 配置（不执行扩展 JS），可重复", func(v string) error {
 			f.extensions = append(f.extensions, v)
@@ -307,11 +333,18 @@ func run() error {
 	if err := applyRunMode(f, &cfg); err != nil {
 		return err
 	}
+
 	// --extension 里带的是调用方下发的 MCP 配置，叠加到已经读到的配置上。
 	mergePiExtensions(&cfg, f.extensions)
 
 	if abs, err := filepath.Abs(cfg.Root); err == nil {
 		cfg.Root = abs
+	}
+
+	// Pi 的常驻 JSON-RPC 面：探测（不需要 key）与任务执行 + steering 共用
+	// 同一条通道，所以放在 MCP 配置合并之后、buildProvider 之前。
+	if cfg.RPCMode {
+		return runPiRPC(os.Stdin, os.Stdout, os.Stderr, f.provider, f.apiKey, cfg)
 	}
 
 	if f.mcpStatus {
@@ -489,12 +522,14 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 	// 构造失败（如 tavily 缺 key）时降级为关闭，而不是拦住整个启动。
 	searchProvider, fetchProvider, webUsable := buildWebProviders(cfg, term.humanOut())
 
-	// 技能只从规范的 .agents/skills 发现（项目级 + 用户级），
-	// 不读 Pi 私有的 .pi/skills（见 docs/skills.md）。
+	// 技能默认读规范布局（.agents/skills）与 Pi 私有布局（.pi/skills）——
+	// 后者是编排器下发 per-agent 技能的唯一天道（见 docs/skills.md）。
 	skillSet := skills.Discover(skills.Options{
 		Root:       cfg.Root,
 		ExtraPaths: cfg.Skills,
+		Files:      cfg.SkillFiles,
 		Disabled:   cfg.DisableSkills,
+		NoPiDirs:   cfg.NoPiSkills,
 	})
 
 	reg, bashMgr := tools.DefaultRegistry(tools.Options{

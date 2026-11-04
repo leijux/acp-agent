@@ -28,7 +28,9 @@
 ### 与 Pi 对齐，可直接顶替运行时
 
 - agent loop、工具契约、会话 entry 树、`-p --mode json` 事件流、`--list-models` 都对得上 Pi，Multica 这类编排器按「Pi 协议族」接入即可，不需要改协议。
-- 差异（例如 skills 只读规范的 `.agents/skills`、不读 `.pi/skills`）都写在 `docs/` 里，不藏在实现里。
+- **常驻 `--mode rpc`**：模型目录探测（`get_state` / `get_available_models`）+ 任务内的**插话（steering）**（`prompt` / `steer` / `queue_update` / `agent_settled`），版本自报 1.4.0 就为了过上游这道能力门。
+- **按智能体下发的 skills 与 MCP 直接用**：`{workDir}/.pi/skills`、`--skill <SKILL.md>` 白名单、`--extension` 里的受管 MCP、`~/.pi/agent/mcp.json`、`{workDir}/.pi/mcp.json`，以及 custom_env 里的 `ACP_AGENT_MCP_CONFIG` / `ACP_AGENT_MCP_JSON`。
+- 其余差异都写在 `docs/` 里，不藏在实现里。
 
 ### 其它
 
@@ -74,7 +76,7 @@ REPL 命令：`/help /new /compact /context /model /tools /cost /save /session /
 - 权限三档：`ask`（默认，改动前问）、`auto`、`readonly`（拒绝一切改动）。
 - 会话自动落盘为 JSONL，按工作目录分区（`sessions/<sha1(root)[:12]>/`）；`-c` 只接本项目最近一次。
 - 上下文压缩由 kernel 驱动（何时压、压哪一段由它的 nudge 给出），压缩事件实时上报。
-- **MCP**：自动加载工作目录与配置目录下的 `.mcp.json`（后者覆盖同名 server），也可 `--mcp-config <文件>` / `--mcp-json <JSON>`（后者是叠加）；远程工具名为 `mcp__<server>__<tool>`，与内建工具共用一套权限门禁。
+- **MCP**：自动加载 `~/.pi/agent/mcp.json`、工作目录与配置目录下的 `.mcp.json`（后者覆盖同名 server）、工作目录的 `.pi/mcp.json`，也可 `--mcp-config <文件>`（或 `ACP_AGENT_MCP_CONFIG`）/ `--mcp-json <JSON>`（后者是叠加）；远程工具名为 `mcp__<server>__<tool>`，与内建工具共用一套权限门禁。
 - **子代理**：`delegate` 用 ACP 拉起自身（自动加 `--permissions ask --disable-tools delegate --no-mcp`），子代理的工具确认回传主进程裁决；启动/工具调用/耗时/结论预览回显在主视图。
 - 工具集：`read` `write` `edit` `ls` `glob` `grep`、`bash`/`bash_output`/`bash_kill`、`js`、`skill`、`web_search`/`web_fetch`、`parallel`、`todo`、`delegate`，以及压缩用的 `context_check`/`context_apply`/`context_search`/`context_decompress`。`bash`/`js` 的内置引擎见上方「特点」。
 

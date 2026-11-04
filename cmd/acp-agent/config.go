@@ -60,6 +60,8 @@ type Config struct {
 	// JSONMode 由 --mode json 打开：stdout 只输出 Pi 兼容的 JSON 事件流。
 	// 只存在于本次运行，不落盘。
 	JSONMode bool `json:"-"`
+	// RPCMode 由 --mode rpc 打开：常驻 JSON-RPC（编排器用它探测模型目录）。
+	RPCMode bool `json:"-"`
 	// NoSession 由 --no-session 打开：不读也不写会话文件。
 	NoSession bool `json:"-"`
 	// JSONOut 是事件流的出口；为空时用 os.Stdout（测试用）。
@@ -72,6 +74,12 @@ type Config struct {
 	Skills []string `json:"skills,omitempty"`
 	// DisableSkills 关闭 .agents/skills 发现（--no-skills / disableSkills）。
 	DisableSkills bool `json:"disableSkills,omitempty"`
+	// NoPiSkills 不读 Pi 私有技能目录（--no-pi-skills / noPiSkills）。
+	// 默认读：编排器（Multica）把 per-agent 技能写进 <workDir>/.pi/skills。
+	NoPiSkills bool `json:"noPiSkills,omitempty"`
+	// SkillFiles 是显式点名的技能文件（Pi 的 --skill / skillFiles）。
+	// 非空时不再扫 .pi/skills：调用方已经把「该加载哪几份」列出来了。
+	SkillFiles []string `json:"skillFiles,omitempty"`
 
 	// ExtensionFiles 记录本次从 --extension 里真的取到 mcpServers 的文件，
 	// 只用于 -mcp-status 的来源显示（合并结果写进 MCPJSON 后就分不清来源了）。
@@ -165,6 +173,12 @@ func (c *Config) applyEnv() {
 	if v := os.Getenv("ACP_AGENT_MCP_JSON"); v != "" {
 		c.MCPJSON = v
 	}
+	if v := os.Getenv("ACP_AGENT_MCP_CONFIG"); v != "" {
+		// 语义与 --mcp-config 相同：只用这个文件，不再合并默认搜索链。
+		// 编排器可以把「这个智能体」的 MCP 配置落成一份单独的文件，用 per-agent
+		// 环境变量指过来（Multica 的 custom_env 就是按智能体生效的）。
+		c.MCPConfig = v
+	}
 	if v := os.Getenv("ACP_AGENT_MAX_TURNS"); v != "" {
 		// 0 / 负数表示不限制，所以要接 != 0 而不仅是 > 0。
 		if n, err := strconv.Atoi(v); err == nil && n != 0 {
@@ -253,6 +267,10 @@ func (c *Config) applyFlags(f *flags) {
 	if f.mcpConfig != "" {
 		c.MCPConfig = f.mcpConfig
 	}
+	if f.noPiSkills {
+		c.NoPiSkills = true
+	}
+	c.SkillFiles = append(c.SkillFiles, f.skillFiles...)
 	if f.mcpJSON != "" {
 		c.MCPJSON = f.mcpJSON
 	}

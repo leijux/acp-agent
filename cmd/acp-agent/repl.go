@@ -698,7 +698,9 @@ func (a *app) reloadSkills() (total, changed int, err error) {
 	skillSet := skills.Discover(skills.Options{
 		Root:       a.cfg.Root,
 		ExtraPaths: a.cfg.Skills,
+		Files:      a.cfg.SkillFiles,
 		Disabled:   a.cfg.DisableSkills,
+		NoPiDirs:   a.cfg.NoPiSkills,
 	})
 	after := map[string]bool{}
 	for _, s := range skillSet.Skills {

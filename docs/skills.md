@@ -28,7 +28,11 @@
 
 - 项目级 `<dir>/.agents/skills/**/SKILL.md`
 - 用户级 `~/.agents/skills/**/SKILL.md`
+- **Pi 私有布局（默认开）**：`<dir>/.pi/skills/**/SKILL.md`、`~/.pi/agent/skills/**/SKILL.md`
+  —— 编排器（Multica）就是按这个布局给每个智能体下发不同技能的，见 §8
 - 配置项 `skills: ["<path>", …]` 追加自定义目录
+- **显式文件（Pi 的 `--skill <path>`，可重复）**：调用方点名的 SKILL.md，优先级最高；
+  非空时不再扫 `.pi/skills`（Multica MUL-8421 的下发方式，见 §8）
 - 递归发现（任意层级，只认文件名恰好 `SKILL.md`）
 - frontmatter：`name`、`description`、`disable-model-invocation`（其余字段忽略但保留原样）
 - system prompt 注入 skill 名单
@@ -38,7 +42,6 @@
 
 | 不做 | 原因 |
 |---|---|
-| `~/.pi/agent/skills/`、`<root>/.pi/skills/` | 只用规范位置；Pi 私有布局不复制（见 §8 的取舍后果） |
 | `/skill:name` 斜杠命令 | 要动 REPL 命令表与「参数追加到指令后」的语义，本期不做。加载走 `skill` 工具 |
 | `allowed-tools` 的强制 | 规范里是实验字段；渲染进 prompt 反而诱导模型跳过权限门禁 |
 | npm/git 包分发（Pi packages） | 与 skill 发现是两件事，先有本地目录 |
@@ -54,9 +57,17 @@
 
 | 优先级 | 位置 | 扫描方式 |
 |---|---|---|
-| 1 | `<cwd>/.agents/skills/` | 从 cwd **逐层向祖先**找 `.agents/skills`，遇到 `.git` 目录那一层扫完即停（没有 `.git` 则到盘根） |
-| 2 | `~/.agents/skills/` | 单次 |
-| 3 | `settings.skills` 里的每个路径 | 单次，按配置顺序 |
+| 1 | `<cwd>/.pi/skills/` | 与 `.agents` 同一条向上链（到 `.git` 为止），**同一层里先于 `.agents`** |
+| 2 | `<cwd>/.agents/skills/` | 从 cwd **逐层向祖先**找，遇到 `.git` 目录那一层扫完即停（没有 `.git` 则到盘根） |
+| 3 | `~/.pi/agent/skills/` | 单次 |
+| 4 | `~/.agents/skills/` | 单次 |
+| 5 | `settings.skills` 里的每个路径 | 单次，按配置顺序 |
+
+层与层之间**近的赢**；同一层里 `.pi/skills` 先于 `.agents/skills`。前者是编排器
+替「这个智能体」注入的（用户显式选择的），后者是仓库里所有智能体共享的基线——
+反过来的话，仓库里残留一份同名技能就会静默盖掉智能体绑定。
+
+用 `--no-pi-skills`（或 config `noPiSkills`）可以只关掉 Pi 私有布局，`.agents` 照常。
 
 每个目录内递归（`filepath.WalkDir`），命中条件：文件名大小写敏感地等于 `SKILL.md`。
 符号链接**文件**跟随；符号链接**目录**不跟随（避免环）。
@@ -161,6 +172,8 @@ ConcurrencySafe() true
 | 开关 | 语义 |
 |---|---|
 | `--no-skills` | 现有 flag 变成真的：不发现、不注入、不注册 `skill` 工具 |
+| `--no-pi-skills` / `noPiSkills: true` | 只关 Pi 私有布局（`.pi/skills`、`~/.pi/agent/skills`），`.agents` 照常 |
+| `--skill <path>` / `skillFiles: ["<path>", …]` | 显式加载这几份技能（可重复），同时关掉 `.pi/skills` 目录扫描 |
 | `disableSkills: true` | 同上，从 config.json 关 |
 | `skills: ["<path>", …]` | 追加自定义发现目录（字段名与 Pi 兼容） |
 
@@ -176,7 +189,7 @@ ConcurrencySafe() true
 
 | 系统 | 行为 | 后果 |
 |---|---|---|
-| Multica | 给「pi 协议族」运行时注入的是 `{workDir}/.pi/skills/`（`server/internal/daemon/execenv/context.go:386`） | **不生效**。要生效只有两条路：Multica 把注入路径改成 `.agents/skills/`（它已为 antigravity 那样写过），或我们在部署时建软链接。本期不加 `.pi` 兼容层 |
+| Multica | 给「pi 协议族」运行时注入的是 `{workDir}/.pi/skills/`（`server/internal/daemon/execenv/context.go:386`），**MUL-8421 起额外用 `--skill <SKILL.md>` 逐个显式列出** | 两者都支持：`.pi/skills` 默认读（同名压过 `.agents/skills`）；收到 `--skill` 时以显式名单为准并关掉目录扫描，与上游「只加载 daemon 写的那几份」一致 |
 | Pi 本体 | 用 `read` 工具加载 SKILL.md | 我们用 `skill` 工具（原因：用户级 skill 在 `Policy.Root` 之外，`ask/readonly` 下 `read` 会被拒；且 kernel 已按 `skill` 名字做锚定） |
 | Claude Code / Antigravity | 读 `.agents/skills`（规范位置） | 资源可直接复用 |
 
@@ -191,7 +204,7 @@ ConcurrencySafe() true
 | `internal/tools/skill.go` | `skill` 工具（list / load / file），随附文件限在技能目录内 |
 | `internal/tools/skill_test.go` | 列表、加载、file 越界拒绝、未知名字给名单、工具契约（名字/参数/只读）、注册开关 |
 | `internal/agent/context.go` | `ContextOptions.Skills` + 在「项目上下文」前渲染 `## Skills` |
-| `cmd/acp-agent/main.go`、`acp_sessions.go`、`config.go`、`pimode.go` | 发现、接线，以及 `--no-skills` / `disableSkills` / `skills` 三个开关 |
+| `cmd/acp-agent/main.go`、`acp_sessions.go`、`config.go`、`pimode.go` | 发现、接线，以及 `--no-skills` / `--no-pi-skills` / `disableSkills` / `skills` 四个开关 |
 
 ---
 

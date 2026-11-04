@@ -1,14 +1,20 @@
 // Package skills 发现并解析 Agent Skills 规范（https://agentskills.io/specification）
 // 里的技能目录。
 //
-// 位置只认规范的 `.agents/skills`：
+// 位置认两种布局：
 //
 //	<cwd>/.agents/skills/**/SKILL.md      项目级（从 cwd 向祖先找到 .git 根）
 //	~/.agents/skills/**/SKILL.md          用户级
 //	+ Options.ExtraPaths 里的自定义目录
 //
-// 刻意不读 Pi 私有的 `~/.pi/agent/skills`、`<root>/.pi/skills`：只用规范位置，
-// 避免两套布局同时存在时"哪个生效"说不清。
+// 外加 Pi 的私有布局（默认开，Options.NoPiDirs 关）——编排器（例如 Multica）
+// 按 Pi 的约定把「这个智能体/这个任务该有的技能」写进 workDir 下的 .pi/skills：
+//
+//	<cwd>/.pi/skills/**/SKILL.md          项目级（同上，逐层到 .git）
+//	~/.pi/agent/skills/**/SKILL.md        用户级
+//
+// 同一层里 .pi/skills 先于 .agents/skills：前者是编排器替这个智能体注入的
+// （用户显式选择的），后者是仓库里所有智能体共享的基线；同名保留先发现的。
 //
 // 语义对齐上游 Pi：只把 name/description/location 放进 system prompt，正文在
 // 模型判断匹配时才加载（见 internal/tools 的 skill 工具）。
@@ -26,6 +32,9 @@ import (
 const (
 	// AgentsDir 是规范目录名（`<dir>/.agents/skills`）。
 	AgentsDir = ".agents"
+	// PiDir 是 Pi 的私有目录名（`<dir>/.pi/skills`、`~/.pi/agent/skills`）。
+	// 编排器（Multica 等）按这个布局下发 per-agent 技能。
+	PiDir = ".pi"
 	// SubDir 是 .agents 下的子目录名。
 	SubDir = "skills"
 	// SkillFile 是技能正文文件名（大小写敏感）。
@@ -65,6 +74,14 @@ type Options struct {
 	Home string
 	// ExtraPaths 是额外的发现目录；相对路径相对 Root。
 	ExtraPaths []string
+	// Files 是**显式指定**的技能文件（Pi 的 `--skill <path>`，可重复）。
+	// 优先级最高；非空时不再扫 `<root>/.pi/skills`——调用方已经把「该加载哪几份」
+	// 点名了，再扫目录等于把它没选的也拉进来（Multica MUL-8421 就是为此改用
+	// --skill，而不是 `--approve` 信任整个项目目录）。
+	Files []string
+	// NoPiDirs 为真时不读 Pi 私有布局（`<dir>/.pi/skills`、`~/.pi/agent/skills`）。
+	// 默认读：这是编排器下发 per-agent 技能的唯一通道（--no-pi-skills）。
+	NoPiDirs bool
 	// Disabled 为真时直接返回空结果（--no-skills / disableSkills）。
 	Disabled bool
 }
@@ -77,7 +94,8 @@ type Result struct {
 
 // Discover 扫描全部位置。
 //
-// 同名技能保留**先发现的**：项目级在用户级之前，因此项目可以覆盖用户级。
+// 同名技能保留**先发现的**：同一层 `.pi/skills` 先于 `.agents/skills`，项目级先于
+// 用户级——因此「智能体/任务注入」压过「仓库基线」，仓库压过用户默认。
 func Discover(opts Options) Result {
 	var res Result
 	if opts.Disabled {
@@ -85,6 +103,15 @@ func Discover(opts Options) Result {
 	}
 	seen := make(map[string]bool, 8)
 
+	accept := func(s Skill) {
+		if seen[s.Name] {
+			res.Warnings = append(res.Warnings,
+				fmt.Sprintf("skill %q 重复定义，忽略 %s（保留先发现的）", s.Name, s.Path))
+			return
+		}
+		seen[s.Name] = true
+		res.Skills = append(res.Skills, s)
+	}
 	addDir := func(dir string, project bool) {
 		if dir == "" {
 			return
@@ -93,17 +120,33 @@ func Discover(opts Options) Result {
 			return
 		}
 		for _, s := range scanDir(dir, project, &res.Warnings) {
-			if seen[s.Name] {
-				res.Warnings = append(res.Warnings,
-					fmt.Sprintf("skill %q 重复定义，忽略 %s（保留先发现的）", s.Name, s.Path))
-				continue
-			}
-			seen[s.Name] = true
-			res.Skills = append(res.Skills, s)
+			accept(s)
 		}
 	}
 
-	for _, dir := range projectSkillDirs(opts.Root) {
+	// 显式 `--skill <path>` 最先，且非空时不再扫 .pi 目录：调用方点名的就那几份。
+	skipPiDirs := opts.NoPiDirs || len(opts.Files) > 0
+	for _, f := range opts.Files {
+		p := strings.TrimSpace(f)
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(opts.Root, p)
+		}
+		s, warns, ok := loadSkill(filepath.Clean(resolveSkillFile(p)), true)
+		res.Warnings = append(res.Warnings, warns...)
+		if ok {
+			accept(s)
+		}
+	}
+
+	piDirs := projectSkillDirs(opts.Root, PiDir)
+	for i, dir := range projectSkillDirs(opts.Root, AgentsDir) {
+		// 同一层先 .pi（编排器替这个智能体注入的），再 .agents（仓库基线）。
+		if !skipPiDirs && i < len(piDirs) {
+			addDir(piDirs[i], true)
+		}
 		addDir(dir, true)
 	}
 	home := opts.Home
@@ -111,6 +154,9 @@ func Discover(opts Options) Result {
 		home, _ = os.UserHomeDir()
 	}
 	if home != "" {
+		if !opts.NoPiDirs {
+			addDir(filepath.Join(home, PiDir, "agent", SubDir), false)
+		}
 		addDir(filepath.Join(home, AgentsDir, SubDir), false)
 	}
 	for _, p := range opts.ExtraPaths {
@@ -126,10 +172,19 @@ func Discover(opts Options) Result {
 	return res
 }
 
-// projectSkillDirs 返回从 root 到仓库根的各层 `.agents/skills`（近的在前）。
+// resolveSkillFile 把显式技能路径归一成 SKILL.md：指目录时补上 SKILL.md
+// （Pi 的 `--skill` 两种都收，Multica 传的是文件），指文件时原样。
+func resolveSkillFile(p string) string {
+	if info, err := os.Stat(p); err == nil && info.IsDir() {
+		return filepath.Join(p, SkillFile)
+	}
+	return p
+}
+
+// projectSkillDirs 返回从 root 到仓库根的各层 `<dirName>/skills`（近的在前）。
 //
 // 到含 `.git` 的那一层为止（含）：往仓库外面扫会把「上上个项目的技能」也带进来。
-func projectSkillDirs(root string) []string {
+func projectSkillDirs(root, dirName string) []string {
 	if strings.TrimSpace(root) == "" {
 		return nil
 	}
@@ -139,7 +194,7 @@ func projectSkillDirs(root string) []string {
 	}
 	var out []string
 	for {
-		out = append(out, filepath.Join(cur, AgentsDir, SubDir))
+		out = append(out, filepath.Join(cur, dirName, SubDir))
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
 			break
 		}

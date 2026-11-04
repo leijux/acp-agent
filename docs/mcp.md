@@ -15,19 +15,25 @@ mcp.json ──▶ Config ──▶ Manager ──┬── Client (SDK) ──�
 
 ## 配置
 
-自动加载两个位置，**后者覆盖前者**的同名 server：
+四个位置都是“读多写少”：我们只读，不写回任何一份配置（避免污染真 Pi 或用户仓库）。
+实际读到了哪些文件、哪些 server 被跳过、哪些工具会触发确认，见 [诊断](#诊断)。
+
+自动加载四个位置，**靠后的覆盖靠前的**同名 server：
 
 | 顺序 | 路径 | 用途 |
 |---|---|---|
-| 1 | `<工作目录>/.mcp.json` | 项目级，可随仓库分发 |
-| 2 | `<配置目录>/.mcp.json` | 用户级，跨项目共享 |
+| 1 | `~/.pi/agent/mcp.json` | Pi 原生的用户级配置（机器级，最低）。与真 Pi 共用一份，不存在则跳过 |
+| 2 | `<工作目录>/.mcp.json` | 项目级，可随仓库分发 |
+| 3 | `<配置目录>/.mcp.json` | 用户级，跨项目共享 |
+| 4 | `<工作目录>/.pi/mcp.json` | 项目级（Pi 布局）。也是编排器给**这个智能体**下发受管 MCP 的落点，因此优先级最高 |
 
 「配置目录」= `$ACP_AGENT_CONFIG_DIR`，未设置时用系统用户配置目录：
 Windows `%AppData%\acp-agent`、Linux/macOS `~/.config/acp-agent`。
 该目录同时存放 `config.json` 与 `sessions/`。
 
 用 `--mcp-config <path>` 可跳过自动加载，只读指定文件（不与其他文件合并）。
-想复用于其他客户端的配置时用它 —— 例如 `--mcp-config ~/.pi/agent/mcp.json`。
+想复用其他客户端的配置时用它；也可以用 `ACP_AGENT_MCP_CONFIG=<path>` 环境变量给同样的语义
+—— 这是编排器按智能体注入 MCP 配置的方式（Multica 的 `custom_env` 就是按智能体生效的）。
 
 ### 命令行直接给配置
 

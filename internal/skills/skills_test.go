@@ -129,6 +129,208 @@ user
 	}
 }
 
+// .pi/skills 是编排器（Multica）替这个智能体注入的，与 .agents/skills 同名时
+// 必须压过后者——否则「给不同智能体配不同技能」会被仓库基线静默盖掉。
+func TestDiscoverPiSkillsWinOverAgents(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSkill(t, filepath.Join(root, ".agents", "skills"), "dup", `---
+description: 仓库基线版
+---
+repo
+`)
+	writeSkill(t, filepath.Join(root, ".pi", "skills"), "dup", `---
+description: 智能体注入版
+---
+agent
+`)
+	writeSkill(t, filepath.Join(root, ".pi", "skills"), "only-pi", `---
+description: 只在下发里
+---
+body
+`)
+
+	got := Discover(Options{Root: root, Home: t.TempDir()})
+	if len(got.Skills) != 2 {
+		t.Fatalf("发现 %d 个: %+v (warnings=%v)", len(got.Skills), got.Skills, got.Warnings)
+	}
+	s, ok := Find(got.Skills, "dup")
+	if !ok || s.Description != "智能体注入版" {
+		t.Fatalf(".pi/skills 应赢过 .agents/skills: %+v", s)
+	}
+	if !s.Project {
+		t.Error(".pi/skills 属于项目级（用于压过用户级）")
+	}
+	if _, ok := Find(got.Skills, "only-pi"); !ok {
+		t.Fatalf("只在下发目录里的技能丢了: %+v", got.Skills)
+	}
+}
+
+// ~/.pi/agent/skills 是 Pi 的用户级目录，优先级高于规范的 ~/.agents/skills。
+func TestDiscoverPiHomeSkills(t *testing.T) {
+	root := t.TempDir()
+	// 没有 .git 会一直往上扫到用户 home，把开发机上的真 ~/.agents/skills 也扫进来：
+	// 这个用例只验证用户级优先级，钉住仓库边界。
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	writeSkill(t, filepath.Join(home, ".agents", "skills"), "dup", `---
+description: 通用用户级
+---
+agents
+`)
+	writeSkill(t, filepath.Join(home, ".pi", "agent", "skills"), "dup", `---
+description: Pi 用户级
+---
+pi
+`)
+
+	got := Discover(Options{Root: root, Home: home})
+	if len(got.Skills) != 1 {
+		t.Fatalf("同名应只留一个: %+v", got.Skills)
+	}
+	if got.Skills[0].Description != "Pi 用户级" {
+		t.Fatalf("~/.pi/agent/skills 应压过 ~/.agents/skills，实际 %q", got.Skills[0].Description)
+	}
+	if got.Skills[0].Project {
+		t.Error("用户级技能不该标记为项目级")
+	}
+}
+
+// --no-pi-skills：两处 Pi 目录都不读，.agents 照常。
+func TestDiscoverNoPiDirs(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSkill(t, filepath.Join(root, ".pi", "skills"), "from-pi", `---
+description: 不该读
+---
+body
+`)
+	writeSkill(t, filepath.Join(home, ".pi", "agent", "skills"), "from-pi-home", `---
+description: 不该读
+---
+body
+`)
+	writeSkill(t, filepath.Join(root, ".agents", "skills"), "from-agents", `---
+description: 应该读
+---
+body
+`)
+
+	got := Discover(Options{Root: root, Home: home, NoPiDirs: true})
+	if len(got.Skills) != 1 || got.Skills[0].Name != "from-agents" {
+		t.Fatalf("NoPiDirs 时只应剩 .agents 的: %+v", got.Skills)
+	}
+}
+
+// 同一层先 .pi、再 .agents；层与层之间近的赢（与 .agents 的向上扫描共用一个边界）。
+func TestDiscoverPiLevelOrder(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSkill(t, filepath.Join(repo, ".pi", "skills"), "dup", `---
+description: 仓库根 .pi
+---
+body
+`)
+	deep := filepath.Join(repo, "pkg")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeSkill(t, filepath.Join(deep, ".agents", "skills"), "dup", `---
+description: 子目录 .agents
+---
+body
+`)
+
+	got := Discover(Options{Root: deep, Home: t.TempDir()})
+	s, ok := Find(got.Skills, "dup")
+	if !ok {
+		t.Fatalf("缺少 dup: %+v", got.Skills)
+	}
+	if s.Description != "子目录 .agents" {
+		t.Fatalf("更近的一层应赢，实际 %q", s.Description)
+	}
+
+	// 仓库外面（.git 之外）的 .pi 不该被扫
+	outside := filepath.Dir(repo)
+	writeSkill(t, filepath.Join(outside, ".pi", "skills"), "outside-pi", `---
+description: 仓库外
+---
+body
+`)
+	got = Discover(Options{Root: deep, Home: t.TempDir()})
+	if _, ok := Find(got.Skills, "outside-pi"); ok {
+		t.Fatalf(".git 之外不该被扫: %+v", got.Skills)
+	}
+}
+
+// 显式 `--skill <path>`（Multica MUL-8421 的下发方式）：只加载点名的几份，
+// 目录扫描（.pi/skills）关掉，.agents/skills 仍照旧。
+func TestDiscoverExplicitFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 下发目录里的两份
+	named := writeSkill(t, filepath.Join(root, ".pi", "skills"), "named", `---
+description: 被点名的
+---
+body
+`)
+	writeSkill(t, filepath.Join(root, ".pi", "skills"), "not-named", `---
+description: 没被点名的
+---
+body
+`)
+	// 仓库基线
+	writeSkill(t, filepath.Join(root, ".agents", "skills"), "repo", `---
+description: 仓库基线
+---
+body
+`)
+
+	got := Discover(Options{Root: root, Home: t.TempDir(), Files: []string{named}})
+	names := map[string]bool{}
+	for _, s := range got.Skills {
+		names[s.Name] = true
+	}
+	if !names["named"] {
+		t.Fatalf("显式指定的技能未加载: %v", names)
+	}
+	if names["not-named"] {
+		t.Fatalf("给了 --skill 后不该再扫 .pi/skills 目录: %v", names)
+	}
+	if !names["repo"] {
+		t.Fatalf(".agents/skills 不该因为 --skill 而失效: %v", names)
+	}
+
+	// 指目录也行（Pi 的 --skill 两种都收）
+	got = Discover(Options{Root: root, Home: t.TempDir(), Files: []string{filepath.Join(root, ".pi", "skills", "named")}})
+	if _, ok := Find(got.Skills, "named"); !ok {
+		t.Fatalf("--skill 给目录时未归一成 SKILL.md: %+v", got.Skills)
+	}
+
+	// 显式名单优先于同名基线
+	writeSkill(t, filepath.Join(root, ".agents", "skills"), "named", `---
+description: 仓库里的同名版
+---
+repo
+`)
+	got = Discover(Options{Root: root, Home: t.TempDir(), Files: []string{named}})
+	s, ok := Find(got.Skills, "named")
+	if !ok || s.Description != "被点名的" {
+		t.Fatalf("显式名单应压过 .agents 同名: %+v", s)
+	}
+}
+
 func TestDiscoverSkipsMissingDescription(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {

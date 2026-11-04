@@ -34,6 +34,9 @@ func TestLoadMCPConfig_InlineConfigReplacesFiles(t *testing.T) {
 func TestLoadMCPConfig_InlineJSONMergesAndOverrides(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("ACP_AGENT_CONFIG_DIR", filepath.Join(root, "cfg"))
+	// home 钉到临时目录：默认搜索链里有 ~/.pi/agent/mcp.json，不能读开发机上的真文件。
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("USERPROFILE", filepath.Join(root, "home"))
 	writeMCPFile(t, filepath.Join(root, ".mcp.json"),
 		`{"mcpServers":{"keep":{"command":"keep"},"same":{"command":"old"}}}`)
 

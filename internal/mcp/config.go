@@ -210,19 +210,39 @@ func LoadFiles(paths ...string) (*Config, error) {
 
 // DefaultPaths 返回默认搜索的 mcp 配置文件，靠后的覆盖靠前的同名 server：
 //
-//  1. <workDir>/.mcp.json    —— 项目级，可随仓库分发
-//  2. <configDir>/.mcp.json  —— 用户级，跨项目共享
+//  1. ~/.pi/agent/mcp.json      —— Pi 原生的用户级配置（机器级，最低）
+//  2. <workDir>/.mcp.json       —— 项目级，可随仓库分发
+//  3. <configDir>/.mcp.json     —— 用户级，跨项目共享
+//  4. <workDir>/.pi/mcp.json    —— Pi 风格的项目级配置，也是编排器（Multica）
+//     给「这个智能体」下发受管 MCP 的落点，因此排在最高（智能体意图压过仓库/用户默认）
 //
-// 要复用其他客户端的配置（例如 ~/.pi/agent/mcp.json）请用 --mcp-config 显式指定。
+// 前三条里与 Pi 相关的两个文件是为了和真 Pi 共用配置（读多写少）；不存在时静默跳过。
+// 想只读某一个文件（例如别的客户端的完整配置）用 --mcp-config 显式指定。
 func DefaultPaths(workDir string) []string {
 	var out []string
+	if p := piHomeMCPPath(); p != "" {
+		out = append(out, p)
+	}
 	if workDir != "" {
 		out = append(out, filepath.Join(workDir, ".mcp.json"))
 	}
 	if dir := ConfigDir(); dir != "" {
 		out = append(out, filepath.Join(dir, ".mcp.json"))
 	}
+	if workDir != "" {
+		out = append(out, filepath.Join(workDir, ".pi", "mcp.json"))
+	}
 	return out
+}
+
+// piHomeMCPPath 返回 Pi 原生的用户级 MCP 配置路径（~/.pi/agent/mcp.json），
+// 取不到 home 时返回空串。
+func piHomeMCPPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".pi", "agent", "mcp.json")
 }
 
 // ConfigDir 返回 acp-agent 的配置目录：ACP_AGENT_CONFIG_DIR 优先，

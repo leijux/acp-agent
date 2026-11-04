@@ -331,6 +331,60 @@ func TestPiExtensionMCPServers(t *testing.T) {
 	}
 }
 
+// Multica 从 MUL-7812 起的真实形状：JSON.parse 里是**裸 map**（server 名 → 配置），
+// 没有 mcpServers 包装（它把内层 map 直接交给 pi.registerMcpServer）。
+func TestPiExtensionMCPServers_BareMap(t *testing.T) {
+	// 与 writePiMcpExtension 逐行对齐：map → json → 字符串字面量 → JSON.parse(…)。
+	servers := map[string]any{
+		"playwright": map[string]any{
+			"command": "node", "args": []string{"cli.js", "--headless"},
+			"timeout": 120, "exposure": "direct",
+		},
+		"docs": map[string]any{
+			"url": "https://x.example/mcp", "headers": map[string]string{"Authorization": "Bearer t"},
+		},
+	}
+	encoded, err := json.Marshal(servers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal, err := json.Marshal(string(encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "const servers = JSON.parse(" + string(literal) + ");\n" +
+		"export default function (pi) {\n" +
+		"  for (const [name, config] of Object.entries(servers)) { pi.registerMcpServer(name, config); }\n" +
+		"}\n"
+	path := filepath.Join(t.TempDir(), "mcp-extension.mjs")
+	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := piExtensionMCPServers(path)
+	if err != nil {
+		t.Fatalf("解析失败: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("server 数 = %d, want 2：%v", len(got), got)
+	}
+	var pw struct {
+		Command  string   `json:"command"`
+		Args     []string `json:"args"`
+		Timeout  int      `json:"timeout"`
+		Exposure string   `json:"exposure"`
+	}
+	if err := json.Unmarshal(got["playwright"], &pw); err != nil {
+		t.Fatal(err)
+	}
+	if pw.Command != "node" || len(pw.Args) != 2 || pw.Timeout != 120 || pw.Exposure != "direct" {
+		t.Errorf("playwright 配置解析错误: %+v", pw)
+	}
+	if _, ok := got["docs"]; !ok {
+		t.Errorf("docs server 丢失: %v", got)
+	}
+}
+
 func TestPiExtensionMCPServers_IgnoresUnknownScript(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "plain.mjs")
 	if err := os.WriteFile(path, []byte("export default function (pi) {}\n"), 0o600); err != nil {
@@ -614,7 +668,8 @@ func TestApplyRunModeValidation(t *testing.T) {
 		{name: "json + 显式 prompt", flags: flags{mode: piModeJSON, print: "任务"}, want: true},
 		{name: "json 漏 -p", flags: flags{mode: piModeJSON}, wantErr: true},
 		{name: "json 与 acp 冲突", flags: flags{mode: piModeJSON, print: "x", acpMode: true}, wantErr: true},
-		{name: "rpc 不支持", flags: flags{mode: piModeRPC}, wantErr: true},
+		{name: "rpc（只读探测面）", flags: flags{mode: piModeRPC}, want: false},
+		{name: "rpc 与 acp 冲突", flags: flags{mode: piModeRPC, acpMode: true}, wantErr: true},
 		{name: "拼错的模式", flags: flags{mode: "yaml", print: "x"}, wantErr: true},
 	}
 	for _, c := range cases {

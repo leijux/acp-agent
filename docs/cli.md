@@ -321,6 +321,8 @@ echo "把 go.mod 的 Go 版本升到 1.28" \
               --model deepseek/deepseek-flash --thinking high
 ```
 
+另有一条常驻的 `--mode rpc`（探测 + steering），见下表以及下面的「事件与 steering」。
+
 | 行为 | 说明 |
 |---|---|
 | `-p` / `--print` | 无值开关：后面紧跟**已知 flag**（或没有参数）时按「从 stdin 读 prompt」处理，等价 `-p -`；手打 `-p "任务"`、以及以 `-` 开头的 prompt（如 markdown 列表）原样当值 |
@@ -328,13 +330,15 @@ echo "把 go.mod 的 Go 版本升到 1.28" \
 | `--session <路径>` | 原样复用：文件已存在（哪怕是空文件，编排器冷启动会先建）就加载，运行完写回同一路径 |
 | `--model <provider>/<id>` | 目录里的选择器，前缀是已知端点时自动拆成 provider + model；**但只在没指定 provider（或前缀就是当前 provider）时才拆** —— `openrouter` 的模型 ID 天生带斜杠（`openai/gpt-5`），无脑拆会静默换端点、换计费 |
 | `--thinking <level>` | 同 `--thinking` |
-| `--extension <file>` | 从扩展文件里的 `JSON.parse("…")` 取 `mcpServers`，叠加到已读到的 MCP 配置上；脚本里有多处 `JSON.parse` 会逐个试，取第一份带 `mcpServers` 的；找不到会打一行警告。坏条目逐个跳过，不拖垮运行 |
+| `--skill <path>` | 显式加载这几份技能（可重复；值可指 SKILL.md 或目录）。Multica MUL-8421 起就这么下发 per-agent 技能（Pi 1.x 不信任项目目录，所以不再靠 `.pi/skills` 目录发现）。**给了 `--skill` 后不再扫 `.pi/skills`**，`.agents/skills` 照旧 |
+| `--extension <file>` | 从扩展文件里的 `JSON.parse("…")` 取 MCP server，叠加到已读到的 MCP 配置上。两种形状都收：`{"mcpServers":{…}}` 与**裸 map** `{"<name>":{…}}`（Multica MUL-7812 生成的 `mcp-extension.mjs` 是后者）；脚本里有多处 `JSON.parse` 会逐个试，取第一份能用的；找不到会打一行警告。坏条目逐个跳过，不拖垮运行 |
 | `--no-session` / `--no-context-files` | 不读也不写会话文件 / 不注入 `AGENTS.md` 等上下文文件 |
 | `--no-skills` | 不加载 `.agents/skills`（技能发现见 [skills.md](skills.md)） |
+| `--no-pi-skills` | 不读 Pi 私有技能目录（`<root>/.pi/skills`、`~/.pi/agent/skills`）。**默认读**：Multica 按这个布局给每个智能体下发不同技能，且同名时压过 `.agents/skills` |
 | `--no-prompt-templates` | 接受但忽略（无 prompt 模板机制） |
 | `--list-models` | 打印 `provider  model  context  max-output` 表格后退出 |
 | `models [--json]` | 打印 `{"models":[{provider,id,selector,…}]}` 后退出 |
-| `--mode rpc` | 不支持，立即以非 0 退出（探测方会回退到 `--list-models`） |
+| `--mode rpc` | **常驻 JSON-RPC**（stdin 一行命令、stdout 一行 JSON），同一个模式承担两件事：① 探测：`get_state` / `get_available_models`（Multica 用它拿 `reasoning` / `thinkingLevelMap`，决定 UI 要不要显示思考档位）；② 任务执行 + steering：`prompt` 投递任务、`steer` 运行中插话、事件流与 `--mode json` 相同、收尾补一条 `agent_settled`。不需要 `-p`、探测路径也不需要 API key；未知命令回 `success:false`，stdin EOF 时探测直接退、任务则等这一轮跑完 |
 
 事件流的类型与字段就是 Pi 的那一套（`internal/agent/events.go` 的事件名本来就是照它抄的）：
 
@@ -370,10 +374,66 @@ echo "把 go.mod 的 Go 版本升到 1.28" \
   `<path>.corrupt-<时间戳>` 后当新会话跑，结果写回同一路径——下一轮仍能 resume，
   不会因为一个坏文件把这个任务永久钉死。
 
+#### 常驻 RPC（`--mode rpc`）与 steering
+
+同一个模式承担两件事，靠「有没有收到 `prompt`」自然分流：
+
+```jsonc
+// 探测（不需要 API key）：
+{"id":"multica-state","type":"get_state"}
+{"id":"multica-models","type":"get_available_models"}
+
+// 任务 + 插话（事件流与 --mode json 完全相同）：
+{"id":"initial-prompt","type":"prompt","message":"把 README 改一下"}
+{"id":"steer-1","type":"steer","message":"顺便跑一下测试"}
+```
+
+| 命令 | 我们的行为 |
+|---|---|
+| `get_state` | 回报当前 `provider/id` + `reasoning`/`thinkingLevelMap` + `thinkingLevel`（对应 `--version` 之外的另一个“默认模型”信号） |
+| `get_available_models` | 与 `--list-models` 同源的目录，带 `reasoning`（取 `SupportsThinking`） |
+| `prompt` | 开一轮；**回 `disposition:"queued"`**。回 `handled` 会被调用方当成「整轮已结束」，它会立刻关 stdin 并停掉 supplement（steering 就送不进来了） |
+| `steer` | `agent.Steer()` 排进当前轮；回 `queued` + 一条 `queue_update` 快照 |
+| 其它 | `success:false` + `error`，进程继续 |
+
+steering 的**送达凭证**：插话在「本轮 assistant 结束、下一轮开始」时真正进入上下文，
+所以我们在那一瞬（`turn_start`）补一条 `role=user`、正文完全一致的 `message_start`。
+调用方就是拿「精确文本匹配」当收据的——只回 `queued` 不算数。收尾必须补
+`agent_settled`，否则整轮会被判成 `pi RPC exited before agent_settled`。
+
+> 因为版本自报 1.4.0，Multica 对**带 issue 的任务**会直接走 `--mode rpc`（不再是
+> `-p --mode json`）；无 issue 的 chat 任务仍然走 json。两条路径共用同一个
+> `app.runOnce`，所以工具/MCP/会话/压缩的行为一致。
+
 Multica 侧接入（守护进程不认识新二进制名）：运行时页面 → 该电脑 → **添加自定义运行时** →
-协议族选 **Pi**，命令填 `acp-agent` 的绝对路径；或直接 `MULTICA_PI_PATH=<路径>`。
-skill 只读规范的 `.agents/skills/`，Multica 注入的 `.pi/skills/` 不生效（要么改注入路径，要么建软链接，见 [skills.md](skills.md)）；`~/.pi/agent/mcp.json` 也不读，
-MCP 请走 `.mcp.json` / `--mcp-json` / `--extension`。
+协议族选 **Pi**，命令填 `acp-agent` 的绝对路径；或直接 `MULTICA_PI_PATH=<路径>`。两种都能用，
+区别只在版本门：
+
+| 接入方式 | `BuiltinRuntime` | 上游的版本门 |
+|---|---|---|
+| 添加自定义运行时（协议族 Pi） | false | MCP / steering 的检查都不做（`--version` 只用于展示） |
+| `MULTICA_PI_PATH=<路径>` | true | 按内置运行时处理：受管 MCP 要求 **≥0.99.0**；task supplement（steering）要求 **≥1.4.0**，过线后**每一次 issue 任务的 argv 都会换成 `--mode rpc`**（不再是 `-p --mode json`） |
+
+所以我们的 `--version` 输出形如 `1.4.0+v1.4.0-3-gabc123-dirty`（源码里的
+`defaultVersion` 是能力级别，后面跟 git 描述当构建标识；编排器的正则只吃到
+第一个 semver）。这个数字是**能力声明**而不是发布号：
+
+- ≥0.99.0 → 才能拿到受管 MCP（否则配了 MCP 的任务直接报 `pi MCP requires a newer version`）；
+- ≥1.4.0 → 才会协商 steering；我们已经实现了那条 RPC 面（`prompt` / `steer` /
+  `agent_settled`），所以可以把 issue 任务交给 `--mode rpc`；
+- 再高就没意义了——更高的门槛对应我们没实现的能力。
+
+对应的回归测试：`cmd/acp-agent/version_test.go` 的 `TestDefaultVersionSatisfiesRuntimeGates`。
+
+两边能对齐的按 agent 下发面只有两个，正好都是 workDir 和 custom_env：
+
+| 面 | Multica 的行为 | 我们 |
+|---|---|---|
+| skills | 把该智能体绑定的技能写进 `{workDir}/.pi/skills/`，**并用 `--skill <SKILL.md>` 逐个显式列出**（MUL-8421）；brief 写进 `{workDir}/AGENTS.md` | **直接用**：收到 `--skill` 就以这份名单为准并关掉 `.pi/skills` 目录扫描；没收到时 `.pi/skills` 默认读且压过仓库的 `.agents/skills`；`AGENTS.md` 照旧读 |
+| MCP | pi 家族**不**下发（官方矩阵里 Pi/omp 的 Multica-managed MCP 就是 `—`）；`mcp_config` 到不了命令行 | 两条路：① 读 Pi 原生文件 `~/.pi/agent/mcp.json` / `{workDir}/.pi/mcp.json`；② per-agent 用 custom_env 指一份配置：`ACP_AGENT_MCP_CONFIG=<路径>`（语义同 `--mcp-config`）或 `ACP_AGENT_MCP_JSON={...}` |
+
+`~/.pi/agent/mcp.json` 的格式与 `.mcp.json` 完全一致（`mcpServers` + `command`/`args`/`url`/`headers`/`timeout`），
+所以和真 Pi 共用一份配置即可；见 [mcp.md](mcp.md)。
 
 从 `--extension` 拿到的 server 还会过一遍我们自己的校验，两类会**跳过并警告**：
 传输写 `type:"sse"`（我们只走 stdio / streamable-http），以及名字带 `.` `:` 之类字符的

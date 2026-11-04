@@ -266,3 +266,65 @@ func TestConfigSkillsOptions(t *testing.T) {
 		t.Fatal("--no-skills 应置 DisableSkills")
 	}
 }
+
+// --no-pi-skills 关掉 Pi 私有目录；默认与 --no-skills 无关（两者正交）。
+func TestNoPiSkillsFlag(t *testing.T) {
+	f, err := parseFlags([]string{"-p", "x", "--no-pi-skills"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	var cfg Config
+	cfg.applyFlags(f)
+	if !cfg.NoPiSkills {
+		t.Fatal("--no-pi-skills 应置 NoPiSkills")
+	}
+	if cfg.DisableSkills {
+		t.Fatal("--no-pi-skills 不该连带关掉 .agents/skills")
+	}
+
+	// 默认不关
+	var def Config
+	f2, err := parseFlags([]string{"-p", "x"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	def.applyFlags(f2)
+	if def.NoPiSkills {
+		t.Fatal("默认应读 Pi 私有技能目录")
+	}
+}
+
+// --skill 可重复，且值必须是路径（会被原样收进 SkillFiles）。
+func TestSkillFlagRepeats(t *testing.T) {
+	f, err := parseFlags([]string{
+		"-p", "x",
+		"--skill", "/tmp/a/SKILL.md",
+		"--skill=/tmp/b/SKILL.md",
+	})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if len(f.skillFiles) != 2 || f.skillFiles[0] != "/tmp/a/SKILL.md" || f.skillFiles[1] != "/tmp/b/SKILL.md" {
+		t.Fatalf("skillFiles = %v", f.skillFiles)
+	}
+	var cfg Config
+	cfg.applyFlags(f)
+	if len(cfg.SkillFiles) != 2 {
+		t.Fatalf("SkillFiles = %v", cfg.SkillFiles)
+	}
+}
+
+// ACP_AGENT_MCP_CONFIG 让编排器按智能体注入一份 MCP 配置文件（语义同 --mcp-config）。
+func TestMCPConfigEnv(t *testing.T) {
+	t.Setenv("ACP_AGENT_MCP_CONFIG", "/tmp/agent-42.json")
+	var cfg Config
+	cfg.applyEnv()
+	if cfg.MCPConfig != "/tmp/agent-42.json" {
+		t.Fatalf("MCPConfig = %q", cfg.MCPConfig)
+	}
+	// flag 优先于环境变量
+	cfg.applyFlags(&flags{mcpConfig: "/tmp/explicit.json"})
+	if cfg.MCPConfig != "/tmp/explicit.json" {
+		t.Fatalf("flag 应覆盖环境变量，得到 %q", cfg.MCPConfig)
+	}
+}
