@@ -1,6 +1,7 @@
 // Command acp-agent 是一个完整的终端编码 agent：
 //
-//	acp-agent                    交互式 REPL
+//	acp-agent                    交互式界面（Bubble Tea TUI）
+//	acp-agent -r                 列出本项目的历史会话，选一个继续
 //	acp-agent -p "修复 TestFoo"   非交互，流式输出到 stdout
 //	acp-agent --acp              作为 ACP agent 服务（供 Zed 等编辑器调用）
 //
@@ -92,6 +93,8 @@ type flags struct {
 	root           string
 	session        string
 	cont           bool
+	resume         string // -r 的选择器：编号（1 = 最近）或路径；空 = 列出本项目会话后选
+	resumeSet      bool   // -r 是否被给出（裸 -r 与「没给」的值都是空串，靠它区分）
 	maxTurns       int
 	maxTurnsSet    bool // --max-turns 被显式给出（含 0 / 负数 = 不限制）
 	thinking       string
@@ -134,7 +137,6 @@ type flags struct {
 	webSearch     string
 	webSearchKey  string
 	noWeb         bool
-	noTUI         bool
 }
 
 // newFlagSet 注册全部 flag。
@@ -160,6 +162,8 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.StringVar(&f.session, "session", "", "会话文件路径（JSONL）")
 	fs.BoolVar(&f.cont, "c", false, "继续最近一次会话")
 	fs.BoolVar(&f.cont, "continue", false, "继续最近一次会话（同 -c）")
+	fs.StringVar(&f.resume, "r", "", "选择要继续的会话：编号（1 = 最近）或文件路径；省略值 = 列出本项目会话后选")
+	fs.StringVar(&f.resume, "resume", "", "选择要继续的会话（同 -r）")
 	fs.IntVar(&f.maxTurns, "max-turns", 0, "单次运行的最大轮数；0 或负数 = 不限制（默认 500）")
 	fs.StringVar(&f.thinking, "thinking", "", "思考等级：off/minimal/low/medium/high/max（默认 medium）")
 	fs.Float64Var(&f.temperature, "temperature", 0, "采样温度（推理模型自动忽略）")
@@ -201,7 +205,6 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.StringVar(&f.webSearch, "web-search", "", "web_search 后端：duckduckgo/searxng/tavily/brave/exa/off")
 	fs.StringVar(&f.webSearchKey, "web-search-key", "", "web_search 后端的 API key（searxng/duckduckgo 不需要）")
 	fs.BoolVar(&f.noWeb, "no-web", false, "关闭 web_search/web_fetch")
-	fs.BoolVar(&f.noTUI, "no-tui", false, "用旧版行式 REPL（不用 Bubble Tea 界面）")
 
 	// Pi 的 no-* 系列：我们没有对应资源可关的接受并忽略；no-tools / no-builtin-tools
 	// 是真语义（走 DisableTools 的 "*"）。必须认全：解析失败会打印整段 usage，
@@ -229,7 +232,7 @@ func newFlagSet(f *flags) *flag.FlagSet {
 // （见 run），避免整段 usage 落进 stderr 被编排器当成数据。
 func printUsage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintf(w, "acp-agent %s — 终端编码 agent\n\n", resolveVersion())
-	fmt.Fprintf(w, "用法:\n  acp-agent [flags]            交互式 REPL\n")
+	fmt.Fprintf(w, "用法:\n  acp-agent [flags]            交互式界面\n")
 	fmt.Fprintf(w, "  acp-agent -p \"任务\" [flags]   执行一次后退出\n")
 	fmt.Fprintf(w, "  acp-agent \"任务\" [flags]      同上（位置参数等价于 -p）\n")
 	fmt.Fprintf(w, "  acp-agent --acp [flags]      作为 ACP agent 服务\n")
@@ -238,6 +241,7 @@ func printUsage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintf(w, "  export DEEPSEEK_API_KEY=sk-...\n")
 	fmt.Fprintf(w, "  acp-agent -p \"列出 internal/ 下所有包的用途\"\n")
 	fmt.Fprintf(w, "  acp-agent -c \"接着上次的继续改\"\n")
+	fmt.Fprintf(w, "  acp-agent -r                列出本项目的会话，选一个继续\n")
 	fmt.Fprintf(w, "  acp-agent --provider ollama --model qwen3-coder\n")
 	fmt.Fprintf(w, "  acp-agent --web-search tavily --web-search-key tvly-... -p \"最新 Go 1.28 有什么变化\"\n")
 	fmt.Fprintf(w, "  acp-agent --no-web -p \"离线看一下代码\"\n")
@@ -246,6 +250,24 @@ func printUsage(w io.Writer, fs *flag.FlagSet) {
 	fs.SetOutput(w)
 	fs.PrintDefaults()
 	fs.SetOutput(io.Discard)
+}
+
+// resumePicker 返回裸 -r（没给选择器值）时能读的那条输入通道。
+//
+// 只有「真终端 + 非 ACP / 非 -p / 非 rpc / 非 -mcp-status」才有得选：其它形态下
+// stdin 是协议帧或被管道灌进来的 prompt，抢读会把调用方的字节吃掉。
+// 没得选时返回 nil，由 resolveResume 报一个说得清的错误。
+func resumePicker(f *flags, cfg Config) *bufio.Reader {
+	if f.resume != "" { // 有选择器值（编号/路径）就不用问
+		return nil
+	}
+	if f.acpMode || cfg.RPCMode || f.mcpStatus || f.print != "" {
+		return nil
+	}
+	if !xterm.IsTerminal(int(os.Stdin.Fd())) {
+		return nil
+	}
+	return bufio.NewReader(os.Stdin)
 }
 
 func parseFlags(args []string) (*flags, error) {
@@ -287,6 +309,9 @@ func parseFlags(args []string) (*flags, error) {
 			// 只看值区分不了「没给」与「显式不限」：两者都是 0 附近的值，
 			// 而语义相反（一个用默认兜底、一个完全不管）。必须问 flag 包。
 			f.maxTurnsSet = true
+		case "r", "resume":
+			// 同理：裸 -r（弹列表）与没给 -r 的值都是空串。
+			f.resumeSet = true
 		}
 	})
 	return f, nil
@@ -344,6 +369,22 @@ func run() error {
 		cfg.Root = abs
 	}
 
+	// -r 选会话：解析成具体文件后与 --session 走同一条加载路径。
+	// 放在这里是因为①会话分区靠 cfg.Root（得先绝对化）；②裸 -r 要读一行选择，
+	// 那时 stdin 还不能被界面 / JSON-RPC 接管。
+	if f.resumeSet {
+		if cfg.Session != "" {
+			return errors.New("参数冲突：--session 已指定会话文件，与 -r 二选一")
+		}
+		path, err := resolveResume(f.resume, newSessionStore(cfg.Root), resumePicker(f, cfg), os.Stderr)
+		if err != nil {
+			return err
+		}
+		cfg.Session = path // 空 = 用户取消 / 没有历史 → 新会话
+	}
+
+	in := bufio.NewReader(os.Stdin)
+
 	// Pi 的常驻 JSON-RPC 面：探测（不需要 key）与任务执行 + steering 共用
 	// 同一条通道，所以放在 MCP 配置合并之后、buildProvider 之前。
 	if cfg.RPCMode {
@@ -363,7 +404,6 @@ func run() error {
 		return err
 	}
 
-	in := bufio.NewReader(os.Stdin)
 	termOut := newTerminal(os.Stdout, f.noColor || os.Getenv("NO_COLOR") != "")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -415,12 +455,13 @@ func run() error {
 		}
 		return runErr
 	default:
-		// 真终端默认走 Bubble Tea 界面；stdout 被重定向时退回行式 REPL，
-		// 否则整屏重绘的 ANSI 会把管道/文件写花。
-		if interactive && !f.noTUI && xterm.IsTerminal(int(os.Stdout.Fd())) {
-			return app.tuiRepl(ctx, f.cont)
+		// 只剩 Bubble Tea 界面了（行式 REPL 已删）：它需要真终端。
+		// stdin/stdout 任一被重定向时没有可用的交互通道，直接报错而不是
+		// 退化成「人看不见的界面」或去抢 stdin（那可能是别人的管道）。
+		if !interactive || !xterm.IsTerminal(int(os.Stdout.Fd())) {
+			return errors.New("交互界面需要终端（stdin 与 stdout 都是 TTY）；非交互请用 -p \"任务\"")
 		}
-		return app.repl(ctx, f.cont)
+		return app.tuiRepl(ctx, f.cont)
 	}
 }
 
@@ -475,7 +516,6 @@ type app struct {
 	sess     *agent.Session
 	sessPath string
 	store    sessionStore
-	in       *bufio.Reader
 	term     *terminal
 	started  time.Time
 
@@ -487,10 +527,9 @@ type app struct {
 	// subPerm 记住子代理授权里的「总是允许/总是拒绝」。
 	subPerm subagentPermCache
 
-	// keys 是 REPL 的按键层（仅终端可用）；为 nil 时退回行模式读取。
-	keys *keyWatcher
+	// Esc 由界面自己处理（行式 REPL 的按键层已随之删除）。
 
-	// ui 是 Bubble Tea 界面句柄；非 TUI 模式（--no-tui、非终端）下为 nil。
+	// ui 是 Bubble Tea 界面句柄；只有交互模式才会被赋值，-p / ACP 下为 nil。
 	ui *tui.UI
 
 	// jsonSink 是 --mode json 的事件流出口；其它模式下为 nil。
@@ -624,7 +663,6 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 		sess:      sess,
 		sessPath:  sessPath,
 		store:     newSessionStore(cfg.Root),
-		in:        in,
 		term:      term,
 		started:   time.Now(),
 	}

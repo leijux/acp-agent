@@ -318,7 +318,7 @@ func TestSubagentLineGoesToToolBlock(t *testing.T) {
 	}
 }
 
-// 非 TUI（-p / --no-tui）仍走 stderr：stdout 是「结果」，不能掺日志。
+// 非 TUI（-p）仍走 stderr：stdout 是「结果」，不能掺日志。
 func TestSubagentLineUsesStderrWithoutUI(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	term := &terminal{out: &out, errOut: &errBuf}

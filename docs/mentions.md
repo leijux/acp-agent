@@ -1,6 +1,9 @@
 # @文件 / @文件夹（设计规格）
 
-> 状态：**设计，未实现**。落地时按此写；有分歧先改这份文档。
+> 状态：**P1 + P2 已实现**（展开 + Tab 补全）；P3（候选浮层、行号裁剪、段匹配）未做。
+> 实现：`internal/mentions`（Parse / Expand / Complete）、`internal/fsutil`（路径解析与跳过表，
+> 与 `internal/tools` 共用）、`cmd/acp-agent/mentions.go`（接线 + 摘要/警告）、
+> `internal/tui/complete.go`（Tab 补全）。关闭开关：`--no-mentions`。
 >
 > 目标：在提示词里写 `@path` 就能把该文件（或目录清单）灌进这一轮的上下文，
 > 与 Pi / Claude Code 的 `@` 语义对齐；同时给交互界面（Bubble Tea）加 `@` 路径补全。
@@ -95,8 +98,8 @@ type Options struct {
     MaxFileBytes  int64 // 默认 256<<10
     MaxFiles      int
     MaxTotalBytes int64
-    AllowOutside  bool
-    SkipDirs      map[string]bool // 复用 internal/tools 的 skipDirs（需导出/抽包）
+    MaxDirEntries int
+    AllowOutside  bool // 与 tools.Policy.AllowOutside 同口径（permissions=auto 才开）
 }
 
 type Attachment struct {
@@ -116,6 +119,7 @@ type Result struct {
 
 func Parse(text string) []Token           // 只扫描，不碰磁盘（补全也用它）
 func Expand(opts Options, text string) Result
+func Complete(root, line string, cur, max int) (cands []string, start, end int)
 ```
 
 调用点（都在 `agent.Run` **之前**，因此历史里存的是展开后的文本，resume 不依赖磁盘再展开）：
@@ -162,8 +166,8 @@ func Expand(opts Options, text string) Result
 ## 7. 安全与可见性
 
 - 路径解析**复用** `tools.Resolve` 的语义（root 内相对路径、`~` 展开、越界需
-  `AllowOutside`）。建议把它抽到 `internal/fsutil`，`tools` 与 `mentions` 共用，
-  避免两套规则漂移。
+  `AllowOutside`）——已抽到 `internal/fsutil`，`tools.Policy.Resolve` 与 `skipDirs`
+  都改成复用它，两套边界检查不会漂移（漂一次就是安全洞）。
 - 越界直接拒绝（`skipped="outside"`），不读文件。
 - 不额外屏蔽 `.env` / 私钥：显式 `@` 就是显式授权。但**必须回显附件清单**
   （TUI note / stderr 一行），让误 @ 能被立刻发现 —— 这是可见性要求，不是过滤。
@@ -180,22 +184,22 @@ func Expand(opts Options, text string) Result
   V2 再加 `viewString()` 行数不变式。
 - 不变式：同一 prompt 两次 `Expand` 结果一致（幂等，便于重试）。
 
-## 9. 待拍板（附建议）
+## 9. 待拍板的问题（已定）
 
-| # | 问题 | 建议 |
+| # | 问题 | 结论 |
 |---|---|---|
-| a | ACP 是否也展开 `@` | **默认关**，加 `--acp-mentions`：ACP 客户端有原生 `resource_link`，`@` 文本可能被客户端自己消费，双份注入比不注入更糟 |
+| a | ACP 是否也展开 `@` | **不支持**（用户拍板）：ACP 客户端有原生 `resource_link`，双份注入比不注入更糟 |
 | b | 目录清单层级 | 1 层（子目录带 `/`）；要内容就 `@具体文件` |
 | c | 是否保留 `@token` 原文 | 保留（§3） |
-| d | `@a.go:10-40` 是否裁剪 | v1 只标注；P3 再按 `read` 的 offset/limit 裁剪 |
-| e | 补全是否支持模糊/段缩写（`@t/b` → `internal/tools/builtin.go`） | V1 字面前缀，V2 再加 |
-| f | Tab 不再插入 `\t` | 接受（终端无法区分 Ctrl+I） |
+| d | `@a.go:10-40` 是否裁剪 | v1 只标注行号，不裁剪；真要裁再按 `read` 的 offset/limit 做 |
+| e | 补全是否支持模糊/段缩写（`@t/b` → `internal/tools/builtin.go`） | V1 字面前缀；逐层下钻已经够用，除非仓库特别深 |
+| f | Tab 不再插入 `\t` | **已改**：Tab = 补全（字面 Tab 只能粘贴） |
 
 ## 10. 分期
 
-- **P1**：`internal/mentions` + 6 处接线 + 预算/安全/日志 + 测试。约 1 天。
-- **P2**：Tab 补全 V1（TUI + `keyinput.go`）。约半天。
-- **P3**：候选浮层 V2、行号裁剪、段匹配。约半天。
+- **P1（已完成）**：`internal/mentions` + 4 处接线（`runOnce` / TUI 一轮 / TUI 插话 / ACP 不展开）+ 预算/安全/日志 + 测试。
+- **P2（已完成）**：Tab 补全 V1（`internal/tui/complete.go`：唯一候选直接替换、多候选补公共前缀 + 状态行提示）。
+- **P3（未做）**：候选浮层（`layout()` 预留行）、行号裁剪、段匹配（`@t/b`）。
 
 ## 11. 与 Multica 的边界
 

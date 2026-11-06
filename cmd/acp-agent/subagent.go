@@ -314,7 +314,7 @@ func pickOption(opts []acp.PermissionOption, kinds ...string) string {
 //
 // 为什么不能直接写 stderr：TUI 下屏幕归 bubbletea 独占，往 stderr 写会
 // 把正在重绘的界面搅成乱码（而且这些行不进块视图，滚一下就没了）。
-// 所以交互界面里走 term.printf → 行缓冲 → 工具块；-p / --no-tui 仍走 stderr，
+// 所以交互界面里走 term.printf → 行缓冲 → 工具块；-p 仍走 stderr，
 // 因为 -p 的 stdout 是「结果」，不能掺日志。
 func (a *app) subagentLine(format string, args ...any) {
 	if a.term == nil {

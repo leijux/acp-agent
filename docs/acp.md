@@ -118,7 +118,7 @@ agent.ToolExecutionEndEvent           → tool_call_update(completed|failed)
 `delegate` 工具不跑在进程内，而是把本程序以 `--acp` 再拉起一个进程，用 ACP 协议驱动：
 
 ```
-主进程 (REPL)  ──spawn──▶  acp-agent --acp（stdio JSON-RPC）
+主进程 (TUI)  ──spawn──▶  acp-agent --acp（stdio JSON-RPC）
      │ client 侧                     │ agent 侧
      ├──── initialize / session/new ─▶│
      ├──── session/prompt ───────────▶│
@@ -148,7 +148,7 @@ LLM 往返可以忽略；实测本地假 provider 下 delegate 往返 **19ms**�
 
 | 主进程模式 | 子代理授权由谁裁决 |
 |---|---|
-| 本地 REPL（stdin 是 TTY） | 终端里问 `[y]/a/n/d` |
+| 本地交互界面（stdin 是 TTY） | 终端里问 `[y]/a/n/d` |
 | ACP 模式（stdin 是 JSON-RPC） | 转成 `session/request_permission` 发给客户端弹窗 |
 | stdin 非 TTY 且非 ACP | 直接拒绝（不会去读 stdin） |
 
@@ -179,12 +179,11 @@ LLM 往返可以忽略；实测本地假 provider 下 delegate 往返 **19ms**�
   自己维护一份 `noUI` 标记）。这类客户端请用 `permissions=auto` 或 `readonly`。
 - **单会话单 prompt**：并发 `session/prompt` 会被拒绝（`-32600`），
   而不是排队 —— 两个 turn 交错会写坏同一条消息历史。
-- **REPL 里 Esc 打断权限询问会遗留一次 stdin 读**：`guard.ask` 用 goroutine
-  调 `bufio.Reader.ReadString`（阻塞读本身不可取消），`ctx` 取消只是让调用方
-  先返回，那个 goroutine 仍挂在 `os.Stdin` 上，可能吞掉用户紧接着输入的一行。
-  非交互路径（ACP / `-p` / stdin 不是 TTY）根本不读 stdin，不受影响。
-  根治需要把「stdin 唯一读者」提升为架构约束（单一常驻读循环 + 可取消的
-  请求队列），而不只是给 `ask` 加超时。
+- **交互界面里 Esc 打断权限询问不会遗留 stdin 读**：`ask` 在交互界面下走
+  `askTUI`（界面自己的确认行），不读 stdin；只有无界面时的兜底分支才用 goroutine
+  调 `bufio.Reader.ReadString`（阻塞读本身不可取消），那种情况下 `ctx` 取消只是让
+  调用方先返回，goroutine 仍挂在 `os.Stdin` 上。非交互路径（ACP / `-p` / stdin 不是 TTY）
+  根本不读 stdin，不受影响。
 
 ## 测试
 

@@ -204,3 +204,38 @@ func (f fakeTool) Mutates() bool                      { return false }
 func (f fakeTool) Execute(context.Context, tools.Args) (tools.Result, error) {
 	return tools.Result{}, nil
 }
+
+// -r 的三种形状：裸 -r（弹列表）、-r 2（编号）、-r <路径>。
+func TestParseFlags_Resume(t *testing.T) {
+	cases := []struct {
+		args []string
+		sel  string
+	}{
+		{[]string{"-r"}, ""},
+		{[]string{"--resume"}, ""},
+		{[]string{"-r", "--no-color"}, ""}, // 紧跟已知 flag = 裸 -r，不能把 --no-color 吃成值
+		{[]string{"-r", "2"}, "2"},         // 编号仍然是值
+		{[]string{"-r", "./x.jsonl"}, "./x.jsonl"},
+	}
+	for _, c := range cases {
+		f, err := parseFlags(c.args)
+		if err != nil {
+			t.Fatalf("%v 解析失败: %v", c.args, err)
+		}
+		if !f.resumeSet {
+			t.Fatalf("%v：-r 没有被记成「已给出」", c.args)
+		}
+		if f.resume != c.sel {
+			t.Fatalf("%v：resume = %q，期望 %q", c.args, f.resume, c.sel)
+		}
+	}
+
+	// 没给 -r 时不能误判：裸 -r 与「没给」的值都是空串，靠 resumeSet 区分。
+	f, err := parseFlags([]string{"-c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.resumeSet {
+		t.Fatal("没给 -r 却把 resumeSet 置位了")
+	}
+}

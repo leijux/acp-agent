@@ -42,7 +42,7 @@
 
 | 不做 | 原因 |
 |---|---|
-| `/skill:name` 斜杠命令 | 要动 REPL 命令表与「参数追加到指令后」的语义，本期不做。加载走 `skill` 工具 |
+| `/skill:name` 斜杠命令 | 要动斜杠命令表与「参数追加到指令后」的语义，本期不做。加载走 `skill` 工具 |
 | `allowed-tools` 的强制 | 规范里是实验字段；渲染进 prompt 反而诱导模型跳过权限门禁 |
 | npm/git 包分发（Pi packages） | 与 skill 发现是两件事，先有本地目录 |
 | `.gitignore` 感知 | 只扫 `SKILL.md`，误扫面很小；引 `ignore` 依赖不划算 |
@@ -179,7 +179,7 @@ ConcurrencySafe() true
 
 | 入口 | 发现时机 |
 |---|---|
-| REPL / `-p` / `--mode json` | 启动时按 `cfg.Root` 发现一次（`cmd/acp-agent/main.go` 里 `DiscoverContextFiles` 旁边） |
+| 交互界面 / `-p` / `--mode json` | 启动时按 `cfg.Root` 发现一次（`cmd/acp-agent/main.go` 里 `DiscoverContextFiles` 旁边） |
 | ACP（`--acp`） | `newACPSession(cwd)` 里按会话 cwd 重新发现，与工具集隔离方式保持一致 |
 | `delegate` 子代理 | 默认继承（子代理 `--root` 相同，自然发现同一批）；要更窄就在 `subagent.args` 加 `--no-skills` |
 

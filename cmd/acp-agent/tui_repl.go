@@ -52,10 +52,11 @@ func (c *turnCtl) stop() {
 	}
 }
 
-// tuiRepl 是新的交互界面：Bubble Tea + 块视图。
+// tuiRepl 是唯一的交互界面：Bubble Tea + 块视图。
 //
-// 与老 REPL 的分工：老 repl() 仍是 --no-tui / 非终端时的实现，两者共用
-// 斜杠命令、agent、会话与权限层；差别只在「谁负责渲染与读键」。
+// 行式 REPL（旧 repl()）已删：它只在「stdin/stdout 不是终端」时才有与 TUI 不同的
+// 行为，而那些场景本来就该走 -p。现在这套与斜杠命令、agent、会话与权限层共用，
+// 界面只负责渲染与读键。
 func (a *app) tuiRepl(ctx context.Context, cont bool) error {
 	a.ensureSession(cont)
 
@@ -305,7 +306,7 @@ func (a *app) headerLine() string {
 		a.term.paint(cDim, a.cfg.Root))
 }
 
-// ensureSession 处理 -c 续接与本次会话文件路径的分配（TUI 与老 REPL 共用）。
+// ensureSession 处理 -c 续接与本次会话文件路径的分配。
 func (a *app) ensureSession(cont bool) {
 	if cont && a.sessPath == "" {
 		if p := a.store.latest(); p != "" {

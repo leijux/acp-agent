@@ -22,7 +22,7 @@ import (
 // terminal 负责所有面向人的输出：颜色、流式渲染、工具调用提示。
 //
 // 设计约束：stdout 在 -p 模式下是「结果」，日志必须走 stderr；
-// 在 REPL 模式两者合一。
+// 交互界面（TUI）下两者都进界面的 sink。
 type terminal struct {
 	out    io.Writer
 	errOut io.Writer
@@ -348,7 +348,7 @@ func truncRunes(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// ---------- REPL ----------
+// ---------- 斜杠命令 ----------
 
 const replHelp = `
 可用命令：
@@ -369,116 +369,17 @@ const replHelp = `
   其它输入        发送给模型
 （运行中按 Esc 中断当前任务，Ctrl-C 退出）
 
-交互界面（默认，Bubble Tea）额外键位：
+键位：
   鼠标左键拖选     松开即复制选中文本（已带反显高亮）
   Ctrl-↑/Ctrl-↓   在上一条/下一条提问与回答之间跳转
   Ctrl-T          折叠/展开思考（也可鼠标点击思考块）
   PgUp/PgDn 滚轮  滚动查看历史
 `
 
-func (a *app) repl(ctx context.Context, cont bool) error {
-	a.ensureSession(cont)
-
-	// 按键层：让 Esc 能在 turn 执行期间即时生效。
-	//
-	// 非终端（管道/重定向）或平台不支持时它拿不到，退回行模式读取 ——
-	// 此时 Esc 不可用，其余功能不变。
-	if a.keys == nil {
-		if w, err := startKeyWatcher(int(os.Stdin.Fd()), a.term.out, &a.term.mu, a.term.width()); err == nil {
-			a.keys = w
-			a.guard.keys = w
-			defer func() {
-				a.guard.keys = nil
-				a.keys = nil
-				w.Close()
-			}()
-		}
-	}
-
-	a.term.printf("%s %s\n", a.term.paint(cBold, "acp-agent"), a.term.paint(cDim, version))
-	a.term.printf("%s\n", a.term.paint(cDim, fmt.Sprintf(
-		"模型 %s/%s  上下文 %d  权限 %s  工作目录 %s",
-		a.agent.Model().Provider, a.agent.Model().ID,
-		a.agent.Model().ContextWindow, a.cfg.Permissions, a.cfg.Root)))
-	a.term.printf("%s\n\n", a.term.paint(cDim, "输入 /help 查看命令，Ctrl-D 退出"))
-
-	for {
-		a.printPrompt()
-		line, err := a.readLine(ctx)
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, errQuitRequested) {
-				a.term.printf("\n")
-				a.saveSession()
-				return nil
-			}
-			return err
-		}
-		input := strings.TrimSpace(line)
-		if input == "" {
-			continue
-		}
-		if strings.HasPrefix(input, "/") {
-			quit, err := a.command(ctx, input)
-			if err != nil {
-				a.term.printf("%s %v\n", a.term.paint(cRed, "错误:"), err)
-			}
-			if quit {
-				return nil
-			}
-			continue
-		}
-
-		start := time.Now()
-		// 每次 turn 一个可取消的 ctx：Esc 只取消当前任务，不影响会话。
-		turnCtx, cancelTurn := context.WithCancel(ctx)
-		if a.keys != nil {
-			a.keys.SetCancelTurn(cancelTurn)
-		}
-		res, err := a.agent.Run(turnCtx, input)
-		if a.keys != nil {
-			a.keys.SetCancelTurn(nil)
-		}
-		cancelTurn()
-		a.term.closeDelta()
-		a.term.resetMarkdown()
-		if err != nil && !errors.Is(err, context.Canceled) {
-			a.term.printf("%s %v\n\n", a.term.paint(cRed, "错误:"), err)
-			continue
-		}
-		if errors.Is(err, context.Canceled) || (res != nil && res.Aborted) {
-			a.term.printf("%s\n\n", a.term.paint(cYellow, "已中断"))
-			continue
-		}
-		if res != nil {
-			a.term.printUsage(res.Usage, time.Since(start))
-		}
-		a.saveSession()
-		a.term.printf("\n")
-	}
-}
-
-// printPrompt 打印 REPL 提示符，并把它记到按键层（重画整行时要一起写回去）。
-func (a *app) printPrompt() {
-	p := a.term.paint(cBold+cBlue, "›") + " "
-	a.term.printf("%s", p)
-	if a.keys != nil {
-		a.keys.SetPrompt(p)
-	}
-}
-
-// readLine 从按键层读一行；没有按键层（非终端/平台不支持）时退回行模式。
-func (a *app) readLine(ctx context.Context) (string, error) {
-	if a.keys != nil {
-		line, err := a.keys.ReadLine(ctx)
-		if err != nil {
-			return "", err
-		}
-		return line + "\n", nil
-	}
-	return a.in.ReadString('\n')
-}
-
 // command 处理斜杠命令，返回是否退出。
+//
+// 唯一入口是交互界面（tui_repl.go 的提交循环）；没有行式 REPL 了，
+// 所以这里可以放心假定 stdout 是界面 sink。
 func (a *app) command(ctx context.Context, input string) (bool, error) {
 	fields := strings.Fields(input)
 	cmd := strings.ToLower(fields[0])

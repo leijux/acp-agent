@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/leijux/acp-agent/internal/agent"
 )
 
 // useTempData 把 DataDir 指向临时目录，避免污染真实会话。
@@ -162,5 +166,169 @@ func TestSessionStoreIgnoresSubdirectories(t *testing.T) {
 	}
 	if got := s.latest(); got != "" {
 		t.Fatalf("子目录被当成会话文件: %q", got)
+	}
+}
+
+// writeSession 落一个真会话文件（内容是若干条用户消息）。
+func writeSession(t *testing.T, path string, texts ...string) {
+	t.Helper()
+	sess := agent.NewSession()
+	for _, txt := range texts {
+		if _, err := sess.Append(agent.TextMessage(txt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sess.Save(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// twoSessions 在本项目目录里放两个会话，返回 (较新的, 较旧的)。
+func twoSessions(t *testing.T, s sessionStore) (newest, older string) {
+	t.Helper()
+	newest = s.newPath()
+	writeSession(t, newest, "先看看 go.mod")
+	older = s.newPath()
+	writeSession(t, older, "跑一下测试", "再修一下失败的那个")
+	if err := os.Chtimes(older, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	return newest, older
+}
+
+// list 必须最近修改在前，并带上「几条消息 / 首条提问」，否则选择菜单没用。
+func TestSessionStoreListNewestFirst(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	newest, older := twoSessions(t, s)
+
+	infos := s.list()
+	if len(infos) != 2 {
+		t.Fatalf("list 返回 %d 条，期望 2", len(infos))
+	}
+	if infos[0].Path != newest || infos[1].Path != older {
+		t.Fatalf("排序不是最近优先: %q, %q", infos[0].Path, infos[1].Path)
+	}
+	if infos[0].Messages != 1 || infos[1].Messages != 2 {
+		t.Fatalf("消息数不对: %d, %d", infos[0].Messages, infos[1].Messages)
+	}
+	if got := infos[0].First; got != "先看看 go.mod" {
+		t.Fatalf("首条提问 = %q", got)
+	}
+	if infos[0].Err != nil {
+		t.Fatalf("正常会话被标成损坏: %v", infos[0].Err)
+	}
+}
+
+// 坏文件仍然列出（标成损坏），不能静默消失。
+func TestSessionStoreListMarksCorrupt(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	if err := os.MkdirAll(s.dir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(s.dir(), "session-broken.jsonl")
+	if err := os.WriteFile(bad, []byte("这不是 JSON\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	infos := s.list()
+	if len(infos) != 1 {
+		t.Fatalf("list 返回 %d 条，期望 1", len(infos))
+	}
+	if infos[0].Err == nil {
+		t.Fatal("坏文件没有被标成损坏")
+	}
+	if !strings.Contains(infos[0].summary(), "无法解析") {
+		t.Fatalf("摘要没提示损坏: %q", infos[0].summary())
+	}
+}
+
+func TestResolveResumeByIndex(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	newest, older := twoSessions(t, s)
+
+	if got, err := resolveResume("1", s, nil, &bytes.Buffer{}); err != nil || got != newest {
+		t.Fatalf("-r 1 = %q, %v；期望 %q", got, err, newest)
+	}
+	if got, err := resolveResume(" 2 ", s, nil, &bytes.Buffer{}); err != nil || got != older {
+		t.Fatalf("-r 2 = %q, %v；期望 %q", got, err, older)
+	}
+}
+
+func TestResolveResumeOutOfRange(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	twoSessions(t, s)
+	for _, sel := range []string{"0", "3", "-1"} {
+		if _, err := resolveResume(sel, s, nil, &bytes.Buffer{}); err == nil {
+			t.Fatalf("-r %s 应该报错", sel)
+		}
+	}
+}
+
+// 非数字的选择器原样当路径：与 --session 走同一条加载逻辑。
+func TestResolveResumePathPassthrough(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	p := filepath.Join(t.TempDir(), "x.jsonl")
+	if got, err := resolveResume(p, s, nil, &bytes.Buffer{}); err != nil || got != p {
+		t.Fatalf("路径直传 = %q, %v", got, err)
+	}
+}
+
+// 裸 -r 没有交互通道时只能报错：绝不能去抢 stdin。
+func TestResolveResumeBareNeedsTerminal(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	twoSessions(t, s)
+	if _, err := resolveResume("", s, nil, &bytes.Buffer{}); err == nil {
+		t.Fatal("裸 -r 在无交互通道时应该报错")
+	}
+}
+
+func TestResolveResumePicker(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	newest, older := twoSessions(t, s)
+
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"\n", newest}, // 直接回车 = 最近一条
+		{"2\n", older},
+		{"q\n", ""}, // 取消 = 新会话
+	}
+	for _, c := range cases {
+		var out bytes.Buffer
+		got, err := resolveResume("", s, bufio.NewReader(strings.NewReader(c.input)), &out)
+		if err != nil {
+			t.Fatalf("输入 %q: %v", c.input, err)
+		}
+		if got != c.want {
+			t.Fatalf("输入 %q 得到 %q，期望 %q", c.input, got, c.want)
+		}
+		if !strings.Contains(out.String(), "历史会话") {
+			t.Fatalf("没有打印列表: %q", out.String())
+		}
+	}
+
+	if _, err := resolveResume("", s, bufio.NewReader(strings.NewReader("9\n")), &bytes.Buffer{}); err == nil {
+		t.Fatal("无效编号应该报错")
+	}
+}
+
+// 本项目没有会话时，裸 -r 不该报错：直接开新会话。
+func TestResolveResumePickerNoSessions(t *testing.T) {
+	useTempData(t)
+	s := newSessionStore(filepath.Join(t.TempDir(), "proj"))
+	var out bytes.Buffer
+	got, err := resolveResume("", s, bufio.NewReader(strings.NewReader("\n")), &out)
+	if err != nil || got != "" {
+		t.Fatalf("空项目 = %q, %v；期望空路径 + 无错误", got, err)
+	}
+	if !strings.Contains(out.String(), "还没有历史会话") {
+		t.Fatalf("提示不对: %q", out.String())
 	}
 }

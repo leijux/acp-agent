@@ -12,7 +12,7 @@ import (
 //
 // 为什么自己写而不是用 bubbles/textinput：bubbles 的 textinput 假设单行 ASCII
 // 友好、光标定位按 rune 计宽；CJK/emoji 在这里必须按列算，否则删一个字会残留
-// 半个字形（与 cmd/acp-agent/keyinput.go 里修过的是同一个坑）。
+// 半个字形（同一个坑在 TUI 之前的行式实现里也踩过）。
 type inputLine struct {
 	buf []byte
 	cur int // 插入点（buf 的字节下标）

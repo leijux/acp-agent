@@ -49,7 +49,7 @@ const (
 // guard 把权限策略接进工具执行链路。
 //
 // 与 internal/acp 的 Guard 是同一套语义，但这里的应答方是终端用户：
-// 询问走同一个（被 REPL 共享的）输入源，所以必须串行化。
+// 询问走同一个（交互界面共享的）输入源，所以必须串行化。
 type guard struct {
 	mode permMode
 
@@ -58,11 +58,7 @@ type guard struct {
 	// JSON-RPC 流抢走一半字节，然后永久阻塞（见 ask 的注释）。
 	interactive bool
 
-	// keys 是 REPL 的按键层。非 nil 时权限询问从它取行（cbreak 模式下
-	// stdin 已被它独占），否则退回行模式读 reader。
-	keys *keyWatcher
-
-	// askTUI 非空时把询问交给 Bubble Tea 界面（TUI 模式下 keys 为 nil）。
+	// askTUI 非空时把询问交给 Bubble Tea 界面（交互模式的唯一形式）。
 	askTUI func(ctx context.Context, name string) (string, error)
 
 	mu       sync.Mutex
@@ -166,18 +162,6 @@ func (g *guard) ask(ctx context.Context, name string) (choice, error) {
 
 	q := fmt.Sprintf("\n允许执行 %s？[y]是 / [a]总是 / [n]否 / [d]永不 (默认 n) ", name)
 	fmt.Fprint(g.out, q)
-
-	// REPL 的按键层接管了 stdin（cbreak），询问也从它读行。
-	// 这里不再起 goroutine：ReadLine 本身就响应 ctx 取消。
-	if g.keys != nil {
-		// 记住问句：编辑时要重画「问句 + 输入」，否则会把问句擦掉。
-		g.keys.SetPrompt(q)
-		line, err := g.keys.ReadLine(ctx)
-		if err != nil {
-			return choiceNo, err
-		}
-		return parseChoice(line), nil
-	}
 
 	type result struct {
 		line string

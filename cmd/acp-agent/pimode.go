@@ -54,6 +54,9 @@ const (
 // `-p --mode json` 这种「flag 紧跟 flag」的形状。Go 的 flag 包把 `-p` 当字符串
 // 选项，会直接吃掉后面的 `--mode`。这里把这种形状改成 `-p=-`（`-` 表示读 stdin）。
 //
+// 我们自己的 `-r` / `--resume` 也是可选的：`-r` 单独给 = 列出现有会话让人选。
+// 同样的形状在这里归一成 `-r=`（空值），到 resolveResume 里就是要弹列表。
+//
 // 判定依据是「下一个 token 是不是已注册的 flag」，而不是「是不是以 - 开头」：
 // prompt 本身可能以 - 开头（例如贴一段 markdown 列表），那些必须原样当值。
 func normalizePiArgs(args []string, fs *flag.FlagSet) []string {
@@ -67,15 +70,27 @@ func normalizePiArgs(args []string, fs *flag.FlagSet) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		// 没有任何选择器值（下一个 token 是已知 flag，或已经到末尾）就改写成
+		// `flag=`：Go 的 flag 包会把 `-r=` 解析成一个空串值，而 `-r` 单独出现
+		// 会被当成「缺少参数」报错退出。
+		bareForm := func() bool {
+			if i+1 >= len(args) {
+				return true
+			}
+			next := args[i+1]
+			return strings.HasPrefix(next, "-") && known(next)
+		}
 		switch arg {
 		case "-p", "--print":
-			bare := i+1 >= len(args)
-			if !bare {
-				next := args[i+1]
-				bare = strings.HasPrefix(next, "-") && known(next)
-			}
-			if bare {
+			if bareForm() {
 				out = append(out, arg+"="+piStdinPrompt)
+				continue
+			}
+			out = append(out, arg, args[i+1])
+			i++
+		case "-r", "--resume":
+			if bareForm() {
+				out = append(out, arg+"=")
 				continue
 			}
 			out = append(out, arg, args[i+1])
