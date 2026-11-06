@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/leijux/acp-agent/internal/fsutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -718,9 +720,5 @@ func (t *GlobTool) Execute(ctx context.Context, a Args) (Result, error) {
 // grep
 // ---------------------------------------------------------------------------
 
-// skipDirs 是遍历时默认跳过的目录。
-var skipDirs = map[string]bool{
-	".git": true, "node_modules": true, "vendor": true, "dist": true,
-	"build": true, ".next": true, "target": true, "__pycache__": true,
-	".venv": true, ".idea": true, ".cache": true,
-}
+// skipDirs 是遍历时默认跳过的目录（表在 internal/fsutil，与 @ 补全共用）。
+var skipDirs = fsutil.SkipDirs

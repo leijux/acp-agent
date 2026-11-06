@@ -333,6 +333,7 @@ echo "把 go.mod 的 Go 版本升到 1.28" \
 | `--skill <path>` | 显式加载这几份技能（可重复；值可指 SKILL.md 或目录）。Multica MUL-8421 起就这么下发 per-agent 技能（Pi 1.x 不信任项目目录，所以不再靠 `.pi/skills` 目录发现）。**给了 `--skill` 后不再扫 `.pi/skills`**，`.agents/skills` 照旧 |
 | `--extension <file>` | 从扩展文件里的 `JSON.parse("…")` 取 MCP server，叠加到已读到的 MCP 配置上。两种形状都收：`{"mcpServers":{…}}` 与**裸 map** `{"<name>":{…}}`（Multica MUL-7812 生成的 `mcp-extension.mjs` 是后者）；脚本里有多处 `JSON.parse` 会逐个试，取第一份能用的；找不到会打一行警告。坏条目逐个跳过，不拖垮运行 |
 | `--no-session` / `--no-context-files` | 不读也不写会话文件 / 不注入 `AGENTS.md` 等上下文文件 |
+| `--no-mentions` | 不展开提示词里的 `@文件` / `@文件夹`（默认展开；贴邮件或含 `@` 的代码时用）。语义与预算见 [mentions.md](mentions.md) |
 | `--no-skills` | 不加载 `.agents/skills`（技能发现见 [skills.md](skills.md)） |
 | `--no-pi-skills` | 不读 Pi 私有技能目录（`<root>/.pi/skills`、`~/.pi/agent/skills`）。**默认读**：Multica 按这个布局给每个智能体下发不同技能，且同名时压过 `.agents/skills` |
 | `--no-prompt-templates` | 接受但忽略（无 prompt 模板机制） |

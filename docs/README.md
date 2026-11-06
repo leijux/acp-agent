@@ -12,6 +12,7 @@
 | [mcp.md](mcp.md) | `internal/mcp/` | MCP 客户端：mcp.json、官方 SDK 接入、工具命名与权限、结果映射 |
 | [cli.md](cli.md) | `cmd/acp-agent/` | 终端 agent：flag、配置文件、斜杠命令、权限模式、输出约定 |
 | [skills.md](skills.md) | `internal/skills/`、`internal/tools/skill.go` | Skills（`.agents/skills`）：发现、frontmatter 校验、prompt 注入、`skill` 工具按需加载 |
+| [mentions.md](mentions.md) | `internal/mentions/`、`internal/fsutil/` | `@文件` / `@文件夹`：语法与转义、注入格式、预算上限、接线点、Tab 补全；`--no-mentions` 关闭 |
 
 `internal/provider/`（OpenAI 兼容客户端与 DeepSeek 适配）暂无独立文档，
 端点与模型矩阵运行 `acp-agent -endpoints` 查看，设计说明见根 README「结构」一节。

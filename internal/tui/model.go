@@ -95,6 +95,10 @@ type Model struct {
 	onInterrupt func()
 	onResize    func(w, h int)
 	onCopyText  func(string)
+
+	// complete 是 @ 路径补全的宿主回调（由 cmd 层注入，因为扫目录要用 root/ 跳过表）：
+	// 返回候选与要替换的字节区间 [start,end)。nil 表示没有补全能力。
+	complete func(line string, cur int) (cands []string, start, end int)
 }
 
 func newModel(ui *UI, opts Options) *Model {
@@ -108,6 +112,7 @@ func newModel(ui *UI, opts Options) *Model {
 		mouse:    !opts.NoMouse,
 		turnFrom: -1,
 		histPos:  -1,
+		complete: opts.Complete,
 	}
 	m.vp.MouseWheelEnabled = true
 	return m
@@ -284,6 +289,8 @@ func (m *Model) onKey(k tea.KeyPressMsg) tea.Cmd {
 	key := tea.Key(k)
 	ctrl := key.Mod.Contains(tea.ModCtrl)
 	alt := key.Mod.Contains(tea.ModAlt)
+	// 状态行上的提示（候选清单等）是一次性的：一按键就收。
+	m.status = ""
 
 	// 权限确认优先：这时只认 y/a/n/d 与 Esc，别把按键灌进输入行。
 	if m.perm != nil {
@@ -446,6 +453,12 @@ func (m *Model) onKey(k tea.KeyPressMsg) tea.Cmd {
 
 	case tea.KeySpace:
 		m.in.insert(' ')
+		return nil
+
+	case tea.KeyTab:
+		// Tab 现在归补全（以前会往输入行插一个 \t）。
+		// 字面制表符只能靠粘贴：Ctrl+I 与 Tab 同一个字节，终端分不开。
+		m.completeInput()
 		return nil
 	}
 

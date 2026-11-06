@@ -101,6 +101,7 @@ type flags struct {
 	mode           string
 	noSession      bool
 	noContextFiles bool
+	noMentions     bool
 	noSkills       bool
 	noPiSkills     bool
 	// skillFiles 是 Pi 的 --skill（可重复）：调用方显式点名的 SKILL.md。
@@ -166,6 +167,8 @@ func newFlagSet(f *flags) *flag.FlagSet {
 	fs.StringVar(&f.mode, "mode", "", "输出模式：json（逐行 JSON 事件流，供 Multica 等编排器）；rpc（探测：get_state / get_available_models）")
 	fs.BoolVar(&f.noSession, "no-session", false, "不落盘会话文件（Pi 兼容）")
 	fs.BoolVar(&f.noContextFiles, "no-context-files", false, "不注入 AGENTS.md/CLAUDE.md 等上下文文件（Pi 兼容）")
+	// @ 文件展开默认开；贴邮件/贴含 @ 的代码时需要不误伤的出口。
+	fs.BoolVar(&f.noMentions, "no-mentions", false, "不展开提示词里的 @文件 / @文件夹")
 	// --no-skills / --no-prompt-templates：Pi 探测目录时会带。no-skills 现在是
 	// 真的（关掉 .agents/skills 发现）；prompt 模板仍未实现。
 	fs.BoolVar(&f.noSkills, "no-skills", false, "不加载技能（Pi 兼容）")
@@ -734,6 +737,8 @@ func (a *app) runOnce(ctx context.Context, prompt string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return errors.New("prompt 为空")
 	}
+	// @文件 / @文件夹 在进 agent 之前展开：历史里存展开后的文本，resume 不依赖磁盘。
+	prompt = a.expandMentions(prompt)
 	res, err := a.agent.Run(ctx, prompt)
 	a.saveSession()
 	if res != nil {

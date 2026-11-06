@@ -316,6 +316,25 @@ func (in *inputLine) hasPaste(token string) bool {
 // spans 返回 buf 里所有占位符的区间（按位置升序），供编辑时整体跳过/删除。
 type tokenSpan struct{ start, end int }
 
+// replaceRange 用 s 替换 [start,end)（@ 补全用），返回是否成功。
+//
+// 区间碰到粘贴占位符时拒绝：占位符是整体的，切开就再也展不开了。
+func (in *inputLine) replaceRange(start, end int, s string) bool {
+	if start < 0 || start > end || end > len(in.buf) {
+		return false
+	}
+	for _, sp := range in.spans() {
+		if start < sp.end && end > sp.start {
+			return false
+		}
+	}
+	tail := append([]byte(nil), in.buf[end:]...)
+	in.buf = append(in.buf[:start], s...)
+	in.buf = append(in.buf, tail...)
+	in.cur = start + len(s)
+	return true
+}
+
 func (in *inputLine) spans() []tokenSpan {
 	buf := string(in.buf)
 	var out []tokenSpan

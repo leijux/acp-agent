@@ -231,6 +231,9 @@ type Options struct {
 	Status  string // 底部状态行右侧
 	NoMouse bool   // 关掉鼠标上报（/mouse off 也能关）
 	FPS     int    // 渲染帧率上限，默认 30
+	// Complete 是 Tab 的 @路径补全（由 cmd 层注入：扫目录要用 root 与跳过表）。
+	// 返回候选与要替换的字节区间 [start,end)；nil 表示不提供补全。
+	Complete func(line string, cur int) (cands []string, start, end int)
 }
 
 // UI 是 TUI 的对外句柄，所有方法都可以从任意 goroutine 调用。

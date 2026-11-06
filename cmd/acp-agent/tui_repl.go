@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/leijux/acp-agent/internal/agent"
+	"github.com/leijux/acp-agent/internal/mentions"
 	"github.com/leijux/acp-agent/internal/tui"
 )
 
@@ -58,7 +59,16 @@ func (c *turnCtl) stop() {
 func (a *app) tuiRepl(ctx context.Context, cont bool) error {
 	a.ensureSession(cont)
 
-	ui := tui.New(tui.Options{Header: a.headerLine()})
+	ui := tui.New(tui.Options{
+		Header: a.headerLine(),
+		// Tab 补全：只列 @token 的父目录（扫盘逻辑在 internal/mentions，界面不碰 fs）。
+		Complete: func(line string, cur int) ([]string, int, int) {
+			if a.cfg.NoMentions {
+				return nil, 0, 0
+			}
+			return mentions.Complete(a.cfg.Root, line, cur, 200)
+		},
+	})
 	a.ui = ui
 	// 先取宽度再接管 out：t.width() 靠 out 是不是 *os.File 来判断能不能 ioctl。
 	if w := a.term.width(); w > 0 {
@@ -170,7 +180,7 @@ func (a *app) tuiSubmitLoop(ctx context.Context, ui *tui.UI, ctl *turnCtl) {
 			ui.SetHeader(a.headerLine())
 			return quit
 		case submitSteer:
-			a.agent.Steer(input)
+			a.agent.Steer(a.expandMentions(input))
 			a.setKind(kindSystem)
 			a.term.printf("%s\n", a.term.paint(cDim,
 				"↳ 已插话：这轮工具调用结束后生效（要立刻中断按 Esc）"))
@@ -228,9 +238,12 @@ func (a *app) tuiSubmitLoop(ctx context.Context, ui *tui.UI, ctl *turnCtl) {
 		}
 	}
 }
+
 // tuiTurn 跑一轮对话。阻塞在提交 goroutine 上，界面另用一条 goroutine 刷新。
 func (a *app) tuiTurn(ctx context.Context, ui *tui.UI, ctl *turnCtl, input string) {
 	start := time.Now()
+	// @文件 / @文件夹 在进 agent 之前展开；界面上仍显示用户敲的原文。
+	input = a.expandMentions(input)
 	turnCtx, cancel := context.WithCancel(ctx)
 	ctl.set(cancel)
 	ui.Running(true, "")

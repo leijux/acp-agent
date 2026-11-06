@@ -20,12 +20,12 @@ import (
 //
 // 优先级：命令行 flag > 环境变量 > 配置文件 > 内置默认。
 type Config struct {
-	Provider    string  `json:"provider"`
-	Model       string  `json:"model"`
-	BaseURL     string  `json:"baseURL,omitempty"`
-	APIKey      string  `json:"apiKey,omitempty"`
-	Permissions string  `json:"permissions,omitempty"` // ask | auto | readonly
-	MaxTurns    int     `json:"maxTurns,omitempty"`
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	BaseURL     string `json:"baseURL,omitempty"`
+	APIKey      string `json:"apiKey,omitempty"`
+	Permissions string `json:"permissions,omitempty"` // ask | auto | readonly
+	MaxTurns    int    `json:"maxTurns,omitempty"`
 	// maxTurnsSet 记录轮数上限是否由调用方显式指定（flag / env）。
 	// 区分「没给」（补默认 500）与「显式 0/负数」（不限制）——光看值区分不了，
 	// 而这两种语义相反。非导出字段，不参与 JSON 解码。
@@ -68,6 +68,9 @@ type Config struct {
 	JSONOut io.Writer `json:"-"`
 	// NoContextFiles 由 --no-context-files 打开：不注入 AGENTS.md 等上下文文件。
 	NoContextFiles bool `json:"-"`
+	// NoMentions 由 --no-mentions 打开：不展开提示词里的 @文件 / @文件夹。
+	// 贴邮件、贴含 @ 的代码时需要一个不误伤的出口。
+	NoMentions bool `json:"-"`
 
 	// Skills 是额外的技能发现目录（相对 root 或绝对路径）。
 	// 默认位置永远是规范里的 .agents/skills（项目级 + 用户级），这里只追加。
