@@ -81,6 +81,9 @@ func WithBundle(b []byte) Option {
 type Kernel struct {
 	opts Options
 
+	// customBundle 表示 opts.Bundle 是宿主导入的（不是内嵌产物），
+	// Version() 对它不报版本。
+	customBundle bool
 	progOnce sync.Once
 	prog     *goja.Program
 	progErr  error
@@ -96,6 +99,7 @@ func New(opts ...Option) (*Kernel, error) {
 	for _, fn := range opts {
 		fn(&o)
 	}
+	custom := o.Bundle != nil
 	if o.Bundle == nil {
 		if len(defaultBundle) == 0 {
 			return nil, errors.New("kernel: no bundle embedded; run build-cjs.sh or use WithBundle")
@@ -107,7 +111,7 @@ func New(opts ...Option) (*Kernel, error) {
 	if o.CountTokens == nil {
 		o.CountTokens = CountTokens
 	}
-	return &Kernel{opts: o}, nil
+	return &Kernel{opts: o, customBundle: custom}, nil
 }
 
 // program 编译（并缓存）bundle 的 wrapper。进程内只编译一次。
@@ -188,22 +192,18 @@ func (k *Kernel) Call(name string, args ...any) ([]byte, error) {
 	return rt.toJSON(v)
 }
 
-// Version 返回 kernel bundle 的版本（若导出）。
+// Version 返回嵌入 bundle 对应的上游 acp-kernel 版本。
+//
+// 不再去 JS 里找导出：上游从未导出过 KERNEL_VERSION / version（早期这里的回退
+// 永远是空串）。版本号由 script/build-cjs.sh 生成到 version_gen.go。
+//
+// 用 WithBundle 换了自定义 bundle 时返回空串 —— 常量描述的是内嵌产物，
+// 对外来 bundle 谎报版本只会误导诊断。
 func (k *Kernel) Version() (string, error) {
-	k.sharedMu.Lock()
-	defer k.sharedMu.Unlock()
-	rt, err := k.sharedRuntime()
-	if err != nil {
-		return "", err
-	}
-	v := rt.exports.Get("KERNEL_VERSION")
-	if v == nil || goja.IsUndefined(v) {
-		v = rt.exports.Get("version")
-	}
-	if v == nil || goja.IsUndefined(v) {
+	if k.customBundle {
 		return "", nil
 	}
-	return v.String(), nil
+	return BundleVersion, nil
 }
 
 func (o Options) String() string {

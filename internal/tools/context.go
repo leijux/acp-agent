@@ -86,6 +86,12 @@ type ContextApplyResult struct {
 	TokensCompressed int            `json:"tokensCompressed"`
 	Blocks           []ContextBlock `json:"blocks,omitempty"`
 	Errors           []string       `json:"errors,omitempty"`
+	// Warnings 是上游的非致命提示（例如「这段区间已经在活跃块里」的具体原因）。
+	// 它们是模型修正行为的唯一线索，不能丢。
+	Warnings []string `json:"warnings,omitempty"`
+	// Noop 为 true 表示这次提交是幂等空操作：区间已被现有压缩块覆盖，
+	// 历史没变、也没出错（上游 #4521）。
+	Noop bool `json:"noop,omitempty"`
 }
 
 // ContextBackend 由宿主实现（agent 包），把工具调用翻译成 kernel 操作。
@@ -246,13 +252,28 @@ func (t *ContextApplyTool) Execute(ctx context.Context, args Args) (Result, erro
 		return ErrorResult("压缩失败: %v", err), nil
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "压缩完成：新建 %d 个块，节省 %d tokens。\n", res.BlocksCreated, res.TokensCompressed)
+	if res.Noop {
+		// #4521：区间已经被现有压缩块覆盖 —— 历史没变，也没出错。
+		// 当成失败会让模型反复重试同一个区间。
+		b.WriteString("压缩完成（空操作）：这些区间已经被现有压缩块覆盖，历史没有变化。\n")
+		b.WriteString("不要重试同一个区间；先调 context_check 看当前可压区间。\n")
+	} else {
+		fmt.Fprintf(&b, "压缩完成：新建 %d 个块，节省 %d tokens。\n", res.BlocksCreated, res.TokensCompressed)
+	}
 	for _, blk := range res.Blocks {
 		fmt.Fprintf(&b, "- %s（tier %d，折叠 %d 条消息）", blk.BlockID, blk.Tier, len(blk.MessageIDs))
 		if blk.Topic != "" {
 			fmt.Fprintf(&b, " 主题: %s", blk.Topic)
 		}
 		b.WriteString("\n")
+	}
+	if len(res.Warnings) > 0 {
+		b.WriteString("\n提示:\n")
+		for _, w := range res.Warnings {
+			b.WriteString("- ")
+			b.WriteString(w)
+			b.WriteString("\n")
+		}
 	}
 	if len(res.Errors) > 0 {
 		b.WriteString("\n警告:\n")

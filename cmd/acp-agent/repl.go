@@ -287,6 +287,15 @@ func (a *app) renderHandler() agent.EventHandler {
 			quiet("%s\n", t.paint(cYellow,
 				fmt.Sprintf("⚕ 上下文已压缩：%d → %d token", e.TokensBefore, e.TokensAfter)))
 
+		case agent.CompactionAbortEvent:
+			// 压缩开了头却没走完：不报就是静默失败（用户只看到模型又把活干了一遍）。
+			a.setKind(kindSystem)
+			reason := "未知原因"
+			if e.Err != nil {
+				reason = firstLine(e.Err.Error(), 160)
+			}
+			quiet("%s\n", t.paint(cDim, fmt.Sprintf("⚕ 上下文未压缩（%s）", reason)))
+
 		case agent.AgentEndEvent:
 			if e.Err != nil && !errors.Is(e.Err, context.Canceled) && !t.quiet {
 				a.setKind(kindSystem)

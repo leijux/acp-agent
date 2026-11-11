@@ -80,7 +80,11 @@ func (c *contextBackend) contextStatus() (tools.ContextStatus, bool, error) {
 		km := kernelMessages(branch)
 		tokens := c.a.contextTokens()
 
-		res, err := ke.s.Turn(km, tokens)
+		// 这个 tokenCount 是本地的估算（TokenCounter + system prompt + 工具定义），
+		// 不是 provider 报的 usage，所以据实声明 TokenCountEstimate：上游幻压
+		// 守卫会把压力档 nudge 最多压 maxEstimateHoldRounds 轮，真正的紧急
+		// 兜底是宿主侧的 HardCompactUsage（compact.go）。
+		res, err := ke.s.TurnSource(km, tokens, kernel.TokenCountEstimate)
 		if err != nil {
 			return err
 		}
@@ -142,7 +146,7 @@ func (c *contextBackend) ContextApply(_ context.Context, ranges []tools.ContextR
 		}
 		tokensBefore := c.a.contextTokens()
 
-		res, err := ke.s.Turn(km, tokensBefore)
+		res, err := ke.s.TurnSource(km, tokensBefore, kernel.TokenCountEstimate)
 		if err != nil {
 			return err
 		}
@@ -191,11 +195,17 @@ func (c *contextBackend) ContextApply(_ context.Context, ranges []tools.ContextR
 			return err
 		}
 
+		// noop 的判据以 Noop 为准（上游 #4521），但加一道防御：万一将来上游某条
+		// 早退路径返回「0 块 + 0 错误」却没置 noop，也不能让它被当成成功压缩
+		// 往下走去写镜像块。
+		noop := cr.Noop || (cr.BlocksCreated == 0 && len(cr.Errors) == 0)
 		out = tools.ContextApplyResult{
 			BlocksCreated:    cr.BlocksCreated,
 			TokensCompressed: cr.TokensCompressed,
 			Errors:           cr.Errors,
+			Warnings:         cr.Warnings,
 			Blocks:           blocks,
+			Noop:             noop,
 		}
 		c.a.resetNudge()
 		return nil

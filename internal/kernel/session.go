@@ -127,8 +127,23 @@ type turnRaw struct {
 
 // Turn 执行一轮上下文处理：裁剪、折叠压缩块、渲染引用标签、决定是否提示压缩。
 //
-// tokenCount 是宿主的真实上下文占用（读不到可传 0，kernel 会走估算）。
+// tokenCount 是宿主的上下文占用读数（读不到可传 0，kernel 会走估算），
+// 它究竟是计费级采样还是本地估值由 TurnSource 声明；
+// 不声明来源，等价于 TurnSource(…, TokenCountUnspecified)。
 func (s *Session) Turn(msgs []Message, tokenCount int) (TurnResult, error) {
+	return s.TurnSource(msgs, tokenCount, TokenCountUnspecified)
+}
+
+// TurnSource 是 Turn 的带来源版本：告诉 kernel 这个 tokenCount 是计费级采样
+// 还是本地估值，它决定压力档 nudge 要不要等一个 usage 级读数（上游幻压守卫）。
+//
+// 据实声明很重要：估值冒充 usage 会让 kernel 在不该动手的时候动手；而声明
+// estimate 的代价有限 —— 上游只在同一会话的前 maxEstimateHoldRounds 次
+// estimate 调用上押住压力档，之后自动退化为旧行为（详见 TokenCountSource）。
+func (s *Session) TurnSource(msgs []Message, tokenCount int, source TokenCountSource) (TurnResult, error) {
+	if !source.valid() {
+		return TurnResult{}, fmt.Errorf("kernel: unknown TokenCountSource %q（只接受 \"\" / usage / estimate）", string(source))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpen(); err != nil {
@@ -141,6 +156,9 @@ func (s *Session) Turn(msgs []Message, tokenCount int) (TurnResult, error) {
 	_ = in.Set("state", s.state)
 	_ = in.Set("config", s.cfg)
 	_ = in.Set("tokenCount", tokenCount)
+	if source != TokenCountUnspecified {
+		_ = in.Set("tokenCountSource", string(source))
+	}
 
 	out, err := s.rt.coreCall("processTurn", in)
 	if err != nil {

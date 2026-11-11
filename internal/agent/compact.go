@@ -229,7 +229,8 @@ func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*Comp
 	}
 	tokensBefore := a.contextTokens()
 
-	res, err := ke.s.Turn(km, tokensBefore)
+	// tokensBefore 是本地估算（不是 provider usage），据实声明来源。
+	res, err := ke.s.TurnSource(km, tokensBefore, kernel.TokenCountEstimate)
 	if err != nil {
 		return nil, err
 	}
@@ -268,9 +269,17 @@ func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*Comp
 		Reason: reason, TokensBefore: tokensBefore, CutEntryID: r.StartRef,
 	})
 
+	// 从这行开始的**每一条**失败返回都必须发 CompactionAbortEvent：
+	// 订阅方（ACP 的 compaction_update / 界面提示）拿 Start 开头，
+	// 只有 End 或 Abort 能收尾，漏一条就是永久 in_progress。
+	abort := func(phase string, err error) error {
+		a.emit.Emit(CompactionAbortEvent{Reason: reason, Phase: phase, Err: err})
+		return err
+	}
+
 	summary, err := a.summarizeTranscript(ctx, transcript(selected), instructions)
 	if err != nil {
-		return nil, err
+		return nil, abort("summarize", err)
 	}
 	// kernel 对摘要长度有硬下限（50 字符），过短的摘要会被整批拒绝；
 	// 这里用区间内消息的概要兵底，避免因为摘要太短而丢掉整次压缩。
@@ -282,13 +291,20 @@ func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*Comp
 		Summary:  summary,
 	}})
 	if err != nil {
-		return nil, err
+		return nil, abort("apply", err)
 	}
 	if err := a.saveKernelState(ke); err != nil {
-		return nil, err
+		return nil, abort("save", err)
 	}
 	if len(cr.Errors) > 0 {
-		return nil, fmt.Errorf("agent: kernel 压缩失败: %s", strings.Join(cr.Errors, "; "))
+		return nil, abort("apply", fmt.Errorf("agent: kernel 压缩失败: %s", strings.Join(cr.Errors, "; ")))
+	}
+	if cr.Noop || (cr.BlocksCreated == 0 && len(cr.Errors) == 0) {
+		// #4521：区间已被块覆盖（例如同一段被并发/重复压缩），历史没变。
+		// 后半句是防御：上游若哪天改了 noop 标记的置位点，「0 块 + 0 错误」
+		// 也不能当成压缩成功去发 CompactionEndEvent（那会写出一条 Token 不变的假事件）。
+		return nil, abort("noop", fmt.Errorf("%w（区间 %s..%s 已经被现有压缩块覆盖）",
+			ErrNothingToCompact, r.StartRef, r.EndRef))
 	}
 
 	// 把 kernel 的新块镜像成 compaction entry，供 Messages() 投影。
@@ -298,7 +314,7 @@ func (a *Agent) Compact(ctx context.Context, instructions, reason string) (*Comp
 	}
 	mirrored, err := a.mirrorBlocks(ke, cr, tokensBefore, tokensAfter)
 	if err != nil {
-		return nil, err
+		return nil, abort("mirror", err)
 	}
 	blockID := ""
 	if len(mirrored) > 0 {

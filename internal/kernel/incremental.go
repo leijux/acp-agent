@@ -44,6 +44,14 @@ func (m *MetaResult) RefCount() int { return len(m.RefsByRaw) }
 //
 // tokenCount <= 0 时自动用 EstimateTokens(messages) 兜底。
 func (s *Session) TurnMeta(messages []Message, tokenCount int) (*MetaResult, error) {
+	return s.TurnMetaSource(messages, tokenCount, TokenCountUnspecified)
+}
+
+// TurnMetaSource 是 TurnMeta 的带来源版本（语义同 TurnSource）。
+func (s *Session) TurnMetaSource(messages []Message, tokenCount int, source TokenCountSource) (*MetaResult, error) {
+	if !source.valid() {
+		return nil, fmt.Errorf("kernel: unknown TokenCountSource %q（只接受 \"\" / usage / estimate）", string(source))
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureOpen(); err != nil {
@@ -59,6 +67,9 @@ func (s *Session) TurnMeta(messages []Message, tokenCount int) (*MetaResult, err
 	_ = in.Set("state", s.state)
 	_ = in.Set("config", s.cfg)
 	_ = in.Set("tokenCount", tokenCount)
+	if source != TokenCountUnspecified {
+		_ = in.Set("tokenCountSource", string(source))
+	}
 
 	out, err := s.rt.coreCall("processTurn", in)
 	if err != nil {
@@ -144,12 +155,18 @@ type BatchResult struct {
 // 因为再跑下去只会浪费一轮：kernel 已经在提示该压缩了。
 // ctx 取消或任一项失败时，返回已处理项与错误。
 func (s *Session) TurnBatch(ctx context.Context, items []BatchTurn) ([]BatchResult, error) {
+	return s.TurnBatchSource(ctx, items, TokenCountUnspecified)
+}
+
+// TurnBatchSource 是 TurnBatch 的带来源版本：整批用同一个 tokenCountSource
+// （每项的 tokenCount 来源通常一致，没必要逐项声明）。
+func (s *Session) TurnBatchSource(ctx context.Context, items []BatchTurn, source TokenCountSource) ([]BatchResult, error) {
 	out := make([]BatchResult, 0, len(items))
 	for i, it := range items {
 		if err := ctx.Err(); err != nil {
 			return out, fmt.Errorf("kernel: batch[%d]: %w", i, err)
 		}
-		meta, err := s.TurnMeta(it.Messages, it.Tokens)
+		meta, err := s.TurnMetaSource(it.Messages, it.Tokens, source)
 		if err != nil {
 			return out, fmt.Errorf("kernel: batch[%d]: %w", i, err)
 		}

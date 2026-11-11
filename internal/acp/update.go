@@ -25,6 +25,10 @@ type updates struct {
 	toolIDs      map[string][]string
 	toolNames    map[string]string
 	compactSeq   int
+	// compactID 是当前 in_progress 的压缩实体 id。
+	// 存下来而不是靠 compactSeq 反推：一旦有失败终态（Abort），
+	// 反推会把 End 跟另一个实体配成对。
+	compactID string
 }
 
 func newUpdates(conn *Conn, sessionID string, caps ClientCapabilities) *updates {
@@ -54,6 +58,10 @@ func (u *updates) Handle(ev agent.Event) {
 		u.compactionStart(e)
 	case agent.CompactionEndEvent:
 		u.compactionEnd(e)
+	case agent.CompactionAbortEvent:
+		u.compactionAbort(e)
+	case agent.CompactionSkipEvent:
+		u.compactionSkip(e)
 	case agent.ErrorEvent:
 		u.errorEvent(e)
 	}
@@ -222,9 +230,9 @@ func (u *updates) compactionStart(e agent.CompactionStartEvent) {
 			fmt.Sprintf("压缩前约 %d tokens（原因：%s）", e.TokensBefore, e.Reason))
 		return
 	}
+	id := u.newCompactionID(true)
 	u.mu.Lock()
-	u.compactSeq++
-	id := fmt.Sprintf("cmp_%d", u.compactSeq)
+	u.compactID = id
 	u.mu.Unlock()
 	u.Send(CompactionUpdate{
 		SessionUpdate: "compaction_update",
@@ -239,12 +247,11 @@ func (u *updates) compactionEnd(e agent.CompactionEndEvent) {
 			fmt.Sprintf("%d → %d tokens", e.TokensBefore, e.TokensAfter))
 		return
 	}
-	u.mu.Lock()
-	id := fmt.Sprintf("cmp_%d", u.compactSeq)
-	u.mu.Unlock()
-	if id == "cmp_0" {
-		u.compactSeq = 1
-		id = "cmp_1"
+	id := u.takeCompactionID()
+	if id == "" {
+		// 没收到 Start 却收到 End（事件被丢了 / 老版本调用方）：宁可自己拍一个 id，
+		// 也不要发一条没有实体的 completed。
+		id = u.newCompactionID(false)
 	}
 	var summary []ContentBlock
 	if e.Summary != "" {
@@ -256,6 +263,78 @@ func (u *updates) compactionEnd(e agent.CompactionEndEvent) {
 		Status:        "completed",
 		Summary:       summary,
 	})
+}
+
+// compactionAbort 关闭一个开了头却没走完的压缩实体。
+//
+// 这是「客户端不要永远停在 in_progress」的唯一保障：摘要模型报错、kernel
+// 拒绝、区间已被覆盖（noop）都会走到这里。
+func (u *updates) compactionAbort(e agent.CompactionAbortEvent) {
+	msg := "压缩未完成"
+	if e.Err != nil {
+		msg = e.Err.Error()
+	}
+	if !u.caps.SupportsCompaction() {
+		u.notice("error", "上下文压缩失败", msg)
+		return
+	}
+	id := u.takeCompactionID()
+	if id == "" {
+		// 没有在飞的实体：不凭空发一条 failed（客户端会看到一个从未开始的压缩）。
+		u.notice("error", "上下文压缩失败", msg)
+		return
+	}
+	if e.Phase != "" {
+		msg = fmt.Sprintf("[%s] %s", e.Phase, msg)
+	}
+	errText := msg
+	u.Send(CompactionUpdate{
+		SessionUpdate: "compaction_update",
+		CompactionID:  id,
+		Status:        "failed",
+		Error:         &errText,
+	})
+}
+
+// compactionSkip 对应「检查跑了但没东西可压」：没有 Start，也就没有
+// in_progress 要收尾（如果真有在飞的实体，把它关成 failed）。
+func (u *updates) compactionSkip(e agent.CompactionSkipEvent) {
+	if !u.caps.SupportsCompaction() {
+		return // 本来就没发过 in_progress，沉默即可，不要每轮刷 notice
+	}
+	id := u.takeCompactionID()
+	if id == "" {
+		return
+	}
+	errText := fmt.Sprintf("没有可压缩区间（占用 %.0f%%，原因：%s）", e.Usage*100, e.Reason)
+	u.Send(CompactionUpdate{
+		SessionUpdate: "compaction_update",
+		CompactionID:  id,
+		Status:        "failed",
+		Error:         &errText,
+	})
+}
+
+// takeCompactionID 取出并清空当前 in_progress 实体 id。
+func (u *updates) takeCompactionID() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	id := u.compactID
+	u.compactID = ""
+	return id
+}
+
+// newCompactionID 分配一个实体 id（advance=false 时不推进序号，仅供兵底复用）。
+func (u *updates) newCompactionID(advance bool) string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if advance {
+		u.compactSeq++
+	}
+	if u.compactSeq == 0 {
+		u.compactSeq = 1
+	}
+	return fmt.Sprintf("cmp_%d", u.compactSeq)
 }
 
 func (u *updates) errorEvent(e agent.ErrorEvent) {

@@ -100,6 +100,23 @@ type CompactionEndEvent struct {
 
 func (CompactionEndEvent) EventName() string { return "session_compact" }
 
+// CompactionAbortEvent 表示「发过 CompactionStartEvent、但没走到完成」。
+//
+// 必须发：订阅 Start 的消费者（ACP 的 compaction_update 实体、界面上的
+// 「压缩中」提示）只会在收到 End 或 Abort 时收尾。之前四条失败路径
+// （摘要模型报错、kernel 拒绝、镜像块失败、区间已被覆盖的 noop）都是
+// 「发过 Start 就直接 return error」，于是客户端永远停在 in_progress。
+type CompactionAbortEvent struct {
+	// Reason 与对应 Start 事件相同（"manual" / "threshold" / "overflow"）。
+	Reason string
+	// Phase 是哪一步出的问题："summarize" / "apply" / "save" / "mirror" / "noop"。
+	Phase string
+	// Err 是失败原因；noop 也算失败终态（已经有块覆盖了这段，没得可压）。
+	Err error
+}
+
+func (CompactionAbortEvent) EventName() string { return "session_compact_aborted" }
+
 // ErrorEvent 非致命错误（例如 provider 报错但 run 仍可继续时）。
 type ErrorEvent struct {
 	Err error

@@ -117,6 +117,27 @@ type Nudge struct {
 	ContextBreakdown map[string]int  `json:"contextBreakdown,omitempty"`
 }
 
+// PressureDeferredNoSample 报告本轮的压力档 nudge 是不是因为「读数只到估值级」
+// 被封了（上游幻压守卫，`nudge.breakdown.pressureDeferredNoSample`）。
+//
+// 守卫的寿命和直觉不一样：上游的 `estimateHoldStreak` 只在「非 estimate 调用」时
+// 归零（bundle:8462-8463），所以对从不上报 usage 的宿主，它只在一个会话的**前
+// maxEstimateHoldRounds 次 estimate 调用**上生效，之后自动退化为旧行为
+// —— 上游 #5865 的防饿死设计，不是 bug。
+func (n *Nudge) PressureDeferredNoSample() bool {
+	if n == nil || n.Breakdown == nil {
+		return false
+	}
+	switch v := n.Breakdown["pressureDeferredNoSample"].(type) {
+	case float64: // 上游写的是 1/0，经 encoding/json 落成 float64
+		return v != 0
+	case bool: // 防着上游哪天改成布尔
+		return v
+	default:
+		return false
+	}
+}
+
 // RefMap 是 kernel 的 id ↔ 引用映射。
 type RefMap struct {
 	ByRaw   map[string]string `json:"byRaw"`
@@ -150,6 +171,10 @@ type CompressionResult struct {
 	Errors           []string `json:"errors,omitempty"`
 	Warnings         []string `json:"warnings,omitempty"`
 	Notes            []string `json:"notes,omitempty"`
+	// Noop 为 true 表示本次提交幂等成功但没建块：所有区间都已被活跃压缩块
+	// 覆盖，或落在保护区内（上游 #4521）。判据是上游自己给的
+	// `blocksCreated == 0 && errors.length == 0`，不应当成失败。
+	Noop bool `json:"noop,omitempty"`
 	// Blocks 是应用后仍然 active 的压缩块。
 	Blocks []Block `json:"blocks"`
 }
@@ -168,6 +193,40 @@ type Status struct {
 // RetrieveResult 是 acp_retrieve 原语的返回（上游结构较大，保持 JSON）。
 type RetrieveResult struct {
 	Raw json.RawMessage `json:"-"`
+}
+
+// TokenCountSource 声明传给 kernel 的 tokenCount 从哪来。
+//
+// 上游用它驱动「幻压守卫」（`nudge.requireUsageSampleForPressure`，0.0.184+ 默认开）：
+// 只有 usage 级采样才允许压力档（EMERGENCY / OVER-LIMIT）立即注入 nudge。
+//
+// **守卫的寿命和直觉不一样**：上游把「连续 estimate 轮数」（`estimateHoldStreak`）
+// 写进 state，只在非 estimate 调用时归零；超过 `nudge.maxEstimateHoldRounds`（默认 2）
+// 就自动退化为旧行为。也就是说：从不上报 usage 的宿主，守卫只管同一个会话的
+// **前两次 estimate 调用**，之后照常注入（上游 #5865 的防饿死设计）。
+//
+// **不声明来源 = 旧行为**（守卫不生效，压力档照常注入），适合拿不准来源的宿主；
+// 但拿估值冒充 usage 更危险 —— 那会让 kernel 在不该改写上下文的时候改写
+// （上游 #5860 的说法：acting on a bad meter）。
+type TokenCountSource string
+
+const (
+	// TokenCountUnspecified 不声明来源：上游按旧行为处理。
+	TokenCountUnspecified TokenCountSource = ""
+	// TokenCountUsage 计费级采样：provider 报回来的 usage。
+	TokenCountUsage TokenCountSource = "usage"
+	// TokenCountEstimate 本地估算：按字符 / 分词器算出来的。
+	TokenCountEstimate TokenCountSource = "estimate"
+)
+
+// valid 只允许三个合法值。上游对未知值不报错（任何非 "estimate" 都被当作
+// usage 级），所以拼错一个字母就会静默失去保护 —— 在入口挡住。
+func (s TokenCountSource) valid() bool {
+	switch s {
+	case TokenCountUnspecified, TokenCountUsage, TokenCountEstimate:
+		return true
+	}
+	return false
 }
 
 // Config 描述一次会话的配置。ModelContextLimit 必填；Overrides 会浅合并到

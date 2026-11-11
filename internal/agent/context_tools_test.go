@@ -162,6 +162,54 @@ func TestContextApplyAutoRange(t *testing.T) {
 	}
 }
 
+// 重复提交同一区间是幂等空操作（上游 #4521）：不能报错，也不能让模型
+// 以为失败而反复重试。
+func TestContextApplyNoopIsNotAnError(t *testing.T) {
+	p := NewScriptedProvider(reply("x"))
+	reg := tools.NewRegistry()
+	a := newTestAgent(t, p, func(o *Options) {
+		o.Registry = reg
+		o.ContextWindow = 60_000
+	})
+	fillContext(t, a, 40)
+
+	apply, _ := reg.Get(tools.ToolContextApply)
+	check, _ := reg.Get(tools.ToolContextCheck)
+	cres, err := check.Execute(context.Background(), tools.Args{})
+	if err != nil || cres.IsError {
+		t.Fatalf("context_check: %v %s", err, cres.Text())
+	}
+	rng := cres.Details.(tools.ContextStatus).Ranges[0]
+	// 显式带上同一组 ref 再压一次：折叠后重提同一段，kernel 应回空操作。
+	args := tools.Args{"ranges": []any{map[string]any{
+		"startRef": rng.StartRef,
+		"endRef":   rng.EndRef,
+		"summary":  "## 幂等测试\n重复提交同一区间应得到空操作回执，而不是失败。",
+	}}}
+	first, err := apply.Execute(context.Background(), args)
+	if err != nil || first.IsError {
+		t.Fatalf("首次压缩失败: %v %s", err, first.Text())
+	}
+	if out := first.Details.(tools.ContextApplyResult); out.Noop || out.BlocksCreated == 0 {
+		t.Fatalf("首次压缩应真建块: %+v", out)
+	}
+
+	second, err := apply.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute#2: %v", err)
+	}
+	if second.IsError {
+		t.Fatalf("重复压缩不应报错: %s", second.Text())
+	}
+	out := second.Details.(tools.ContextApplyResult)
+	if !out.Noop {
+		t.Fatalf("重复压缩应标记 noop: %+v", out)
+	}
+	if !strings.Contains(second.Text(), "空操作") {
+		t.Fatalf("结果文本应说清楚是空操作: %s", second.Text())
+	}
+}
+
 // 过短摘要应被补足到 kernel 的 50 字符下限，而不是让整次压缩失败。
 func TestContextApplyShortSummaryPadded(t *testing.T) {
 	p := NewScriptedProvider(reply("x"))
