@@ -329,6 +329,15 @@ func TestPiRPCTaskWithSteering(t *testing.T) {
 	if last := lines[len(lines)-1]; last.Type != "agent_settled" {
 		t.Errorf("最后一行应是 agent_settled，实际 %+v", last)
 	}
+	// 更强的不变量：settled 之后不能再有任何帧（调用方读到这里就收工）。
+	// 回归点：steer 以前把回执/queue_update 写在 runner.Steer() 之后，而 Steer
+	// 会唤醒跑那一轮的 goroutine，两边抢着写 → settled 之后偶尔蹦出 queue_update。
+	for i, l := range lines {
+		if l.Type == "agent_settled" && i != len(lines)-1 {
+			t.Fatalf("agent_settled 之后还有 %d 帧输出（第一帧 %+v）",
+				len(lines)-i-1, lines[i+1])
+		}
+	}
 	if fake.prompt != "把 README 改一下" {
 		t.Errorf("投递的 prompt = %q", fake.prompt)
 	}

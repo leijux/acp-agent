@@ -319,7 +319,12 @@ func (s *rpcSession) steer(req piRPCRequest) {
 		})
 		return
 	}
-	runner.Steer(req.Message)
+	// 顺序很重要：**先**写完这次命令的全部输出，**最后**才 runner.Steer。
+	//
+	// Steer 是「唤醒跑这一轮的 goroutine」的开关：它一返回，对方可能立刻发
+	// 消费凭证 / queue_update(nil) / agent_settled。把回执或队列快照放到
+	// Steer 之后，最后一行就可能变成 queue_update —— 调用方会把「settled
+	// 不是最后一帧」当成输出错序（CI 上偶发过一次）。
 	s.mu.Lock()
 	s.queue = append(s.queue, req.Message)
 	queued := append([]string(nil), s.queue...)
@@ -330,6 +335,8 @@ func (s *rpcSession) steer(req piRPCRequest) {
 		Data: map[string]any{"disposition": "queued"},
 	})
 	s.emitQueueUpdate(queued)
+
+	runner.Steer(req.Message)
 }
 
 func (s *rpcSession) isSettled() bool {
