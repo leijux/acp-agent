@@ -592,7 +592,8 @@ func newApp(ctx context.Context, cfg Config, prov agent.Provider, model agent.Mo
 		Fetch:        fetchProvider,
 		Skills:       skillSet.Skills,
 	})
-	// 保证子进程在退出时被回收。
+	// 进程退出时的回收不动手做：后台 bash 与后台子代理都登记在
+	// Registry.AddCleanup 上，会话关闭（ACP）或进程结束时统一跑。
 	_ = bashMgr
 
 	// MCP 工具在 wrapRegistry **之前**注册，这样远程工具和内置工具一样

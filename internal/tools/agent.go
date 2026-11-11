@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/leijux/acp-agent/internal/skills"
 )
@@ -17,8 +17,11 @@ import (
 type SubagentRunner func(ctx context.Context, agent, task string) (string, error)
 
 // SubagentTool 把子任务委派给独立 agent。
+//
 type SubagentTool struct {
 	Runner SubagentRunner
+	// Manager 是后台任务管理器（为 nil 时由 Runner 自动构造）。
+	Manager *SubagentManager
 	// Agents 是可用角色名（用于生成描述与参数校验）。
 	Agents []string
 	// MaxParallel 控制同一批次内并行委派的上限。
@@ -30,15 +33,17 @@ func NewSubagentTool(r SubagentRunner, agents ...string) *SubagentTool {
 	if len(agents) == 0 {
 		agents = []string{"worker", "researcher", "reviewer", "oracle", "planner"}
 	}
-	return &SubagentTool{Runner: r, Agents: agents, MaxParallel: 4}
+	return &SubagentTool{Runner: r, Manager: NewSubagentManager(r), Agents: agents, MaxParallel: 4}
 }
 
 func (*SubagentTool) Name() string { return "delegate" }
 func (t *SubagentTool) Description() string {
-	return "把自包含的子任务交给独立 agent 执行，返回其结论（不污染当前上下文）。" +
+	return "把自包含的子任务交给独立 agent 在后台执行，立即返回 jobId（不阻塞本轮，也不污染当前上下文）。" +
 		"子代理看不到本会话历史，任务描述必须写全（路径、目标、约束）。" +
-		"多个互不依赖的子任务用 tasks 数组一次提交，可并行执行。" +
-		"可用角色：" + strings.Join(t.Agents, ", ")
+		"默认不等结果：继续干其它事，需要结论时用 subagent_output（wait=exit 可等到结束），" +
+		"不要反复轮询；不再需要的任务用 subagent_kill 终止。" +
+		"确实需要本步结果才能继续时，传 wait=true 直接拿结论。" +
+		"多个互不依赖的子任务用 tasks 数组一次提交。可用角色：" + strings.Join(t.Agents, ", ")
 }
 func (t *SubagentTool) Parameters() map[string]any {
 	return Schema(map[string]any{
@@ -46,7 +51,7 @@ func (t *SubagentTool) Parameters() map[string]any {
 		"task":  Prop("string", "完整、自包含的任务描述"),
 		"tasks": map[string]any{
 			"type":        "array",
-			"description": "并行执行的多个任务（与 task 二选一）",
+			"description": "并行启动的多个任务（与 task 二选一）",
 			"items": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -57,16 +62,22 @@ func (t *SubagentTool) Parameters() map[string]any {
 				"additionalProperties": false,
 			},
 		},
+		"wait":      Prop("boolean", "true = 阻塞到全部结束并返回结论（默认 false = 后台跑）"),
+		"timeoutMs": PropInt("wait=true 时的等待上限毫秒（默认 300000）", 0),
 	})
 }
 
-// ConcurrencySafe=false：委派本身会消耗大量资源，独占一批由内部再并行。
-func (*SubagentTool) ConcurrencySafe() bool { return false }
+// ConcurrencySafe=true：后台委派只是起任务，不等结果也不独占文件；
+// 与同一批里的只读工具并行无副作用（旧实现会阻塞到结论，所以当时特意独占）。
+func (*SubagentTool) ConcurrencySafe() bool { return true }
 func (*SubagentTool) Mutates() bool         { return false }
 
 func (t *SubagentTool) Execute(ctx context.Context, a Args) (Result, error) {
-	if t.Runner == nil {
-		return ErrorResult("delegate 未配置 Runner（宿主需注入 tools.SubagentRunner）"), nil
+	if t.Manager == nil {
+		if t.Runner == nil {
+			return ErrorResult("delegate 未配置 Runner（宿主需注入 tools.SubagentRunner）"), nil
+		}
+		t.Manager = NewSubagentManager(t.Runner)
 	}
 	type job struct{ agent, task string }
 	var jobs []job
@@ -108,49 +119,99 @@ func (t *SubagentTool) Execute(ctx context.Context, a Args) (Result, error) {
 	if maxP <= 0 {
 		maxP = 4
 	}
-	type out struct {
-		agent, task, result string
-		err                 error
+	if len(jobs) > maxP {
+		return ErrorResult("一次最多提交 %d 个任务（收到 %d）", maxP, len(jobs)), nil
 	}
-	results := make([]out, len(jobs))
-	sem := make(chan struct{}, maxP)
-	var wg sync.WaitGroup
-	for i := range jobs {
-		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			text, err := t.Runner(ctx, jobs[i].agent, jobs[i].task)
-			results[i] = out{agent: jobs[i].agent, task: jobs[i].task, result: text, err: err}
-		}()
+
+	// 先把所有任务起起来：后台模式立即返回，阻塞模式才逐个等。
+	started := make([]SubagentJob, len(jobs))
+	startErrs := make([]error, len(jobs))
+	for i, j := range jobs {
+		started[i], startErrs[i] = t.Manager.Start(j.agent, j.task)
 	}
-	wg.Wait()
+
+	if !a.Bool("wait", false) {
+		var b strings.Builder
+		b.WriteString("已转入后台（本轮不等结果，主代理可继续干活）。\n")
+		failed := 0
+		for i, s := range started {
+			if startErrs[i] != nil {
+				failed++
+				fmt.Fprintf(&b, "- [%s] %s 启动失败: %v\n", jobs[i].agent, clip(jobs[i].task, 80), startErrs[i])
+				continue
+			}
+			fmt.Fprintf(&b, "- %s [%s] %s\n", s.ID, s.Role, clip(jobs[i].task, 120))
+		}
+		b.WriteString("用 subagent_output 取结论（wait=exit 等到结束，比反复轮询省 token），")
+		b.WriteString("不需要了用 subagent_kill 终止。\n")
+		ids := make([]string, 0, len(started))
+		for i, s := range started {
+			if startErrs[i] == nil {
+				ids = append(ids, s.ID)
+			}
+		}
+		return Result{
+			Content: []Block{{Kind: KindText, Text: b.String()}},
+			Details: map[string]any{"jobs": len(jobs), "ids": ids, "background": true, "failed": failed},
+			IsError: failed == len(jobs),
+		}, nil
+	}
+
+	// wait=true：退化成原来的阻塞语义（一次性拿全部结论）。
+	timeoutMs := a.Int("timeoutMs", 0)
+	if timeoutMs <= 0 {
+		timeoutMs = 300000
+	}
+	if timeoutMs > maxWaitTimeoutMs {
+		timeoutMs = maxWaitTimeoutMs
+	}
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 
 	var b strings.Builder
 	failed := 0
-	for i, r := range results {
+	pending := 0
+	for i, s := range started {
 		if i > 0 {
 			b.WriteString("\n")
 		}
+		if startErrs[i] != nil {
+			failed++
+			fmt.Fprintf(&b, "=== [%d] %s (error) ===\ntask: %s\n失败: %v\n", i, jobs[i].agent, clip(jobs[i].task, 200), startErrs[i])
+			continue
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			remaining = time.Millisecond
+		}
+		got, finished, err := t.Manager.Wait(ctx, s.ID, WaitExit, remaining)
+		if err != nil || !finished {
+			pending++
+			fmt.Fprintf(&b, "=== [%d] %s (running) ===\njob: %s\ntask: %s\n"+
+				"仍在后台运行，用 subagent_output id=%s wait=exit 继续等。\n",
+				i, jobs[i].agent, s.ID, clip(jobs[i].task, 200), s.ID)
+			continue
+		}
 		status := "ok"
-		if r.err != nil {
+		if got.Err != "" || got.Cancelled {
 			status = "error"
 			failed++
 		}
-		fmt.Fprintf(&b, "=== [%d] %s (%s) ===\ntask: %s\n", i, r.agent, status, clip(r.task, 200))
-		if r.err != nil {
-			fmt.Fprintf(&b, "失败: %v\n", r.err)
+		fmt.Fprintf(&b, "=== [%d] %s (%s) ===\ntask: %s\n", i, jobs[i].agent, status, clip(jobs[i].task, 200))
+		if got.Cancelled {
+			fmt.Fprintf(&b, "已终止\n")
 			continue
 		}
-		body, _ := Truncate(r.result, 0, 24<<10)
+		if got.Err != "" {
+			fmt.Fprintf(&b, "失败: %s\n", got.Err)
+			continue
+		}
+		body, _ := Truncate(strings.TrimSpace(got.Result), 0, 24<<10)
 		b.WriteString(strings.TrimRight(body, "\n"))
 		b.WriteString("\n")
 	}
 	return Result{
 		Content: []Block{{Kind: KindText, Text: b.String()}},
-		Details: map[string]any{"jobs": len(jobs), "failed": failed},
+		Details: map[string]any{"jobs": len(jobs), "failed": failed, "pending": pending},
 		IsError: failed == len(jobs),
 	}, nil
 }
@@ -214,6 +275,12 @@ func DefaultRegistry(o Options) (*Registry, *BashManager) {
 
 	r := NewRegistry()
 	bash := NewBashTool(o.Policy)
+	subagents := NewSubagentManager(o.Subagent)
+	// 会话结束时回收后台资源：bash 进程 + 后台子代理。
+	// 放在 Registry 上而不是让每个调用方自己拿 manager，是因为 ACP 一个进程
+	// 服务多个会话，漏掉一个就会把子代理进程变成孤儿。
+	r.AddCleanup(bash.Manager.KillAll)
+	r.AddCleanup(subagents.KillAll)
 	// parallel 依赖 Registry 已包含其它工具，最后注册。
 	candidates := []Tool{
 		NewReadTool(o.Policy),
@@ -230,6 +297,21 @@ func DefaultRegistry(o Options) (*Registry, *BashManager) {
 		NewWebSearchTool(o.Search),
 		NewWebFetchTool(o.Fetch),
 		NewSubagentTool(o.Subagent, o.Agents...),
+	}
+	// delegate 被禁用时（--disable-tools delegate / 子代理防递归）三个子代理
+	// 工具一起关：只留 output/kill 会让模型看到一堆「找不到任务」的工具。
+	if disableAll || disable["delegate"] {
+		for i := range candidates {
+			if candidates[i].Name() == "delegate" {
+				candidates = append(candidates[:i], candidates[i+1:]...)
+				break
+			}
+		}
+	} else {
+		candidates = append(candidates,
+			NewSubagentOutputTool(subagents),
+			NewSubagentKillTool(subagents),
+		)
 	}
 	for _, t := range candidates {
 		if disableAll || disable[t.Name()] {

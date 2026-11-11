@@ -69,8 +69,9 @@ type SessionConfig struct {
 	Context  agent.ContextOptions
 	// Dir 是该会话的持久化目录；空表示不落盘。
 	Dir string
-	// Close 可选：会话关闭时调用，用来回收该会话独占的资源
-	// （典型是 bash 后台进程管理器）。
+	// Close 可选：会话关闭时调用，用来回收该会话独占的资源。
+	// 现在固定传 tools.Registry.Close：它会把后台 bash 进程与后台子代理
+	// 一起 KillAll（清单在 DefaultRegistry 里 AddCleanup 登记）。
 	Close func()
 }
 

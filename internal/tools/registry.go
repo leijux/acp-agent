@@ -23,6 +23,42 @@ type Registry struct {
 	// base 非 nil 时作为回退来源；wrap 为 nil 表示原样返回。
 	base *Registry
 	wrap func(Tool) Tool
+
+	// cleanups 是会话结束时要跑的回收函数（后台进程 / 后台子代理）。
+	// 存在 Registry 上的原因：每一处构造工具集的地方都拿到了 Registry，
+	// 但拿不到所有 manager；漏掉一个就会留下杀不掉的子进程。
+	cleanupOnce sync.Once
+	cleanups    []func()
+}
+
+// AddCleanup 注册会话结束时要执行的回收函数（可多次调用，逆序执行）。
+func (r *Registry) AddCleanup(fn func()) {
+	if fn == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cleanups = append(r.cleanups, fn)
+}
+
+// Close 执行全部回收函数。幂等：重复调用只跑一次。
+//
+// 会连带关掉 base：ACP 与 agent 拿到的是包过权限门禁的视图（UseBase），
+// 真正的 manager 登记在底层 registry 上，漏了这步就会留下孤儿进程。
+func (r *Registry) Close() {
+	r.cleanupOnce.Do(func() {
+		r.mu.Lock()
+		fns := append([]func(){}, r.cleanups...)
+		base := r.base
+		r.mu.Unlock()
+		// 逆序：后注册的依赖先注册的（例如子代理可能持有 bash 用到的目录）。
+		for i := len(fns) - 1; i >= 0; i-- {
+			fns[i]()
+		}
+		if base != nil {
+			base.Close()
+		}
+	})
 }
 
 // UseBase 把 r 变成 base 的包装视图。

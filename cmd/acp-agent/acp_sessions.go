@@ -35,7 +35,7 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 		Disabled:   a.cfg.DisableSkills,
 		NoPiDirs:   a.cfg.NoPiSkills,
 	})
-	reg, bashMgr := tools.DefaultRegistry(tools.Options{
+	reg, _ := tools.DefaultRegistry(tools.Options{
 		Policy: tools.Policy{
 			Root: root, MaxReadBytes: 2 << 20,
 			AllowNetworkWrite: allowOutside, // 与 auto 同步：只有全放行模式才能写网络
@@ -60,8 +60,9 @@ func (a *app) newACPSession(cwd string) (acp.SessionConfig, error) {
 			Skills:       skillSet.Skills,
 		},
 		Dir: acpSessionDir(root),
-		// 会话独占的 bash 后台进程跟着会话一起回收。
-		Close: bashMgr.KillAll,
+		// 会话独占的后台资源（bash 进程 + 后台子代理）跟着会话一起回收。
+		// 具体清单在 tools.DefaultRegistry 里交给 Registry.AddCleanup 登记。
+		Close: reg.Close,
 	}, nil
 }
 
