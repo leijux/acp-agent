@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -75,7 +76,10 @@ func (p *interpProc) Start() error {
 		return err
 	}
 	runner, err := interp.New(
-		interp.StdIO(nil, p.stdout, p.stderr),
+		// stdin 必须给非 nil 的 reader：宿主是非交互执行，语义上等于 /dev/null（读即 EOF）。
+		// 传 nil 会让 hc.Stdin 变成 nil interface，内建命令里 io.Copy(stdout, hc.Stdin)
+		// 直接 nil deref —— 而这个 panic 发生在解释器 goroutine 里，会带走整个进程。
+		interp.StdIO(emptyStdin{}, p.stdout, p.stderr),
 		interp.Env(expand.ListEnviron(withEnv(p.env)...)),
 		interp.Dir(p.dir),
 		// 内建命令回退：PATH 里没有 sleep/ls/cat 之类可执行文件时用纯 Go 实现顶上。
@@ -100,7 +104,17 @@ func (p *interpProc) Start() error {
 		p.mu.Unlock()
 		defer cancel()
 
-		err := runner.Run(ctx, file)
+		// 兜底：解释器/ExecHandler 里漏出来的 panic 不能掀掉整个进程（工具层 recover
+		// 在调用方 goroutine，救不了这里），转成一条普通的执行错误 —— 带截断的栈，
+		// 否则这类错误只剩一句「内部错误」，完全无法定位。
+		err := func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("shell 内部错误: %v\n%s", r, panicStack())
+				}
+			}()
+			return runner.Run(ctx, file)
+		}()
 
 		p.mu.Lock()
 		p.status, p.runErr = 0, nil

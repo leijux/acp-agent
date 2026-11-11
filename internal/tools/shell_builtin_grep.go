@@ -175,7 +175,7 @@ func grepInputs(ctx context.Context, hc interp.HandlerContext, opts grepOpts, pa
 
 // grepOne 扫描一个输入，返回是否有匹配。
 func grepOne(ctx context.Context, hc interp.HandlerContext, name string, showName bool, opts grepOpts, m *grepMatcher) (bool, error) {
-	var r io.Reader = hc.Stdin
+	var r io.Reader = builtinStdin(hc)
 	if name != "-" {
 		fh, err := os.Open(hcAbs(hc, name))
 		if err != nil {

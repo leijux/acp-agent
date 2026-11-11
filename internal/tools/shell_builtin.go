@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -50,15 +51,55 @@ var builtinCmds = map[string]builtinCmd{
 	"mv":    cmdMv,
 }
 
+// emptyStdin 是「没有任何输入」的 stdin：读立刻 EOF，等价于 /dev/null。
+type emptyStdin struct{}
+
+func (emptyStdin) Read([]byte) (int, error) { return 0, io.EOF }
+
+// builtinStdin 返回内建命令该读的 stdin，nil 时兜底成空输入。
+//
+// 解释器没配 stdin 时 hc.Stdin 是 nil interface，对它 io.Copy/ReadAll 会
+// nil pointer dereference，而且这个 panic 在解释器 goroutine 里，救回来之前
+// 整个进程就没了（模型一条不带管道的 `cat` 就能崩掉 agent）。
+func builtinStdin(hc interp.HandlerContext) io.Reader {
+	if hc.Stdin == nil {
+		return emptyStdin{}
+	}
+	return hc.Stdin
+}
+
+// panicStack 返回截断后的 panic 栈，用于把「内部错误」变成可诊断、可 grep 的线索。
+//
+// 不限长度会把几千行栈全喷进模型上下文（goja + 解释器的帧很多），所以只留头部。
+func panicStack() string {
+	const max = 2048
+	stack := string(debug.Stack())
+	if len(stack) > max {
+		stack = stack[:max] + "…\n"
+	}
+	return stack
+}
+
 // builtinExecHandler 返回 ExecHandler 中间件。policy 用于约束需要访问文件的
 // 内建命令（目前是 goja 的 fs 桥）。
 func builtinExecHandler(policy Policy) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-		return func(ctx context.Context, args []string) error {
+		return func(ctx context.Context, args []string) (err error) {
 			if len(args) == 0 {
 				return next(ctx, args)
 			}
 			hc := interp.HandlerCtx(ctx)
+			// 内建命令跑在解释器 goroutine 里，panic 会带走整个进程（工具层的
+			// recover 在调用方 goroutine，管不到）。兜成 stderr + exit 1，脚本还能继续。
+			// 带截断的栈：单行「内部错误」看不出根因，也没法 grep。
+			defer func() {
+				if r := recover(); r != nil {
+					if hc.Stderr != nil {
+						fmt.Fprintf(hc.Stderr, "%s: 内部错误: %v\n%s", args[0], r, panicStack())
+					}
+					err = exitStatus(1)
+				}
+			}()
 			// goja 需要一个 policy，单独分派（其它内建命令的签名里没有它）。
 			if args[0] == "goja" && findExecutable(hc.Env, args[0]) == "" {
 				return cmdGoja(ctx, hc, args[1:], policy)
@@ -389,7 +430,7 @@ func cmdCat(ctx context.Context, hc interp.HandlerContext, args []string) error 
 			return err
 		}
 		if f == "-" {
-			if _, err := io.Copy(hc.Stdout, hc.Stdin); err != nil {
+			if _, err := io.Copy(hc.Stdout, builtinStdin(hc)); err != nil {
 				return exitStatus(1)
 			}
 			continue
@@ -482,7 +523,7 @@ func headTail(ctx context.Context, hc interp.HandlerContext, args []string, head
 			fmt.Fprintf(hc.Stdout, "==> %s <==\n", f)
 		}
 		if f == "-" {
-			if err := copyLines(ctx, hc.Stdin, hc.Stdout, n, head); err != nil {
+			if err := copyLines(ctx, builtinStdin(hc), hc.Stdout, n, head); err != nil {
 				return err
 			}
 			continue

@@ -113,7 +113,7 @@ func cmdGoja(ctx context.Context, hc interp.HandlerContext, args []string, polic
 		default:
 			// 第一个非选项参数是脚本文件。
 			if a == "-" {
-				data, err := readAllLimited(hc.Stdin, 4<<20)
+				data, err := readAllLimited(builtinStdin(hc), 4<<20)
 				if err != nil {
 					return parseFailed("goja: 读取 stdin 失败: %v", err)
 				}
@@ -132,7 +132,7 @@ func cmdGoja(ctx context.Context, hc interp.HandlerContext, args []string, polic
 
 	if strings.TrimSpace(script) == "" {
 		// 没有脚本文件也没 -e：从 stdin 读（管道里的常见用法）。
-		data, err := readAllLimited(hc.Stdin, 4<<20)
+		data, err := readAllLimited(builtinStdin(hc), 4<<20)
 		if err != nil {
 			return parseFailed("goja: 读取 stdin 失败: %v", err)
 		}
@@ -201,7 +201,7 @@ func runGoja(ctx context.Context, hc interp.HandlerContext, policy Policy, srcNa
 	// Windows 上没有 /dev/stdin，stdin 又是解释器的 io.Reader 而不是文件，
 	// 所以只能由宿主提供 fs.readStdin()。
 	if stdinFree {
-		if err := installStdin(vm, hc.Stdin, 8<<20); err != nil {
+		if err := installStdin(vm, builtinStdin(hc), 8<<20); err != nil {
 			fmt.Fprintf(hc.Stderr, "goja: 初始化 stdin 失败: %v\n", err)
 			return exitStatus(1)
 		}

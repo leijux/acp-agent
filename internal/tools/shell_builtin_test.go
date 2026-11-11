@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"mvdan.cc/sh/v3/expand"
+	"mvdan.cc/sh/v3/interp"
 )
 
 // 内建命令回退层的测试。
@@ -258,6 +260,92 @@ func TestBuiltinSleepInterruptible(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("内建 sleep 未被 Kill 终止")
+}
+
+// TestBuiltinEmptyStdin 回归：没有管道时（hc.Stdin == nil）读 stdin 的内建命令
+// 不能崩。以前 `cat`（不带文件名、也不带管道）会 io.Copy(stdout, nil) → nil
+// deref，panic 又在解释器 goroutine 里，直接把整个 agent 进程带走。
+func TestBuiltinEmptyStdin(t *testing.T) {
+	bt, _ := newBash(t)
+	empty := t.TempDir()
+	run := func(t *testing.T, script string) string {
+		t.Helper()
+		res, err := bt.Execute(ctx_(), Args{"command": script, "env": map[string]any{"PATH": empty}})
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		return res.Text()
+	}
+
+	// 没输入就该是 EOF，退出码 0，后面的命令照常跑。
+	for _, script := range []string{"cat; echo AFTER", "cat -; echo AFTER", "head; echo AFTER", "tail; echo AFTER"} {
+		res, err := bt.Execute(ctx_(), Args{"command": script, "env": map[string]any{"PATH": empty}})
+		if err != nil {
+			t.Fatalf("%q Execute: %v", script, err)
+		}
+		if !strings.Contains(res.Text(), "AFTER") {
+			t.Fatalf("%q 未跑到后续命令: %q", script, res.Text())
+		}
+		// 读 Details 的 exitCode，而不是 grep 输出里的 "[exit 0, …]" 头部
+		// （后者会被 Truncate 截掉、也对输出文案有隐式依赖）。
+		details, _ := res.Details.(map[string]any)
+		if code, _ := details["exitCode"].(int); code != 0 {
+			t.Fatalf("%q 退出码 = %v，空 stdin 应当 EOF 且退出 0", script, details["exitCode"])
+		}
+	}
+
+	// grep 读空 stdin：无匹配 → 退出码 1，但不得崩。
+	if text := run(t, "grep x; echo AFTER"); !strings.Contains(text, "AFTER") {
+		t.Fatalf("grep 空 stdin 后未继续: %q", text)
+	}
+
+	// goja 无参数、无输入：报错退出而不是 panic（只断言不崩 + 后续命令照跑，
+	// 不绑定具体文案：那是 shell_goja.go 的措辞，不是契约）。
+	res, err := bt.Execute(ctx_(), Args{"command": "goja; echo AFTER", "env": map[string]any{"PATH": empty}})
+	if err != nil {
+		t.Fatalf("goja Execute: %v", err)
+	}
+	if !strings.Contains(res.Text(), "AFTER") {
+		t.Fatalf("goja 空 stdin 处理不对: %q", res.Text())
+	}
+	if strings.Contains(res.Text(), "内部错误") {
+		t.Fatalf("goja 空 stdin 不应走 panic 兜底: %q", res.Text())
+	}
+}
+
+// TestBuiltinPanicContained 内建命令 panic 必须被兜住。
+//
+// 内建命令跑在解释器 goroutine 里，工具层的 recover 在调用方 goroutine，管不到：
+// 不在这里 recover 就是整个进程死。
+//
+// 注意：本用例临时改写包级 builtinCmds，所以本包测试**不得使用 t.Parallel**。
+func TestBuiltinPanicContained(t *testing.T) {
+	const name = "panictest"
+	old, had := builtinCmds[name]
+	builtinCmds[name] = func(context.Context, interp.HandlerContext, []string) error {
+		panic("boom")
+	}
+	defer func() {
+		if had {
+			builtinCmds[name] = old
+			return
+		}
+		delete(builtinCmds, name)
+	}()
+
+	bt, _ := newBash(t)
+	empty := t.TempDir()
+	res, err := bt.Execute(ctx_(), Args{"command": "panictest; echo AFTER", "env": map[string]any{"PATH": empty}})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := res.Text()
+	if !strings.Contains(text, "内部错误") || !strings.Contains(text, "boom") {
+		t.Fatalf("panic 未转成错误输出: %q", text)
+	}
+	if !strings.Contains(text, "AFTER") {
+		t.Fatalf("panic 后脚本应继续执行: %q", text)
+	}
 }
 
 // TestShellPrefersRealExecutable PATH 里有真程序时必须用它，不能被内建覆盖。
