@@ -105,7 +105,11 @@ ACP_AGENT_WEB_SEARCH_PROVIDER=searxng \
 
 ### 子代理（`delegate` 工具）
 
-`delegate` 默认**用 ACP 把本程序当作子代理拉起**（不是进程内调用）：
+`delegate` 默认**用 ACP 把本程序当作子代理拉起**（不是进程内调用），
+而且**默认在后台跑**：工具立即返回 `jobId`，不阻塞这一轮；需要结论时用
+`subagent_output` 取（`wait=exit` 等到结束），不要的用 `subagent_kill` 终止。
+后台任务的生命周期不挂在某一轮上 —— Esc / 本轮结束不会杀掉它，只有
+`subagent_kill`、会话关闭（`Registry.Close`）或进程退出才回收。
 
 ```json
 {
@@ -131,27 +135,41 @@ ACP_AGENT_WEB_SEARCH_PROVIDER=searxng \
 最后两项是关键：禁用 delegate 防无限递归，禁用 MCP 避免子代理背着主进程的远程工具。
 
 ```bash
-acp-agent --no-subagent -p "..."        # 关掉 delegate
+acp-agent --no-subagent -p "..."        # 关掉 delegate（连带 subagent_output/kill）
 acp-agent --subagent claude-code-acp    # 换成第三方 ACP agent
 acp-agent --no-mcp -p "..."             # 自己不连 MCP
 ```
+
+三个工具的参数：
+
+| 工具 | 参数 | 行为 |
+|---|---|---|
+| `delegate` | `agent` / `task` / `tasks[]` / `wait` / `timeoutMs` | 默认后台起任务、立即返回 `jobId`；`wait=true` 退化成阻塞到全部结束 |
+| `subagent_output` | `id` / `wait` / `timeoutMs` | 不给 `id` 列出全部任务；`wait=exit` 阻塞到结束（默认上限 120s，上限 300s）|
+| `subagent_kill` | `id` / `all` | 终止任务（已结束的不会抱错）|
 
 运行时它在工具块里的样子（交互界面与 `-p` 一致）：
 
 ```
 → delegate agent=worker task="用 read 看 README.md 前两行"
-↳ 子代理 worker 启动
+✓ delegate (1 块, 0.003s)        # 立刻返回：jobId=sub-1，本轮继续
+  ↳ 子代理 worker 启动              # 下面这些行来自后台任务，随时可能插进来
     ⚙ 读取 E:\go\acp-agent\README.md
     ! [worker] 警告文本（子代理 stderr，最多回显 24 行 / 单行 160 字符）
-↳ 子代理 worker 完成 · 1 次工具 · 2.4s
+  ↳ 子代理 worker 完成 · 1 次工具 · 2.4s
     ⋯ README.md 的前两行只是一个一级标题…（结论预览，只取第一行）
-✓ delegate (1 块, 2.401s)
 ```
 
-顶部 `→`/`✓` 是主进程记的，中间带 `↳`/`⚙`/`!` 的行是子代理上报的活动，
-缩进一层以区分层级。子代理自己的完整回复不会往主视图里灌（那是给主模型看的），
-只保留一行结论预览。交互界面下这些行进工具块（可滚动、可拖选复制）；
-`-p` 下走 stderr，因为 stdout 是“结果”。
+顶部 `→`/`✓` 是主进程记的工具调用（后台模式下耗时只有几毫秒），带 `↳`/`⚙`/`!`
+的行是子代理上报的活动，随时出现（包括主代理已经空闲、等你输入的时候）。
+子代理自己的完整回复不会往主视图里灌（那是给主模型看的），只保留一行结论预览；
+完整结论存在任务里，用 `subagent_output` 取（不会因为“错过”而丢）。
+交互界面下这些行进工具块（可滚动、可拖选复制）；`-p` 下走 stderr，因为 stdout 是“结果”。
+
+交互模式下要留意一点：后台子代理的**权限请求**也会在主代理空闲时弹出
+（它仍由主进程守卫裁决）——这是后台化的代价，否则子代理一旦需要确认就只能报错。
+本轮取消（Esc）**不会**杀掉后台子代理：那是独立的生命周期，要停就用
+`subagent_kill`（或关会话，会话关闭时统一 `KillAll`）。
 
 ## 会话存储（按项目目录分区）
 
@@ -461,9 +479,10 @@ ls/glob/grep/js 的路径解析与 bash 的 `cwd` 都可以指向 root 外。守
 ```
 LoadConfig → applyDefaults → 解析 key → buildProvider → newApp
 newApp:
-  tools.DefaultRegistry          14 个内置工具（read/write/edit/ls/glob/grep/
+  tools.DefaultRegistry          16 个内置工具（read/write/edit/ls/glob/grep/
                                  bash/bash_output/bash_kill/todo/web_search/
-                                 web_fetch/delegate/parallel）
+                                 web_fetch/delegate/subagent_output/
+                                 subagent_kill/parallel）
   wrapRegistry(guard)            包一层权限闸门，保留 Mutates()/ConcurrencySafe()
   agent.New(...)                 Session + Provider + Registry + Executor(并发 8)
 ```

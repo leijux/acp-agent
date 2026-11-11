@@ -115,6 +115,35 @@ kernel 的 **state 快照跟着 Session 一起落盘**（`Session.SetKernelState
 
 本包不再自己算切点：`KeepRecentTokens` / `findCutPoint` / `validCutMessage` 已删除。
 
+### 计数来源与空操作回执
+
+**发给 kernel 的 tokenCount 是本地估算**（`TokenCounter` + system prompt + 工具定义），
+所以 `context_check` / `context_apply` / `Compact` 调 kernel 时一律声明
+`kernel.TokenCountEstimate`（`TurnSource` / `TurnMetaSource`）。
+
+后果要说清楚：上游 0.0.184+ 的幻压守卫只允许 usage 级读数立刻走压力档
+（使用率 ≥ 75% 的 OVER-LIMIT / EMERGENCY）。但它押的期不是“每轮”，而是**同一个会话
+前 `nudge.maxEstimateHoldRounds`（默认 2）次 estimate 调用** —— 上游把「连续 estimate
+轮数」写进 state，只在非 estimate 调用时归零（bundle:8462-8463），超过上限就自动
+退化为旧行为（#5865 的防饿死设计）。而本 agent 从不下发 usage 级读数，所以：
+**守卫实际只在会话开头的两次调用上生效，之后按旧行为注入**。
+
+换句话说，“声明 estimate”在这里是“说实话、代价几乎为零”（不是“额外获得保护”）。
+真正的紧急兜底始终是宿主侧的 `HardCompactUsage`（90%），它不看 kernel nudge。
+拿估值冒充 `TokenCountUsage` 是更坏的选择：那会让 kernel 在不该改写上下文的时候改写。
+想让守卫真正工作，得先把 provider 报的 usage 接进 `contextTokens()`。
+
+**重复压缩同一段是空操作，不是失败**（上游 #4521）：kernel 返回
+`blocksCreated=0 && errors=[] && noop=true`，`context_apply` 会把这个回执渲染成
+「压缩完成（空操作）… 不要重试同一个区间」，`Compact` 则把它归入
+`ErrNothingToCompact`（不发 `CompactionEndEvent`）。
+
+**压缩事件的终态不变量**：一旦发了 `CompactionStartEvent`，就一定会在同一个函数里
+发 `CompactionEndEvent` 或 `CompactionAbortEvent`（`Phase` 为 summarize / apply /
+save / mirror / noop）。订阅方（ACP 的 `compaction_update`、TUI 的「压缩中」提示）
+只靠终态收尾，漏一条就是永久 in_progress —— 这条不变量由
+`internal/agent/compact_abort_test.go` 钉住。
+
 ## 关键实现细节（踩过的坑）
 
 **`DisableAutoCompact` / `DisableContextTools` 而不是肯定式命名。** 布尔零值必须

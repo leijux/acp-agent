@@ -51,16 +51,18 @@ if n := res.Nudge; n != nil && len(n.CompressibleRanges) > 0 {
 |---|---|
 | `New(opts ...Option) (*Kernel, error)` | 创建实例（bundle 懒编译一次，之后复用） |
 | `(*Kernel).NewSession(Config) (*Session, error)` | 会话（state/VM 隔离，编译产物共享；~4.7ms） |
-| `(*Kernel).Version() (string, error)` | 上游 kernel 版本 |
-| `(*Kernel).Functions() ([]string, error)` | 上游导出符号清单（259 个） |
+| `(*Kernel).Version() (string, error)` | 嵌入 bundle 对应的上游版本（`kernel.BundleVersion`） |
+| `(*Kernel).Functions() ([]string, error)` | 上游导出符号清单（266 个） |
 | `(*Kernel).Call(name string, args ...any) ([]byte, error)` | 逃生口：直接调上游任意导出函数 |
 | `(*Session).Turn(msgs, tokenCount)` | 主路径：裁剪 + 打标 + nudge，返回完整视图 |
+| `(*Session).TurnSource(msgs, tokenCount, source)` | 同上，但声明 `tokenCount` 是 usage 还是估算（见下文「接线现状」） |
 | `(*Session).TurnMeta(msgs, tokenCount)` | 轻量版：只回 nudge/refs，不序列化视图 |
+| `(*Session).TurnMetaSource(msgs, tokenCount, source)` | 轻量版的带来源版本 |
 | `(*Session).View()` | 按需把最近视图转成 `[]Message` |
 | `(*Session).TurnBatch(ctx, []BatchTurn)` | 批量推进，遇 `ShouldInject` 自动停 |
 | `kernel.EstimateTokens(msgs)` | Go 侧 token 估算，用作 `tokenCount` 兜底 |
 | `kernel.CountTokens(text)` | 与上游 `defaultCountTokens` 逐字节等价的 Go 实现 |
-| `(*Session).ApplyCompression([]Range)` | 应用压缩 |
+| `(*Session).ApplyCompression([]Range)` | 应用压缩（重复区间返回 `CompressionResult.Noop`） |
 | `(*Session).Decompress(blockID)` | 还原块（只返回摘要 + 直接消息 id） |
 | `(*Session).Blocks() / BlocksJSON()` | 块列表 / 原始 JSON |
 | `(*Session).Refs()` | id ↔ `mNNNNN` / `bN` 引用映射 |
@@ -234,34 +236,81 @@ GC 是全局的 —— 8 个 VM 并行跑，GC 成了共同瓶颈。这也意味
 
 ## 其他事实
 
-- 时间、随机数、locale **不受支持也不需要**：kernel 内部不用 `Date`/`Math.random`（否则 hash 不会与 Node 一致）。
+- 时间、随机数、locale **不受支持也不需要**：默认路径里 kernel 不用 `Date`/`Math.random`（否则 hash 不会与 Node 一致）。
+  唯一的例外是上游 0.0.171+ 的消息时间戳特性：开了 `Ports.timestamps` 才会在 stamp 节点里
+  调 `Date.now()`，我们没开（见下面「上游新增但 Go 侧未接线」）。
 - `structuredClone` / `TextEncoder` / `queueMicrotask` / RegExp `d` flag 在 goja 缺失，kernel 未使用。
 - 已支持：`??=`、`Object.hasOwn`、`Array.at`、`findLast`、class fields、`#private`、static block、Proxy get、BigInt、lookbehind。
 - `goja_nodejs/eventloop` **没有**用：kernel 的 fs/path 由 Go 侧 `WithFS` 注入，不需要事件循环。
 - 产出与 Node **逐字节一致**：同一 workload 的 `messagesHash = 6a8561416f02cde1`、`blockNoTimeHash = 0cbd1741d253e587`。
-  这条断言在三次性能优化之后依然通过 —— 因为 `CountTokens` 是与上游 `defaultCountTokens`
-  逐字节等价的 Go 复刻（`TestCountTokensMatchesUpstream` 用 JS 版逐例对照）。
+  这条断言在三次性能优化、以及 0.0.177 → 0.0.193 的 bundle 更新之后依然通过 —— 因为
+  `CountTokens` 是与上游 `defaultCountTokens` 逐字节等价的 Go 复刻
+  （`TestCountTokensMatchesUpstream` 用 JS 版逐例对照）。
 
 ## 重新生成 bundle
 
-当前 bundle 对应上游 `acp-kernel 0.0.169`（commit `1fad21d`）。
+当前 bundle 对应上游 `acp-kernel 0.0.193`（commit `e3220ad`，2026-11-11），435 KB。
 
-上一次更新（0.0.167 → 0.0.169）的实际变化很小，只多了一个函数：
-`restampContentStore`（上游 #4733 —— CCR content store 在 `restampRefsToLedger`
-把 messageRefs 重编号之后要按新的 `byRaw` re-key，否则 store 的 byRef 键会指向
-另一个消息）。它在 bundle 里，Go 侧只读持久化结构里的 `byRef` 字段、没有复刻这段
-逻辑，所以不需要跟着改。更新后 `messagesHash` / `blockNoTimeHash` 仍与 Node 一致。
+上一次更新（0.0.177/0.0.178 → 0.0.193，2026-11-11）：kernel/src 改 24 个文件、+2184/−272，
+全是 kernel 内部行为，**Go 封装一行没改**。要点：
 
-上游发新版时：
+- 压缩正确性：#5751 按 id 在任意距离折叠 tool-call/result 配对；#5789 tier 蒸馏合并能在
+  历史中段块周围恢复；#5894 多区间压缩的摘要下限改成按批次合计判定（单个短 span 不再
+  拖死整批）；#5531 被块覆盖的调用在 turn-integrity 里视为不可见。
+- nudge：#5698 T1 收割停滞时允许质量达标的 T2/T3 先触发；#5860/#5865 幻压守卫
+  （`nudge.requireUsageSampleForPressure` 默认 **true**）要求压力档拿到 usage 级采样才注入
+  EMERGENCY/OVER-LIMIT，估值级读数最多只压一轮。
+- media：#5620 引用式 media 可折叠，重新访问句柄跟着摘要走。
+- 时间戳：#5608-B/C 的 high-water mark 与「诚实 NULL」铸造（都要 `Ports.timestamps` 才生效）。
+- **删除**：上游 0.0.193 整体移除了 `compressAtFoldPoint` / `relocateCompressCarriers`
+  （v1 #5471 + v2 #5949，2026-11-10 #6132 事故后回滚：重定位会把本轮答案文本裸留在
+  尾部，小模型会把自己的话读成用户消息）。我们这份 0.0.177 里还带着它，本次更新一并消失。
+
+> 注：本页此前的版本号（0.0.169 / `1fad21d`）是错的 —— 那份 bundle 实际已经是 0.0.177/0.0.178
+> （含 `Ports.timestamps`、`absorbedDebt`、relocate v1，缺 `mediaRefs`），只是文档没跟着改。
+
+### 上游新增能力：Go 侧接线现状
+
+| 上游能力 | Go 侧 | 行为 |
+|---|---|---|
+| `processTurn({ tokenCountSource })`（0.0.184+） | `Session.TurnSource` / `TurnMetaSource` / `TurnBatchSource` + `TokenCountSource` | agent 一律传 `TokenCountEstimate`（它给的确是本地估算）；不传来源 = 旧行为，取值不在白名单里直接报错 |
+| `ApplyCompressionResult.payload.noop`（0.0.172+） | `CompressionResult.Noop` | `blocksCreated=0 && errors=[]` 时上游置 true；`context_apply` 渲染成「空操作，不要重试」，`Compact` 归入 `ErrNothingToCompact` |
+| `Ports.timestamps`（0.0.171+） | 未接（默认关） | 开了才会在 `<acp>` 标签里带 `time="…"` 并调 `Date.now()`，会改渲染字节、需重对 hash |
+| 版本 + 产物指纹 | `BundleVersion` / `BundleDigest` / `BundleEsbuild`（`version_gen.go`，全由 `build-cjs.sh` 生成） | `Kernel.Version()` 返回常量（自定义 bundle 时返回空串）；`TestBundleDigest` 用 sha256 挡住「换了 bundle 没重跑脚本」 |
+
+### 上游发新版时
 
 ```bash
 git clone --depth 1 https://github.com/ranxianglei/billion-context /tmp/billion-context
 cd /tmp/billion-context/kernel && npm ci && npm run build   # 产 ESM dist/
-cd /path/to/acp-agent && ./build-cjs.sh                     # ESM -> CJS(ES2017)
-go test ./internal/kernel
+cd /path/to/acp-agent
+KERNEL=/tmp/billion-context/kernel ./script/build-cjs.sh    # ESM -> CJS(ES2017)
+go test ./internal/kernel/ -run TestGoldenHashes -v         # 与 Node 的逐字节 hash
+go run ./cmd/verify-kernel                                  # 裸 goja 全链路（不复用 internal/kernel）
+go test ./...                                               # agent/tools 侧回归
 ```
 
-`build-cjs.sh` 做的三件事：`--format=cjs`（goja 无 ESM loader）、`--target=es2017`、`--define:import.meta.url`（上游 `src/tokenize.ts` 顶层 `createRequire` 会读它）。
+没有 bash 的机器（纯 Windows）可以直接调 esbuild 的 node 入口，参数与脚本一致：
+
+```bash
+cd <kernel> && node node_modules/esbuild/bin/esbuild dist/index.js \
+  --bundle --format=cjs --platform=neutral --target=es2017 \
+  --external:crypto --external:path --external:fs --external:module "--external:node:*" \
+  "--define:import.meta.url=\"file:///kernel/index.js\"" \
+  --outfile=/path/to/acp-agent/internal/kernel/kernel.dist.cjs
+```
+
+**但手工打完必须补一步**：`internal/kernel/version_gen.go` 里的 `BundleVersion` /
+`BundleDigest` / `BundleEsbuild` 是脚本从上游 `package.json` 与产物算出来写的，只跑
+esbuild 会留下过期的旧值（`TestBundleDigest` 会立刻红）。手工方案下请自己算：
+
+```bash
+node -e "const c=require('crypto'),f=require('fs');console.log(c.createHash('sha256').update(f.readFileSync('internal/kernel/kernel.dist.cjs')).digest('hex'))"
+```
+
+`build-cjs.sh` 做的四件事：`--format=cjs`（goja 无 ESM loader）、`--target=es2017`、
+`--define:import.meta.url`（上游 `src/tokenize.ts` 顶层 `createRequire` 会读它）、
+以及生成 `version_gen.go`（版本 + sha256 + esbuild 版本）。
 
 ## 测试
 

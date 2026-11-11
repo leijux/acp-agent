@@ -107,6 +107,30 @@ agent.ToolExecutionEndEvent           → tool_call_update(completed|failed)
 `updates.takeToolID(name)` 按工具名弹出队首 ID，因此同一响应里重复调用同一
 工具（两个 `read`）也能各自拿到正确的 ID。
 
+## compaction_update 的终态
+
+压缩实体（`compaction_update`）同样要配对：客户端拿到 `in_progress` 后，**必须有**
+一个终态把它关掉，否则界面永远停在“压缩中”。协议里 `Status` 支持
+`in_progress | completed | failed | cancelled`（`schema.go`）。
+
+```
+CompactionStartEvent → compaction_update(in_progress), 记下 compactID
+CompactionEndEvent   → compaction_update(completed, summary)   ——同一个 id
+CompactionAbortEvent → compaction_update(failed, error)         ——同一个 id
+```
+
+要点：
+
+- **id 存下来，不从序号反推**（`updates.compactID`）。旧实现用 `compactSeq` 反推，
+  一旦出现失败终态就会把 `completed` 配到另一个实体上。
+- **`CompactionAbortEvent` 是“开了头但没走完”的唯一出口**：摘要模型报错、kernel 拒经、
+  镜像块失败、区间已被现有块覆盖（noop）都会发它，`Phase` 说明卡在哪一步。
+  没有它，那四条路径就是永久 `in_progress`。
+- **没有在飞的实体就不发 failed**：`abort` 时 `compactID` 为空则降级成 notice，
+  避免客户端看到一个从未开始过的压缩；`CompactionSkipEvent`（没东西可压）同理——
+  它在 Start **之前**发生，本来就没有实体。
+- 客户端不支持 `compaction` 能力时全程走 notice，不发实体。
+
 ## 权限拒绝 ≠ turn 失败
 
 `Guard` 返回错误时，`guardedTool` 把它变成**工具结果**（`IsError`），
@@ -199,6 +223,22 @@ go test ./internal/acp/ -race -v
 
 `delegate` 通过 ACP 协议驱动一个**独立进程**（默认是本程序自身 `--acp`），
 所以子代理有独立的上下文、kernel 会话与工具状态，崩了也不会带走主进程。
+
+### 后台执行（不阻塞主代理）
+
+`delegate` 默认**不阻塞**：`tools.SubagentManager` 在 `context.Background()` 上起任务，
+立即返回 `sub-1` 这类 jobId；主代理继续干活，用 `subagent_output` 取结论
+（`wait=exit` 等价于等结束）、`subagent_kill` 终止。
+
+- **与 turn 解耦**：调用方 ctx 只用于限额等待，**不传给子代理** —— 否则「本轮结束 /
+  用户 Esc」会连坐杀掉子代理（这正是优化前的问题）；回收只靠 `subagent_kill`、
+  会话关闭（`Registry.Close` → `KillAll`）或进程退出。
+- **结果不丢**：结论文本存在 job 里（上限 4MB），任意后续轮次可反复读，
+  渲染给模型时才截到 24KB。
+- **工具集联动**：`--disable-tools delegate` 会把 `subagent_output` / `subagent_kill`
+  一起拉黑，避免子代理看到一对永远没任务的工具。
+- 进程与权限模型不变（仍然是 ACP 子进程，仍然过主进程的权限门禁），只是调用方
+  从「同步等结论」换成「拿 jobId + 轮询或等」。
 
 关键约束：
 

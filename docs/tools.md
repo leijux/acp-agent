@@ -36,7 +36,9 @@ results := ex.Execute(ctx, []tools.Call{
 | `todo` | ❌ | 内存态任务清单（replace/add/update/list） |
 | `web_search` | ✅ | 多 query 并发检索；后端在 `internal/web`（duckduckgo 免 key / searxng / tavily / brave / exa） |
 | `web_fetch` | ✅ | 抓正文：HTML→纯文本（去 nav/footer/script，代码块保留围栏）、GB18030/UTF-16 自动解码、字节+字符双上限 |
-| `delegate` | ❌ | 子代理委派：通过 **ACP** 拉起子进程（默认自身），`tasks` 数组内部再并行 |
+| `delegate` | ❌ | 子代理委派：通过 **ACP** 拉起子进程（默认自身），**默认后台跑**、立即返回 jobId |
+| `subagent_output` | ✅ | 读后台子代理结论：不给 id 列出全部，`wait=exit` 阻塞到结束 |
+| `subagent_kill` | ❌ | 终止后台子代理任务（`id` 或 `all`） |
 | `parallel` | ❌ | 元工具：模型一次提交多个只读调用，本地并发执行 |
 | `context_check` | ✅ | 看上下文占用与 kernel 推荐的可压区间（后端由 agent 注入） |
 | `context_apply` | ❌ | 提交压缩；摘要由模型自己写（后端由 agent 注入） |
@@ -231,6 +233,11 @@ go env GOMOD                                 默认 50ms   native 71ms
 不在表里的命令（`sed`、`awk`、`wc`、`tr`、`sort`、`which`…）仍然要求系统里有真实
 可执行文件。Windows 上想用它们，要么装 Git Bash / MSYS2 / scoop coreutils，要么改用
 `read`/`grep`/`glob` 工具。
+
+没有管道输入时，stdin 一律当**空输入（EOF，等价 `/dev/null`）**：`cat`、`head`、`tail`、
+`grep`、`goja` 立即读到 EOF（`cat` 退出 0），不会像真 shell 那样等终端输入。
+内建命令里的 panic 会被 ExecHandler 兜成 stderr 一行 `cmd: 内部错误: …` + exit 1，
+脚本继续执行——这类 panic 跑在解释器 goroutine 里，不兜住就是整个进程退出。
 
 #### 内建 grep 的取舍（`shell_builtin_grep.go`）
 
