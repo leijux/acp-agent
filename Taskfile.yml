@@ -277,11 +277,12 @@ tasks:
     desc: 重新打包上游 ESM → internal/kernel/kernel.dist.cjs（需 node）
     preconditions:
       - sh: test -d "${KERNEL:-/tmp/billion-context/kernel}/node_modules"
-        msg: 找不到上游仓库的 node_modules，先 clone billion-context/kernel 并 pnpm install
+        msg: 找不到上游仓库的 node_modules，先 clone billion-context/kernel 并 npm ci
     sources:
       - script/build-cjs.sh
     generates:
       - internal/kernel/kernel.dist.cjs
+      - internal/kernel/version_gen.go
     cmds:
       - bash script/build-cjs.sh
       - echo "kernel.dist.cjs 已更新（记得 task build）"

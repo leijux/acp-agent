@@ -57,7 +57,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
-// ../../tmp/billion-context/kernel/dist/index.js
+// dist/index.js
 var index_exports = {};
 __export(index_exports, {
   ABSORB_PROMPT_MARKER: () => ABSORB_PROMPT_MARKER,
@@ -68,6 +68,7 @@ __export(index_exports, {
   ABSORB_TOOL_OPENAI: () => ABSORB_TOOL_OPENAI,
   ACP_CACHE_TOOL: () => ACP_CACHE_TOOL,
   ACP_CACHE_TOOL_DESCRIPTION: () => ACP_CACHE_TOOL_DESCRIPTION,
+  ACP_CACHE_TOOL_GOOGLE: () => ACP_CACHE_TOOL_GOOGLE,
   ACP_CACHE_TOOL_NAME: () => ACP_CACHE_TOOL_NAME,
   ACP_CACHE_TOOL_OPENAI: () => ACP_CACHE_TOOL_OPENAI,
   ACP_CACHE_TOOL_RESPONSES: () => ACP_CACHE_TOOL_RESPONSES,
@@ -275,7 +276,6 @@ __export(index_exports, {
   parseCompressArgs: () => parseCompressArgs,
   parseCompressInput: () => parseCompressInput,
   parseStoredPlaceholder: () => parseStoredPlaceholder,
-  planRelocateCompressCarriers: () => planRelocateCompressCarriers,
   prune: () => prune,
   rawForRef: () => rawForRef,
   rebuildCompressionState: () => rebuildCompressionState,
@@ -284,7 +284,6 @@ __export(index_exports, {
   registerCrushPlugin: () => registerCrushPlugin,
   registerMessageFilter: () => registerMessageFilter,
   registerSearchAlgorithm: () => registerSearchAlgorithm,
-  relocateCompressCarriers: () => relocateCompressCarriers,
   removeRule: () => removeRule,
   renderHandoff: () => renderHandoff,
   renderMessage: () => renderMessage2,
@@ -330,7 +329,895 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 
-// ../../tmp/billion-context/kernel/dist/chunk-GIKJNW3A.js
+// dist/chunk-KW5XKWQH.js
+function createInitialState() {
+  return {
+    blocks: [],
+    messageRefs: { byRaw: {}, byRef: {} },
+    tokenSnapshot: {},
+    nudge: {
+      lastPerMessageNudgeTokens: 0,
+      lastNudgeShownTokens: 0,
+      baselineTokens: 0,
+      anchors: {},
+      lastShownByTier: {}
+    },
+    stats: {
+      tokensCompressed: 0,
+      compressionCount: 0,
+      absorbedTokens: 0,
+      storedCount: 0,
+      retrievalCount: 0
+    },
+    absorbed: [],
+    rules: [],
+    nextRuleId: 1,
+    nextBlockId: 1,
+    nextRunId: 1
+  };
+}
+function allocateBlockId(state) {
+  const id = state.nextBlockId;
+  state.nextBlockId = Math.max(1, id) + 1;
+  return `b${id}`;
+}
+function allocateRunId(state) {
+  const id = state.nextRunId;
+  state.nextRunId = Math.max(1, id) + 1;
+  return `r${id}`;
+}
+function blockById(state, blockId) {
+  return state.blocks.find((block) => block.blockId === blockId);
+}
+function activeBlocks(state) {
+  return state.blocks.filter((block) => block.active);
+}
+function coveredMessageIds(state) {
+  const covered = /* @__PURE__ */ new Set();
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    for (const id of block.effectiveMessageIds) covered.add(id);
+  }
+  return covered;
+}
+function isLiveCheckpointCarrier(message, state) {
+  var _a;
+  const carrierOf = message.summaryOfBlockId;
+  return carrierOf !== void 0 && ((_a = blockById(state, carrierOf)) == null ? void 0 : _a.active) === true;
+}
+function highestActiveTier(state) {
+  let highest = 0;
+  for (const block of state.blocks) {
+    if (block.active && block.tier > highest) highest = block.tier;
+  }
+  return highest;
+}
+function advanceSurvival(state, promotionThreshold) {
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    block.survivedCount += 1;
+    if (block.survivedCount >= promotionThreshold) {
+      block.generation = "old";
+    }
+  }
+}
+
+// dist/chunk-7A3PMCZO.js
+var SUMMARY_HEADER = "[Compressed conversation section]";
+var SUMMARY_ID_PREFIX = "acp_summary_";
+function summaryMessageId(blockId) {
+  return `${SUMMARY_ID_PREFIX}${blockId}`;
+}
+function isSummaryMessageId(id) {
+  return id.startsWith(SUMMARY_ID_PREFIX);
+}
+function baseIdOf(id) {
+  const hash = id.indexOf("#");
+  return hash > 0 ? id.substring(0, hash) : id;
+}
+function isCovered(id, coveredBases) {
+  return coveredBases.has(baseIdOf(id));
+}
+function coveredSeqIntervals(state) {
+  const intervals = [];
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    if (typeof block.startSeq === "number" && typeof block.endSeq === "number" && block.startSeq >= 0 && block.endSeq >= block.startSeq) {
+      intervals.push({ start: block.startSeq, end: block.endSeq });
+    }
+  }
+  return intervals;
+}
+function isCoveredBySeq(seq, intervals) {
+  if (typeof seq !== "number" || !Number.isInteger(seq)) return false;
+  for (const interval of intervals) {
+    if (seq >= interval.start && seq <= interval.end) return true;
+  }
+  return false;
+}
+function isRenderedSummaryMessage(message) {
+  return isSummaryMessageId(message.id) && message.role === "system" && message.contentType === "text";
+}
+function prune(messages, state, options = {}) {
+  var _a, _b;
+  const covered = coveredMessageIds(state);
+  if (covered.size === 0) return [...messages];
+  const coveredBases = /* @__PURE__ */ new Set();
+  for (const id of covered) coveredBases.add(baseIdOf(id));
+  const inject = (_a = options.injectSummaries) != null ? _a : true;
+  const isCompressTool = (_b = options.isCompressTool) != null ? _b : ((name) => name === "compress");
+  const firstUserIndex = messages.findIndex(
+    (message) => message.role === "user"
+  );
+  let lastUserIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  const baseIndexById = /* @__PURE__ */ new Map();
+  const summaryIndexById = /* @__PURE__ */ new Map();
+  messages.forEach((message, index) => {
+    const base = baseIdOf(message.id);
+    const existing = baseIndexById.get(base);
+    if (existing === void 0 || index < existing)
+      baseIndexById.set(base, index);
+    if (isRenderedSummaryMessage(message))
+      summaryIndexById.set(message.id, index);
+  });
+  const visibleCompressCallIds = /* @__PURE__ */ new Set();
+  if (inject) {
+    for (const message of messages) {
+      if (message.contentType === "tool-call" && message.toolCallId && typeof message.toolName === "string" && isCompressTool(message.toolName)) {
+        visibleCompressCallIds.add(message.toolCallId);
+      }
+    }
+  }
+  const anchors = inject ? collectSummaryAnchors(
+    state,
+    baseIndexById,
+    summaryIndexById,
+    options.headSummaryAnchors ? 0 : lastUserIndex >= 0 ? lastUserIndex : messages.length,
+    visibleCompressCallIds
+  ) : [];
+  const knownSummaryIds = new Set(
+    inject ? state.blocks.map((block) => summaryMessageId(block.blockId)) : []
+  );
+  return stripOrphanedReasoning(
+    stripOrphanedToolResults(
+      stripOrphanedToolCalls(
+        rebuildMessages(
+          messages,
+          coveredBases,
+          // #4316 layer 3: positional claims, built once per prune pass.
+          coveredSeqIntervals(state),
+          firstUserIndex,
+          anchors,
+          knownSummaryIds,
+          options.headSummaryAnchors === true
+        ),
+        isCompressTool
+      )
+    )
+  );
+}
+function collectSummaryAnchors(state, baseIndexById, summaryIndexById, fallbackIndex, visibleCompressCallIds) {
+  const anchors = [];
+  for (const block of activeBlocks(state)) {
+    if (block.compressCallId && visibleCompressCallIds.has(block.compressCallId))
+      continue;
+    const existingIndex = summaryIndexById.get(summaryMessageId(block.blockId));
+    if (existingIndex !== void 0) {
+      anchors.push({
+        blockId: block.blockId,
+        summary: block.summary,
+        topic: block.topic,
+        insertAt: existingIndex
+      });
+      continue;
+    }
+    const anchorIds = block.directMessageIds && block.directMessageIds.length > 0 ? block.directMessageIds : block.effectiveMessageIds;
+    let earliest = null;
+    for (const id of anchorIds) {
+      const index = baseIndexById.get(baseIdOf(id));
+      if (index !== void 0 && (earliest === null || index < earliest)) {
+        earliest = index;
+      }
+    }
+    anchors.push({
+      blockId: block.blockId,
+      summary: block.summary,
+      topic: block.topic,
+      // Unresolved (no anchor id present in this input): park before the
+      // newest user message — see prune() for the #3640/#2733 reasoning.
+      // Tail-parking (the pre-#3640 behavior) let stale summaries land after
+      // the user's current question, which the model then answered instead.
+      insertAt: earliest != null ? earliest : fallbackIndex,
+      unresolved: earliest === null
+    });
+  }
+  anchors.sort((left, right) => left.insertAt - right.insertAt);
+  return anchors;
+}
+function buildAnchorPairingIndex(messages) {
+  const n = messages.length;
+  const resultIndexByCallId = /* @__PURE__ */ new Map();
+  messages.forEach((message, at) => {
+    if (message.contentType !== "tool-result") return;
+    if (typeof message.toolCallId !== "string") return;
+    if (!resultIndexByCallId.has(message.toolCallId)) {
+      resultIndexByCallId.set(message.toolCallId, at);
+    }
+  });
+  const runStart = new Int32Array(n).fill(-1);
+  for (let i = 0; i < n; ) {
+    if (messages[i].role !== "assistant") {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < n && messages[j + 1].role === "assistant") j++;
+    for (let k = i; k <= j; k++) runStart[k] = i;
+    i = j + 1;
+  }
+  const prefixEnd = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    const message = messages[i];
+    let end = 0;
+    if (message.role === "assistant" && message.contentType === "tool-call" && typeof message.toolCallId === "string") {
+      const resultIndex = resultIndexByCallId.get(message.toolCallId);
+      if (resultIndex !== void 0) end = resultIndex + 1;
+    }
+    prefixEnd[i + 1] = Math.max(prefixEnd[i], end);
+  }
+  return { runStart, prefixEnd };
+}
+function pairSafeAnchorIndex(messages, index, ix) {
+  const n = messages.length;
+  let safe = index;
+  if (safe > 0 && safe < n) {
+    const start = ix.runStart[safe];
+    if (start >= 0 && messages[safe - 1].role === "assistant") {
+      safe = start;
+    }
+  }
+  if (safe < 0 || safe > n) return safe;
+  for (let guard = 0; guard < n; guard++) {
+    const next = Math.max(safe, ix.prefixEnd[safe]);
+    if (next === safe) break;
+    safe = next;
+  }
+  return safe;
+}
+var wireIndexOf = (m) => m.wireIndex;
+function rebuildMessages(messages, coveredBases, seqIntervals, firstUserIndex, anchors, knownSummaryIds, headAnchors) {
+  let firstUserPinEnd = firstUserIndex + 1;
+  if (firstUserIndex >= 0) {
+    const firstWire = wireIndexOf(messages[firstUserIndex]);
+    if (firstWire !== void 0) {
+      while (firstUserPinEnd < messages.length && messages[firstUserPinEnd].role === "user" && wireIndexOf(messages[firstUserPinEnd]) === firstWire) {
+        firstUserPinEnd++;
+      }
+    }
+  }
+  const ix = anchors.length > 0 ? buildAnchorPairingIndex(messages) : null;
+  const safeAnchors = anchors.map((anchor) => __spreadProps(__spreadValues({}, anchor), {
+    insertAt: ix ? pairSafeAnchorIndex(messages, anchor.insertAt, ix) : anchor.insertAt
+  })).map((anchor) => __spreadProps(__spreadValues({}, anchor), {
+    // #2733/#3642: a summary may NEVER precede the pinned opening wire
+    // message — now measured to the END of the opening core run
+    // (firstUserPinEnd), so an anchor can never land between the opening
+    // message's split parts either.
+    insertAt: headAnchors ? anchor.insertAt : Math.max(
+      anchor.insertAt,
+      anchor.unresolved === true ? firstUserIndex : firstUserPinEnd
+    )
+  })).sort((left, right) => left.insertAt - right.insertAt);
+  const result = [];
+  const pending = [...safeAnchors];
+  for (let index = 0; index < messages.length; index++) {
+    while (pending.length > 0 && pending[0].insertAt === index) {
+      result.push(renderSummary(pending.shift()));
+    }
+    if (index === firstUserIndex && firstUserIndex >= 0) {
+      for (let k = index; k < firstUserPinEnd; k++) {
+        result.push(messages[k]);
+      }
+      index = firstUserPinEnd - 1;
+      continue;
+    }
+    if (isCovered(messages[index].id, coveredBases)) continue;
+    if (isCoveredBySeq(messages[index].ledgerSeq, seqIntervals)) continue;
+    if (isRenderedSummaryMessage(messages[index]) && knownSummaryIds.has(messages[index].id))
+      continue;
+    result.push(messages[index]);
+  }
+  while (pending.length > 0) {
+    result.push(renderSummary(pending.shift()));
+  }
+  return result;
+}
+function renderSummary(anchor) {
+  const body = anchor.summary.trim();
+  const topicLine = anchor.topic ? `${SUMMARY_HEADER} \u2014 ${anchor.topic}` : SUMMARY_HEADER;
+  const text = body.length === 0 ? topicLine : `${topicLine}
+${body}`;
+  return {
+    id: summaryMessageId(anchor.blockId),
+    role: "system",
+    contentType: "text",
+    text
+  };
+}
+function stripOrphanedToolResults(messages) {
+  const openCallIds = /* @__PURE__ */ new Set();
+  const drop = /* @__PURE__ */ new Set();
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.contentType === "tool-call") {
+      if (m.toolCallId) openCallIds.add(m.toolCallId);
+    } else if (m.contentType === "tool-result" && m.toolCallId) {
+      if (!openCallIds.has(m.toolCallId)) drop.add(i);
+    }
+  }
+  return drop.size === 0 ? messages : messages.filter((_, i) => !drop.has(i));
+}
+function stripOrphanedToolCalls(messages, isCompressTool) {
+  const answeredCallIds = /* @__PURE__ */ new Set();
+  const drop = /* @__PURE__ */ new Set();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.contentType === "tool-result") {
+      if (m.toolCallId) answeredCallIds.add(m.toolCallId);
+    } else if (m.contentType === "tool-call" && m.toolCallId) {
+      if (typeof m.toolName === "string" && isCompressTool(m.toolName)) continue;
+      if (!answeredCallIds.has(m.toolCallId)) drop.add(i);
+    }
+  }
+  return drop.size === 0 ? messages : messages.filter((_, i) => !drop.has(i));
+}
+function stripOrphanedReasoning(messages) {
+  const drop = /* @__PURE__ */ new Set();
+  for (let i = 0; i < messages.length; i++) {
+    if (drop.has(i)) continue;
+    if (messages[i].contentType !== "reasoning") continue;
+    let j = i;
+    while (j + 1 < messages.length && messages[j + 1].contentType === "reasoning") {
+      j++;
+    }
+    const companion = messages[j + 1];
+    const hasCompanion = companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call");
+    if (!hasCompanion) {
+      for (let k = i; k <= j; k++) drop.add(k);
+    }
+  }
+  if (drop.size === 0) return messages;
+  return messages.filter((_, i) => !drop.has(i));
+}
+function asObj(v) {
+  return typeof v === "object" && v !== null ? v : void 0;
+}
+function isInlineDataUrl(u) {
+  return typeof u === "string" && /^data:[^;,]+(?:;base64)?,.+$/i.test(u);
+}
+var EPHEMERAL_QUERY_PARAM = /^(?:x-(?:amz|goog|ms|cf|r2|oss|azure|obs|cos|bce)-.*|(?:expires?|expiry|exp|ttl|signature|sig|session-token|security-token|token|auth))$/i;
+function looksEphemeralSignedUrl(ref) {
+  if (!/^https?:\/\//i.test(ref)) return false;
+  const q = ref.indexOf("?");
+  if (q === -1) return false;
+  for (const pair of ref.slice(q + 1).split("&")) {
+    const eq = pair.indexOf("=");
+    const name = eq === -1 ? pair : pair.slice(0, eq);
+    if (name !== "" && EPHEMERAL_QUERY_PARAM.test(name)) return true;
+  }
+  return false;
+}
+function pushRef(refs, ref) {
+  if (typeof ref !== "string" || ref.length === 0 || isInlineDataUrl(ref)) return;
+  if (looksEphemeralSignedUrl(ref)) return;
+  refs.push(ref);
+}
+function extractMediaRefs(message) {
+  var _a, _b;
+  const m = message;
+  const refs = [];
+  const roc = asObj(m.rawOpenaiContent);
+  if (roc) {
+    if (roc.type === "image_url") pushRef(refs, (_a = asObj(roc.image_url)) == null ? void 0 : _a.url);
+    else if (roc.type === "file") {
+      pushRef(refs, roc.file_id);
+      pushRef(refs, roc.url);
+    }
+  }
+  if (Array.isArray(m.rawOpenaiContentParts)) {
+    for (const p of m.rawOpenaiContentParts) {
+      const part = asObj(p);
+      if (!part) continue;
+      if (part.type === "image_url") pushRef(refs, (_b = asObj(part.image_url)) == null ? void 0 : _b.url);
+      else if (part.type === "file") {
+        pushRef(refs, part.file_id);
+        pushRef(refs, part.url);
+      }
+    }
+  }
+  const ab = asObj(m.rawAnthropicBlock);
+  if (ab) {
+    if (ab.type === "image") {
+      const source = asObj(ab.source);
+      if ((source == null ? void 0 : source.type) === "url") pushRef(refs, source.url);
+    } else if (ab.type === "tool_result" && Array.isArray(ab.content)) {
+      for (const b of ab.content) {
+        const blk = asObj(b);
+        if ((blk == null ? void 0 : blk.type) !== "image") continue;
+        const source = asObj(blk.source);
+        if ((source == null ? void 0 : source.type) === "url") pushRef(refs, source.url);
+      }
+    }
+  }
+  const item = asObj(m.rawResponsesItem);
+  if (item) {
+    const parts = [];
+    if (item.type === "input_image") parts.push(item);
+    for (const key of ["content", "output"]) {
+      const arr = item[key];
+      if (Array.isArray(arr))
+        for (const p of arr) {
+          const o = asObj(p);
+          if ((o == null ? void 0 : o.type) === "input_image") parts.push(o);
+        }
+    }
+    for (const p of parts) pushRef(refs, p.image_url);
+  }
+  if (Array.isArray(m.rawGoogleParts)) {
+    const walk = (parts) => {
+      var _a2;
+      for (const p of parts) {
+        const part = asObj(p);
+        if (!part) continue;
+        pushRef(refs, (_a2 = asObj(part.fileData)) == null ? void 0 : _a2.fileUri);
+        const fr = asObj(part.functionResponse);
+        if (fr && Array.isArray(fr.parts)) walk(fr.parts);
+      }
+    };
+    walk(m.rawGoogleParts);
+  }
+  return [...new Set(refs)];
+}
+function hasRefRecoverableMediaPayload(message) {
+  return extractMediaRefs(message).length > 0;
+}
+var MEDIA_REFS_MARKER = "MEDIA REFS (verbatim re-access handles \u2014 preserve when distilling):";
+function stripMediaRefsSection(summary) {
+  const lines = summary.split("\n");
+  const idx = lines.findIndex((l) => l.trim() === MEDIA_REFS_MARKER);
+  if (idx === -1) return summary;
+  let end = idx + 1;
+  while (end < lines.length && lines[end].startsWith("- ")) end++;
+  lines.splice(idx, end - idx);
+  return lines.join("\n");
+}
+function parseMediaRefsSection(summary) {
+  const lines = summary.split("\n");
+  const idx = lines.findIndex((l) => l.trim() === MEDIA_REFS_MARKER);
+  if (idx === -1) return [];
+  const out = [];
+  for (let i = idx + 1; i < lines.length && lines[i].startsWith("- "); i++)
+    out.push(lines[i].slice(2).trim());
+  return out;
+}
+function appendMediaRefsSection(summary, refs) {
+  if (refs.length === 0) return summary;
+  const base = stripMediaRefsSection(summary).replace(/\n+$/, "");
+  const section = `${MEDIA_REFS_MARKER}
+${refs.map((r) => `- ${r}`).join("\n")}`;
+  return base ? `${base}
+
+${section}` : section;
+}
+function collectFoldMediaRefs(directMessages, consumedBlocks) {
+  const seen = /* @__PURE__ */ new Set();
+  const refs = [];
+  const add = (r) => {
+    if (!seen.has(r)) {
+      seen.add(r);
+      refs.push(r);
+    }
+  };
+  for (const m of directMessages)
+    if (m) for (const r of extractMediaRefs(m)) add(r);
+  for (const b of consumedBlocks)
+    if (b) {
+      for (const r of parseMediaRefsSection(b.summary)) if (!looksEphemeralSignedUrl(r)) add(r);
+    }
+  return refs;
+}
+var ALWAYS_PROTECTED_TOOLS = ["compress", "acp_rule"];
+var FAILED_COMPRESS_RESULT_PREFIXES = [
+  "[Compression FAILED",
+  "[Compression refused",
+  "[Compression no-op"
+];
+function isCompressToolName(toolName, config) {
+  var _a;
+  if (!toolName) return false;
+  return toolName === "compress" || !!((_a = config == null ? void 0 : config.isCompressTool) == null ? void 0 : _a.call(config, toolName));
+}
+function isFailedCompressResult(msg, config) {
+  var _a;
+  const text = (_a = msg.text) != null ? _a : "";
+  return msg.contentType === "tool-result" && isCompressToolName(msg.toolName, config) && FAILED_COMPRESS_RESULT_PREFIXES.some((prefix) => text.startsWith(prefix));
+}
+function collectFailedCompressCallIds(messages, config) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const m of messages) {
+    if (isFailedCompressResult(m, config) && m.toolCallId) ids.add(m.toolCallId);
+  }
+  return ids;
+}
+var COMPRESS_EXCHANGE_KEEP_RECENT = 3;
+function collectAgedCompressCallIds(messages, config, keepRecent = COMPRESS_EXCHANGE_KEEP_RECENT) {
+  const recent = [];
+  for (const m of messages) {
+    if (m.contentType === "tool-call" && m.toolCallId && isCompressToolName(m.toolName, config)) {
+      const at = recent.indexOf(m.toolCallId);
+      if (at >= 0) recent.splice(at, 1);
+      recent.push(m.toolCallId);
+      if (recent.length > Math.max(0, keepRecent)) recent.shift();
+    }
+  }
+  const aged = /* @__PURE__ */ new Set();
+  const keep = new Set(recent);
+  for (const m of messages) {
+    if (m.contentType !== "tool-call" || !m.toolCallId) continue;
+    if (!isCompressToolName(m.toolName, config)) continue;
+    if (!keep.has(m.toolCallId)) aged.add(m.toolCallId);
+  }
+  return aged;
+}
+var NEVER_PRESERVE_RECENT_TOOLS = [
+  "decompress",
+  "search_context",
+  "read",
+  "bash"
+];
+function isNeverPreserveRecent(msg, patterns, preservePatterns) {
+  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result") {
+    return false;
+  }
+  if (!msg.toolName) return false;
+  const base = patterns === void 0 ? NEVER_PRESERVE_RECENT_TOOLS : patterns;
+  const list = preservePatterns === void 0 || preservePatterns.length === 0 ? base : base.filter(
+    (tool) => !preservePatterns.some((p) => matchToolPattern(tool, p))
+  );
+  for (const pattern of list) {
+    if (matchToolPattern(msg.toolName, pattern)) return true;
+  }
+  return false;
+}
+function matchToolPattern(toolName, pattern) {
+  const name = toolName.toLowerCase();
+  const pat = pattern.toLowerCase();
+  if (pat.endsWith("*")) {
+    return name.startsWith(pat.slice(0, -1));
+  }
+  return name === pat;
+}
+var SKILL_MD_ANCHOR_RE = /([A-Za-z0-9][A-Za-z0-9._-]*)(?:\\\\|\\|\/)SKILL\.md/i;
+function isValidSkillName(name) {
+  return name.length > 0 && name.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name);
+}
+function skillNameFromCallText(text) {
+  if (!text) return void 0;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return void 0;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return void 0;
+  }
+  const args = parsed;
+  for (const key of ["skill", "name", "command"]) {
+    const value = args[key];
+    if (typeof value === "string" && isValidSkillName(value)) return value;
+  }
+  return void 0;
+}
+function toolPathOf(msg) {
+  var _a, _b, _c;
+  const toolName = (_a = msg.toolName) != null ? _a : "";
+  if (!toolName || msg.contentType !== "tool-call") return toolName;
+  if (toolName.toLowerCase() === "skill") {
+    const name = skillNameFromCallText(msg.text);
+    if (name) return `skill/${name}`;
+  }
+  const anchored = (_c = ((_b = msg.text) != null ? _b : "").match(SKILL_MD_ANCHOR_RE)) == null ? void 0 : _c[1];
+  if (anchored && isValidSkillName(anchored)) return `skill/${anchored}`;
+  return toolName;
+}
+function matchToolPath(path2, pattern) {
+  var _a, _b;
+  const patSegs = pattern.toLowerCase().split("/");
+  const patFirst = (_a = patSegs[0]) != null ? _a : "";
+  const pathFirst = (_b = path2.toLowerCase().split("/")[0]) != null ? _b : "";
+  if (patSegs.length === 1) {
+    return matchToolPattern(pathFirst, patFirst);
+  }
+  const pathSegs = path2.toLowerCase().split("/");
+  if (patSegs.length === 2 && patSegs[1] === "*") {
+    return matchToolPattern(pathFirst, patFirst);
+  }
+  return patSegs.length === pathSegs.length && patSegs.every((seg, i) => {
+    var _a2;
+    return matchToolPattern((_a2 = pathSegs[i]) != null ? _a2 : "", seg);
+  });
+}
+function matchToolMessagePattern(msg, pattern) {
+  var _a;
+  const toolName = (_a = msg.toolName) != null ? _a : "";
+  if (!toolName) return false;
+  return matchToolPath(toolPathOf(msg), pattern) || matchToolPattern(toolName, pattern);
+}
+function virtualToolPathOf(msg, config) {
+  var _a;
+  if (msg.contentType === "tool-call" || msg.contentType === "tool-result") {
+    return void 0;
+  }
+  return (_a = config.messagePathOf) == null ? void 0 : _a.call(config, msg);
+}
+function lastUserAnchor(messages, covered, config) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "user") continue;
+    if (typeof msg.text === "string" && msg.text.startsWith(SUMMARY_HEADER)) continue;
+    if (covered.has(msg.id)) continue;
+    if (virtualToolPathOf(msg, config) !== void 0) continue;
+    return msg;
+  }
+  return void 0;
+}
+function isMessageProtected(msg, config, failedToolCallIds) {
+  var _a, _b;
+  if ((_a = config.isMessageProtected) == null ? void 0 : _a.call(config, msg)) return true;
+  if (isFailedCompressResult(msg, config) || msg.toolCallId !== void 0 && (failedToolCallIds == null ? void 0 : failedToolCallIds.has(msg.toolCallId)) === true) {
+    return false;
+  }
+  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result" || !msg.toolName) {
+    const virtualPath = virtualToolPathOf(msg, config);
+    if (virtualPath) {
+      for (const pattern of config.protectedTools) {
+        if (matchToolPath(virtualPath, pattern)) return true;
+      }
+    }
+    return false;
+  }
+  if (ALWAYS_PROTECTED_TOOLS.includes(msg.toolName)) {
+    return true;
+  }
+  for (const pattern of config.protectedTools) {
+    if (matchToolMessagePattern(msg, pattern)) return true;
+  }
+  if ((_b = config.isToolProtected) == null ? void 0 : _b.call(config, msg.toolName, msg.text)) return true;
+  return false;
+}
+function collectProtectedToolCallIds(messages, config) {
+  const ids = /* @__PURE__ */ new Set();
+  const failedCompressCallIds = collectFailedCompressCallIds(messages, config);
+  for (const m of messages) {
+    if (m.contentType === "tool-call" && m.toolCallId && isMessageProtected(m, config, failedCompressCallIds)) {
+      ids.add(m.toolCallId);
+    }
+  }
+  return ids;
+}
+function isMessageProtectedWithPairing(msg, config, protectedCallIds, failedToolCallIds) {
+  if (isMessageProtected(msg, config, failedToolCallIds)) return true;
+  if (msg.contentType === "tool-result" && msg.toolCallId && !isFailedCompressResult(msg, config) && // #4289: a failed compress result is never re-protected via pairing
+  protectedCallIds.has(msg.toolCallId)) {
+    return true;
+  }
+  return false;
+}
+function collectLatestProtected(messages, config) {
+  var _a;
+  const callIds = /* @__PURE__ */ new Set();
+  const msgIds = /* @__PURE__ */ new Set();
+  const patterns = (_a = config.protectedLatestTools) != null ? _a : [];
+  if (patterns.length === 0) return { callIds, msgIds };
+  for (const pattern of patterns) {
+    if (pattern.includes("/")) {
+      const lastByPath = /* @__PURE__ */ new Map();
+      for (const m of messages) {
+        if (m.contentType === "tool-call" && m.toolName) {
+          if (!matchToolMessagePattern(m, pattern)) continue;
+          lastByPath.set(toolPathOf(m), m);
+          continue;
+        }
+        const virtualPath = virtualToolPathOf(m, config);
+        if (virtualPath && matchToolPath(virtualPath, pattern)) {
+          lastByPath.set(virtualPath, m);
+        }
+      }
+      for (const last2 of lastByPath.values()) {
+        if (last2.toolCallId) callIds.add(last2.toolCallId);
+        else msgIds.add(last2.id);
+      }
+      continue;
+    }
+    let last;
+    for (const m of messages) {
+      if (m.contentType === "tool-call" && m.toolName) {
+        if (matchToolMessagePattern(m, pattern)) {
+          last = m;
+        }
+        continue;
+      }
+      const virtualPath = virtualToolPathOf(m, config);
+      if (virtualPath && matchToolPath(virtualPath, pattern)) {
+        last = m;
+      }
+    }
+    if (!last) continue;
+    if (last.toolCallId) callIds.add(last.toolCallId);
+    else msgIds.add(last.id);
+  }
+  return { callIds, msgIds };
+}
+function isMessageLatestProtected(msg, latest) {
+  if (latest.msgIds.has(msg.id)) return true;
+  if ((msg.contentType === "tool-call" || msg.contentType === "tool-result") && msg.toolCallId && latest.callIds.has(msg.toolCallId)) {
+    return true;
+  }
+  return false;
+}
+function hasMediaPayload(msg) {
+  var _a;
+  const m = msg;
+  if (typeof m.imageBase64 === "string" && m.imageBase64.length > 0)
+    return true;
+  if (m.rawOpenaiContent != null) return true;
+  if (Array.isArray(m.rawOpenaiContentParts) && m.rawOpenaiContentParts.length > 0)
+    return true;
+  const ab = m.rawAnthropicBlock;
+  if (isObjWith(ab, "type", "image")) return true;
+  if (isObjWith(ab, "type", "tool_result")) {
+    const content = ab.content;
+    if (Array.isArray(content))
+      return content.some((p) => !isObjWith(p, "type", "text"));
+  }
+  const abType = (_a = asObj2(ab)) == null ? void 0 : _a.type;
+  if (typeof abType === "string" && abType !== "image" && abType !== "tool_result" && abType !== "redacted_thinking")
+    return true;
+  const item = m.rawResponsesItem;
+  if (isObjWith(item, "type", "input_image")) return true;
+  if (item && typeof item === "object") {
+    const content = item.content;
+    if (Array.isArray(content)) {
+      return content.some((p) => isObjWith(p, "type", "input_image"));
+    }
+  }
+  return false;
+}
+function hasUnrecoverableMediaPayload(msg) {
+  var _a, _b, _c, _d;
+  const m = msg;
+  if (m.rawAnthropicMessage != null)
+    return !isPlainTextSystemMessage(m.rawAnthropicMessage);
+  if (m.rawOpenaiMessage != null)
+    return !isPlainTextSystemMessage(m.rawOpenaiMessage);
+  if (m.role === "system" && m.rawResponsesItem != null)
+    return !isPlainTextResponsesSystemItem(m.rawResponsesItem);
+  const roc = m.rawOpenaiContent;
+  if (roc != null) {
+    const part = asObj2(roc);
+    const url = (part == null ? void 0 : part.type) === "image_url" ? (_a = asObj2(part.image_url)) == null ? void 0 : _a.url : void 0;
+    if (!isInlineDataUrl2(url)) return !hasRefRecoverableMediaPayload(msg);
+  }
+  if (Array.isArray(m.rawOpenaiContentParts)) {
+    for (const p of m.rawOpenaiContentParts) {
+      const part = asObj2(p);
+      const url = (part == null ? void 0 : part.type) === "image_url" ? (_b = asObj2(part.image_url)) == null ? void 0 : _b.url : void 0;
+      if (!isInlineDataUrl2(url)) return !hasRefRecoverableMediaPayload(msg);
+    }
+  }
+  const ab = asObj2(m.rawAnthropicBlock);
+  if (ab) {
+    if (ab.type === "image" && !anthropicSourceArchivable(asObj2(ab.source)))
+      return !hasRefRecoverableMediaPayload(msg);
+    if (ab.type === "tool_result") {
+      const content = ab.content;
+      if (Array.isArray(content)) {
+        for (const b of content) {
+          const blk = asObj2(b);
+          if (!blk || blk.type === "text") continue;
+          if (blk.type === "image") {
+            if (!anthropicSourceArchivable(asObj2(blk.source)))
+              return !hasRefRecoverableMediaPayload(msg);
+            continue;
+          }
+          return true;
+        }
+      }
+    }
+    if (typeof ab.type === "string" && ab.type !== "image" && ab.type !== "tool_result" && ab.type !== "redacted_thinking")
+      return true;
+  }
+  const item = asObj2(m.rawResponsesItem);
+  if (item) {
+    const parts = [];
+    if (item.type === "input_image") parts.push(item);
+    for (const key of ["content", "output"]) {
+      const arr = item[key];
+      if (Array.isArray(arr)) {
+        for (const p of arr) if (((_c = asObj2(p)) == null ? void 0 : _c.type) === "input_image") parts.push(p);
+      }
+    }
+    for (const p of parts) {
+      if (!isInlineDataUrl2((_d = asObj2(p)) == null ? void 0 : _d.image_url))
+        return !hasRefRecoverableMediaPayload(msg);
+    }
+  }
+  if (Array.isArray(m.rawGoogleParts)) {
+    for (const p of m.rawGoogleParts) {
+      const part = asObj2(p);
+      if (!part) continue;
+      if (part.fileData != null || part.videoMetadata != null)
+        return !hasRefRecoverableMediaPayload(msg);
+      const fr = asObj2(part.functionResponse);
+      if (fr && Array.isArray(fr.parts)) {
+        for (const np of fr.parts) {
+          const sub = asObj2(np);
+          if (sub && (sub.fileData != null || sub.videoMetadata != null))
+            return !hasRefRecoverableMediaPayload(msg);
+        }
+      }
+    }
+  }
+  return false;
+}
+function anthropicSourceArchivable(source) {
+  if (!source) return false;
+  if (source.type === "base64") return typeof source.data === "string";
+  if (source.type === "url") return isInlineDataUrl2(source.url);
+  return false;
+}
+function isPlainTextSystemMessage(raw) {
+  const m = asObj2(raw);
+  if (!m || Object.keys(m).some((k) => k !== "role" && k !== "content"))
+    return false;
+  if (typeof m.content === "string") return true;
+  return Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => {
+    const o = asObj2(b);
+    return (o == null ? void 0 : o.type) === "text" && Object.keys(o).every(
+      (k) => k === "type" || k === "text" || k === "cache_control"
+    );
+  });
+}
+function isPlainTextResponsesSystemItem(raw) {
+  const m = asObj2(raw);
+  if (!m || Object.keys(m).some(
+    (k) => k !== "type" && k !== "role" && k !== "content"
+  ))
+    return false;
+  if (typeof m.content === "string") return true;
+  return Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => {
+    const o = asObj2(b);
+    return o != null && (o.type === "input_text" || o.type === "output_text") && typeof o.text === "string" && Object.keys(o).every((k) => k === "type" || k === "text");
+  });
+}
+function asObj2(v) {
+  return typeof v === "object" && v !== null ? v : void 0;
+}
+function isInlineDataUrl2(u) {
+  return typeof u === "string" && /^data:[^;,]+(?:;base64)?,.+$/i.test(u);
+}
+function isObjWith(v, key, value) {
+  return typeof v === "object" && v !== null && v[key] === value;
+}
+
+// dist/chunk-MDKNL567.js
 var import_module = require("module");
 var REF_WIDTH = 5;
 var MIN_INDEX = 1;
@@ -430,6 +1317,7 @@ function allocateFreeRef(map, start) {
   );
 }
 function restampRefsToLedger(state, seqByRawId) {
+  var _a;
   const out = {
     kept: 0,
     restamped: 0,
@@ -504,6 +1392,10 @@ function restampRefsToLedger(state, seqByRawId) {
   }
   state.messageRefs = { byRaw, byRef };
   state.refLedgerAligned = true;
+  const alignedMax = highestUsedIndex({ byRaw, byRef });
+  if (alignedMax > ((_a = state.timestampsHighWaterRefSeq) != null ? _a : 0)) {
+    state.timestampsHighWaterRefSeq = alignedMax;
+  }
   return out;
 }
 function highestUsedIndex(map) {
@@ -576,6 +1468,7 @@ KEEP VERBATIM \u2014 never paraphrase or abbreviate these:
 - Purpose behind each significant action \u2014 preserve not just what was done but why: the hypothesis behind each experiment, the question behind each exploration, the task goal behind each work action. Without purpose, the summary reads as disconnected technical steps with no through-line.
 - Open questions and unresolved TODOs \u2014 losing these changes what work appears to remain.
 - Message refs of key anchors (\`m00420\`, \`m00510\u2013m00520\`) \u2014 they let you or a later reader jump back via decompress to the exact original.
+- Media re-access handles \u2014 URLs and file IDs attached to the range (images or files referenced rather than inlined) MUST appear verbatim in the summary: after folding they are the only way to re-access the payload (decompress restores the original message itself). Preserve any \`MEDIA REFS\` section verbatim \u2014 never alter, reorder, or drop its entries.
 
 DROP \u2014 extract the signal, discard the vessel:
 - Verbose logs (build/test/\`npm\` output) once you have captured the error line or the result.
@@ -607,6 +1500,7 @@ KEEP \u2014 these are the only things that survive distillation:
 - Design decisions with architectural impact ("chose compress-as-anchor over synthetic messages because prefix cache").
 - User quotes and task state only as attributed history: keep the source ref with any user quote; never carry an UNVERIFIED tier-1 "CURRENT TASK" claim forward as a live directive \u2014 relabel it "TASK AS OF THIS BLOCK". A ref-backed objective that no later source marks completed or superseded is not unverified: it carries in the \`Open objectives:\` entry (next bullet), not as a directive.
 - Open objectives \u2014 if ANY source block's summary names a user-requested objective that no later source block marks completed or superseded, the distilled summary MUST keep a one-line \`Open objectives:\` entry re-carrying each still-open objective verbatim with its original ref. They are the last thing to drop and the first thing to restore.
+- Media re-access handles \u2014 carry every entry of any source block's \`MEDIA REFS\` section verbatim (URLs/file IDs are re-access handles, not detail to distill away).
 - Whether content is OBSOLETE or SUPERSEDED \u2014 mark with one line: "[SUPERSEDED by PR #NNN]" or "[OBSOLETE: deleted in vX.Y.Z]". Do NOT keep the obsolete content's details \u2014 just the marker and reason.
 - Function/class/type names and module paths that are the SUBJECT of the work \u2014 e.g., "fixed filterCompressedRanges in prune.ts", "added SessionStateRegistry in state.ts". Not exact line numbers or full signatures \u2014 just enough to LOCATE the code without searching.
 - Exploration findings: if a block was exploratory with no decision, keep the CONCLUSION in one line ("explored X, not viable because Y"). Do not keep the exploration process.
@@ -636,6 +1530,7 @@ PRIORITY \u2014 when a source block has more facts than the size target allows, 
 2. Open work \u2014 PRs/issues still pending AND still-open user-requested objectives (re-carry any source block's \`Open objectives:\` entries verbatim); these may need follow-up.
 3. Key decisions with architectural impact ("chose X over Y because Z").
 4. Critical constraints ("must support Node 22").
+5. Media re-access handles \u2014 carry any source block's \`MEDIA REFS\` entries verbatim when present; handles must survive condensation.
 Drop everything else. Tier 3 is a lookup index, not a knowledge base.
 
 FORMAT:
@@ -962,755 +1857,7 @@ function scrubLoneSurrogates(text) {
   return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])/g, "\uFFFD").replace(new RegExp("(?<![\\ud800-\\udbff])[\\udc00-\\udfff]", "g"), "\uFFFD");
 }
 
-// ../../tmp/billion-context/kernel/dist/chunk-KW5XKWQH.js
-function createInitialState() {
-  return {
-    blocks: [],
-    messageRefs: { byRaw: {}, byRef: {} },
-    tokenSnapshot: {},
-    nudge: {
-      lastPerMessageNudgeTokens: 0,
-      lastNudgeShownTokens: 0,
-      baselineTokens: 0,
-      anchors: {},
-      lastShownByTier: {}
-    },
-    stats: {
-      tokensCompressed: 0,
-      compressionCount: 0,
-      absorbedTokens: 0,
-      storedCount: 0,
-      retrievalCount: 0
-    },
-    absorbed: [],
-    rules: [],
-    nextRuleId: 1,
-    nextBlockId: 1,
-    nextRunId: 1
-  };
-}
-function allocateBlockId(state) {
-  const id = state.nextBlockId;
-  state.nextBlockId = Math.max(1, id) + 1;
-  return `b${id}`;
-}
-function allocateRunId(state) {
-  const id = state.nextRunId;
-  state.nextRunId = Math.max(1, id) + 1;
-  return `r${id}`;
-}
-function blockById(state, blockId) {
-  return state.blocks.find((block) => block.blockId === blockId);
-}
-function activeBlocks(state) {
-  return state.blocks.filter((block) => block.active);
-}
-function coveredMessageIds(state) {
-  const covered = /* @__PURE__ */ new Set();
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    for (const id of block.effectiveMessageIds) covered.add(id);
-  }
-  return covered;
-}
-function isLiveCheckpointCarrier(message, state) {
-  var _a;
-  const carrierOf = message.summaryOfBlockId;
-  return carrierOf !== void 0 && ((_a = blockById(state, carrierOf)) == null ? void 0 : _a.active) === true;
-}
-function highestActiveTier(state) {
-  let highest = 0;
-  for (const block of state.blocks) {
-    if (block.active && block.tier > highest) highest = block.tier;
-  }
-  return highest;
-}
-function advanceSurvival(state, promotionThreshold) {
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    block.survivedCount += 1;
-    if (block.survivedCount >= promotionThreshold) {
-      block.generation = "old";
-    }
-  }
-}
-
-// ../../tmp/billion-context/kernel/dist/chunk-MACARI4U.js
-var SUMMARY_HEADER = "[Compressed conversation section]";
-var SUMMARY_ID_PREFIX = "acp_summary_";
-function summaryMessageId(blockId) {
-  return `${SUMMARY_ID_PREFIX}${blockId}`;
-}
-function isSummaryMessageId(id) {
-  return id.startsWith(SUMMARY_ID_PREFIX);
-}
-function baseIdOf(id) {
-  const hash = id.indexOf("#");
-  return hash > 0 ? id.substring(0, hash) : id;
-}
-function isCovered(id, coveredBases) {
-  return coveredBases.has(baseIdOf(id));
-}
-function coveredSeqIntervals(state) {
-  const intervals = [];
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    if (typeof block.startSeq === "number" && typeof block.endSeq === "number" && block.startSeq >= 0 && block.endSeq >= block.startSeq) {
-      intervals.push({ start: block.startSeq, end: block.endSeq });
-    }
-  }
-  return intervals;
-}
-function isCoveredBySeq(seq, intervals) {
-  if (typeof seq !== "number" || !Number.isInteger(seq)) return false;
-  for (const interval of intervals) {
-    if (seq >= interval.start && seq <= interval.end) return true;
-  }
-  return false;
-}
-function isRenderedSummaryMessage(message) {
-  return isSummaryMessageId(message.id) && message.role === "system" && message.contentType === "text";
-}
-function prune(messages, state, options = {}) {
-  var _a, _b;
-  const covered = coveredMessageIds(state);
-  if (covered.size === 0) return [...messages];
-  const coveredBases = /* @__PURE__ */ new Set();
-  for (const id of covered) coveredBases.add(baseIdOf(id));
-  const inject = (_a = options.injectSummaries) != null ? _a : true;
-  const isCompressTool = (_b = options.isCompressTool) != null ? _b : ((name) => name === "compress");
-  const firstUserIndex = messages.findIndex(
-    (message) => message.role === "user"
-  );
-  let lastUserIndex = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "user") {
-      lastUserIndex = i;
-      break;
-    }
-  }
-  const baseIndexById = /* @__PURE__ */ new Map();
-  const summaryIndexById = /* @__PURE__ */ new Map();
-  messages.forEach((message, index) => {
-    const base = baseIdOf(message.id);
-    const existing = baseIndexById.get(base);
-    if (existing === void 0 || index < existing)
-      baseIndexById.set(base, index);
-    if (isRenderedSummaryMessage(message))
-      summaryIndexById.set(message.id, index);
-  });
-  const visibleCompressCallIds = /* @__PURE__ */ new Set();
-  if (inject) {
-    for (const message of messages) {
-      if (message.contentType === "tool-call" && message.toolCallId && typeof message.toolName === "string" && isCompressTool(message.toolName)) {
-        visibleCompressCallIds.add(message.toolCallId);
-      }
-    }
-  }
-  const anchors = inject ? collectSummaryAnchors(
-    state,
-    baseIndexById,
-    summaryIndexById,
-    options.headSummaryAnchors ? 0 : lastUserIndex >= 0 ? lastUserIndex : messages.length,
-    visibleCompressCallIds
-  ) : [];
-  const knownSummaryIds = new Set(
-    inject ? state.blocks.map((block) => summaryMessageId(block.blockId)) : []
-  );
-  return stripOrphanedReasoning(
-    stripOrphanedToolResults(
-      stripOrphanedToolCalls(
-        rebuildMessages(
-          messages,
-          coveredBases,
-          // #4316 layer 3: positional claims, built once per prune pass.
-          coveredSeqIntervals(state),
-          firstUserIndex,
-          anchors,
-          knownSummaryIds,
-          options.headSummaryAnchors === true
-        ),
-        isCompressTool
-      )
-    )
-  );
-}
-function collectSummaryAnchors(state, baseIndexById, summaryIndexById, fallbackIndex, visibleCompressCallIds) {
-  const anchors = [];
-  for (const block of activeBlocks(state)) {
-    if (block.compressCallId && visibleCompressCallIds.has(block.compressCallId))
-      continue;
-    const existingIndex = summaryIndexById.get(summaryMessageId(block.blockId));
-    if (existingIndex !== void 0) {
-      anchors.push({
-        blockId: block.blockId,
-        summary: block.summary,
-        topic: block.topic,
-        insertAt: existingIndex
-      });
-      continue;
-    }
-    const anchorIds = block.directMessageIds && block.directMessageIds.length > 0 ? block.directMessageIds : block.effectiveMessageIds;
-    let earliest = null;
-    for (const id of anchorIds) {
-      const index = baseIndexById.get(baseIdOf(id));
-      if (index !== void 0 && (earliest === null || index < earliest)) {
-        earliest = index;
-      }
-    }
-    anchors.push({
-      blockId: block.blockId,
-      summary: block.summary,
-      topic: block.topic,
-      // Unresolved (no anchor id present in this input): park before the
-      // newest user message — see prune() for the #3640/#2733 reasoning.
-      // Tail-parking (the pre-#3640 behavior) let stale summaries land after
-      // the user's current question, which the model then answered instead.
-      insertAt: earliest != null ? earliest : fallbackIndex,
-      unresolved: earliest === null
-    });
-  }
-  anchors.sort((left, right) => left.insertAt - right.insertAt);
-  return anchors;
-}
-function buildAnchorPairingIndex(messages) {
-  const n = messages.length;
-  const resultIndexByCallId = /* @__PURE__ */ new Map();
-  messages.forEach((message, at) => {
-    if (message.contentType !== "tool-result") return;
-    if (typeof message.toolCallId !== "string") return;
-    if (!resultIndexByCallId.has(message.toolCallId)) {
-      resultIndexByCallId.set(message.toolCallId, at);
-    }
-  });
-  const runStart = new Int32Array(n).fill(-1);
-  for (let i = 0; i < n; ) {
-    if (messages[i].role !== "assistant") {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (j + 1 < n && messages[j + 1].role === "assistant") j++;
-    for (let k = i; k <= j; k++) runStart[k] = i;
-    i = j + 1;
-  }
-  const prefixEnd = new Int32Array(n + 1);
-  for (let i = 0; i < n; i++) {
-    const message = messages[i];
-    let end = 0;
-    if (message.role === "assistant" && message.contentType === "tool-call" && typeof message.toolCallId === "string") {
-      const resultIndex = resultIndexByCallId.get(message.toolCallId);
-      if (resultIndex !== void 0) end = resultIndex + 1;
-    }
-    prefixEnd[i + 1] = Math.max(prefixEnd[i], end);
-  }
-  return { runStart, prefixEnd };
-}
-function pairSafeAnchorIndex(messages, index, ix) {
-  const n = messages.length;
-  let safe = index;
-  if (safe > 0 && safe < n) {
-    const start = ix.runStart[safe];
-    if (start >= 0 && messages[safe - 1].role === "assistant") {
-      safe = start;
-    }
-  }
-  if (safe < 0 || safe > n) return safe;
-  for (let guard = 0; guard < n; guard++) {
-    const next = Math.max(safe, ix.prefixEnd[safe]);
-    if (next === safe) break;
-    safe = next;
-  }
-  return safe;
-}
-var wireIndexOf = (m) => m.wireIndex;
-function rebuildMessages(messages, coveredBases, seqIntervals, firstUserIndex, anchors, knownSummaryIds, headAnchors) {
-  let firstUserPinEnd = firstUserIndex + 1;
-  if (firstUserIndex >= 0) {
-    const firstWire = wireIndexOf(messages[firstUserIndex]);
-    if (firstWire !== void 0) {
-      while (firstUserPinEnd < messages.length && messages[firstUserPinEnd].role === "user" && wireIndexOf(messages[firstUserPinEnd]) === firstWire) {
-        firstUserPinEnd++;
-      }
-    }
-  }
-  const ix = anchors.length > 0 ? buildAnchorPairingIndex(messages) : null;
-  const safeAnchors = anchors.map((anchor) => __spreadProps(__spreadValues({}, anchor), {
-    insertAt: ix ? pairSafeAnchorIndex(messages, anchor.insertAt, ix) : anchor.insertAt
-  })).map((anchor) => __spreadProps(__spreadValues({}, anchor), {
-    // #2733/#3642: a summary may NEVER precede the pinned opening wire
-    // message — now measured to the END of the opening core run
-    // (firstUserPinEnd), so an anchor can never land between the opening
-    // message's split parts either.
-    insertAt: headAnchors ? anchor.insertAt : Math.max(
-      anchor.insertAt,
-      anchor.unresolved === true ? firstUserIndex : firstUserPinEnd
-    )
-  })).sort((left, right) => left.insertAt - right.insertAt);
-  const result = [];
-  const pending = [...safeAnchors];
-  for (let index = 0; index < messages.length; index++) {
-    while (pending.length > 0 && pending[0].insertAt === index) {
-      result.push(renderSummary(pending.shift()));
-    }
-    if (index === firstUserIndex && firstUserIndex >= 0) {
-      for (let k = index; k < firstUserPinEnd; k++) {
-        result.push(messages[k]);
-      }
-      index = firstUserPinEnd - 1;
-      continue;
-    }
-    if (isCovered(messages[index].id, coveredBases)) continue;
-    if (isCoveredBySeq(messages[index].ledgerSeq, seqIntervals)) continue;
-    if (isRenderedSummaryMessage(messages[index]) && knownSummaryIds.has(messages[index].id))
-      continue;
-    result.push(messages[index]);
-  }
-  while (pending.length > 0) {
-    result.push(renderSummary(pending.shift()));
-  }
-  return result;
-}
-function renderSummary(anchor) {
-  const body = anchor.summary.trim();
-  const topicLine = anchor.topic ? `${SUMMARY_HEADER} \u2014 ${anchor.topic}` : SUMMARY_HEADER;
-  const text = body.length === 0 ? topicLine : `${topicLine}
-${body}`;
-  return {
-    id: summaryMessageId(anchor.blockId),
-    role: "system",
-    contentType: "text",
-    text
-  };
-}
-function stripOrphanedToolResults(messages) {
-  const openCallIds = /* @__PURE__ */ new Set();
-  const drop = /* @__PURE__ */ new Set();
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
-    if (m.contentType === "tool-call") {
-      if (m.toolCallId) openCallIds.add(m.toolCallId);
-    } else if (m.contentType === "tool-result" && m.toolCallId) {
-      if (!openCallIds.has(m.toolCallId)) drop.add(i);
-    }
-  }
-  return drop.size === 0 ? messages : messages.filter((_, i) => !drop.has(i));
-}
-function stripOrphanedToolCalls(messages, isCompressTool) {
-  const answeredCallIds = /* @__PURE__ */ new Set();
-  const drop = /* @__PURE__ */ new Set();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.contentType === "tool-result") {
-      if (m.toolCallId) answeredCallIds.add(m.toolCallId);
-    } else if (m.contentType === "tool-call" && m.toolCallId) {
-      if (typeof m.toolName === "string" && isCompressTool(m.toolName)) continue;
-      if (!answeredCallIds.has(m.toolCallId)) drop.add(i);
-    }
-  }
-  return drop.size === 0 ? messages : messages.filter((_, i) => !drop.has(i));
-}
-function stripOrphanedReasoning(messages) {
-  const drop = /* @__PURE__ */ new Set();
-  for (let i = 0; i < messages.length; i++) {
-    if (drop.has(i)) continue;
-    if (messages[i].contentType !== "reasoning") continue;
-    let j = i;
-    while (j + 1 < messages.length && messages[j + 1].contentType === "reasoning") {
-      j++;
-    }
-    const companion = messages[j + 1];
-    const hasCompanion = companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call");
-    if (!hasCompanion) {
-      for (let k = i; k <= j; k++) drop.add(k);
-    }
-  }
-  if (drop.size === 0) return messages;
-  return messages.filter((_, i) => !drop.has(i));
-}
-var ALWAYS_PROTECTED_TOOLS = ["compress", "acp_rule"];
-var FAILED_COMPRESS_RESULT_PREFIXES = [
-  "[Compression FAILED",
-  "[Compression refused",
-  "[Compression no-op"
-];
-function isCompressToolName(toolName, config) {
-  var _a;
-  if (!toolName) return false;
-  return toolName === "compress" || !!((_a = config == null ? void 0 : config.isCompressTool) == null ? void 0 : _a.call(config, toolName));
-}
-function isFailedCompressResult(msg, config) {
-  var _a;
-  const text = (_a = msg.text) != null ? _a : "";
-  return msg.contentType === "tool-result" && isCompressToolName(msg.toolName, config) && FAILED_COMPRESS_RESULT_PREFIXES.some((prefix) => text.startsWith(prefix));
-}
-function collectFailedCompressCallIds(messages, config) {
-  const ids = /* @__PURE__ */ new Set();
-  for (const m of messages) {
-    if (isFailedCompressResult(m, config) && m.toolCallId) ids.add(m.toolCallId);
-  }
-  return ids;
-}
-var COMPRESS_EXCHANGE_KEEP_RECENT = 3;
-function collectAgedCompressCallIds(messages, config, keepRecent = COMPRESS_EXCHANGE_KEEP_RECENT) {
-  const recent = [];
-  for (const m of messages) {
-    if (m.contentType === "tool-call" && m.toolCallId && isCompressToolName(m.toolName, config)) {
-      const at = recent.indexOf(m.toolCallId);
-      if (at >= 0) recent.splice(at, 1);
-      recent.push(m.toolCallId);
-      if (recent.length > Math.max(0, keepRecent)) recent.shift();
-    }
-  }
-  const aged = /* @__PURE__ */ new Set();
-  const keep = new Set(recent);
-  for (const m of messages) {
-    if (m.contentType !== "tool-call" || !m.toolCallId) continue;
-    if (!isCompressToolName(m.toolName, config)) continue;
-    if (!keep.has(m.toolCallId)) aged.add(m.toolCallId);
-  }
-  return aged;
-}
-var NEVER_PRESERVE_RECENT_TOOLS = [
-  "decompress",
-  "search_context",
-  "read",
-  "bash"
-];
-function isNeverPreserveRecent(msg, patterns, preservePatterns) {
-  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result") {
-    return false;
-  }
-  if (!msg.toolName) return false;
-  const base = patterns === void 0 ? NEVER_PRESERVE_RECENT_TOOLS : patterns;
-  const list = preservePatterns === void 0 || preservePatterns.length === 0 ? base : base.filter(
-    (tool) => !preservePatterns.some((p) => matchToolPattern(tool, p))
-  );
-  for (const pattern of list) {
-    if (matchToolPattern(msg.toolName, pattern)) return true;
-  }
-  return false;
-}
-function matchToolPattern(toolName, pattern) {
-  const name = toolName.toLowerCase();
-  const pat = pattern.toLowerCase();
-  if (pat.endsWith("*")) {
-    return name.startsWith(pat.slice(0, -1));
-  }
-  return name === pat;
-}
-var SKILL_MD_ANCHOR_RE = /([A-Za-z0-9][A-Za-z0-9._-]*)(?:\\\\|\\|\/)SKILL\.md/i;
-function isValidSkillName(name) {
-  return name.length > 0 && name.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name);
-}
-function skillNameFromCallText(text) {
-  if (!text) return void 0;
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    return void 0;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return void 0;
-  }
-  const args = parsed;
-  for (const key of ["skill", "name", "command"]) {
-    const value = args[key];
-    if (typeof value === "string" && isValidSkillName(value)) return value;
-  }
-  return void 0;
-}
-function toolPathOf(msg) {
-  var _a, _b, _c;
-  const toolName = (_a = msg.toolName) != null ? _a : "";
-  if (!toolName || msg.contentType !== "tool-call") return toolName;
-  if (toolName.toLowerCase() === "skill") {
-    const name = skillNameFromCallText(msg.text);
-    if (name) return `skill/${name}`;
-  }
-  const anchored = (_c = ((_b = msg.text) != null ? _b : "").match(SKILL_MD_ANCHOR_RE)) == null ? void 0 : _c[1];
-  if (anchored && isValidSkillName(anchored)) return `skill/${anchored}`;
-  return toolName;
-}
-function matchToolPath(path2, pattern) {
-  var _a, _b;
-  const patSegs = pattern.toLowerCase().split("/");
-  const patFirst = (_a = patSegs[0]) != null ? _a : "";
-  const pathFirst = (_b = path2.toLowerCase().split("/")[0]) != null ? _b : "";
-  if (patSegs.length === 1) {
-    return matchToolPattern(pathFirst, patFirst);
-  }
-  const pathSegs = path2.toLowerCase().split("/");
-  if (patSegs.length === 2 && patSegs[1] === "*") {
-    return matchToolPattern(pathFirst, patFirst);
-  }
-  return patSegs.length === pathSegs.length && patSegs.every((seg, i) => {
-    var _a2;
-    return matchToolPattern((_a2 = pathSegs[i]) != null ? _a2 : "", seg);
-  });
-}
-function matchToolMessagePattern(msg, pattern) {
-  var _a;
-  const toolName = (_a = msg.toolName) != null ? _a : "";
-  if (!toolName) return false;
-  return matchToolPath(toolPathOf(msg), pattern) || matchToolPattern(toolName, pattern);
-}
-function virtualToolPathOf(msg, config) {
-  var _a;
-  if (msg.contentType === "tool-call" || msg.contentType === "tool-result") {
-    return void 0;
-  }
-  return (_a = config.messagePathOf) == null ? void 0 : _a.call(config, msg);
-}
-function lastUserAnchor(messages, covered, config) {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== "user") continue;
-    if (typeof msg.text === "string" && msg.text.startsWith(SUMMARY_HEADER)) continue;
-    if (covered.has(msg.id)) continue;
-    if (virtualToolPathOf(msg, config) !== void 0) continue;
-    return msg;
-  }
-  return void 0;
-}
-function isMessageProtected(msg, config, failedToolCallIds) {
-  var _a, _b;
-  if ((_a = config.isMessageProtected) == null ? void 0 : _a.call(config, msg)) return true;
-  if (isFailedCompressResult(msg, config) || msg.toolCallId !== void 0 && (failedToolCallIds == null ? void 0 : failedToolCallIds.has(msg.toolCallId)) === true) {
-    return false;
-  }
-  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result" || !msg.toolName) {
-    const virtualPath = virtualToolPathOf(msg, config);
-    if (virtualPath) {
-      for (const pattern of config.protectedTools) {
-        if (matchToolPath(virtualPath, pattern)) return true;
-      }
-    }
-    return false;
-  }
-  if (ALWAYS_PROTECTED_TOOLS.includes(msg.toolName)) {
-    return true;
-  }
-  for (const pattern of config.protectedTools) {
-    if (matchToolMessagePattern(msg, pattern)) return true;
-  }
-  if ((_b = config.isToolProtected) == null ? void 0 : _b.call(config, msg.toolName, msg.text)) return true;
-  return false;
-}
-function collectProtectedToolCallIds(messages, config) {
-  const ids = /* @__PURE__ */ new Set();
-  const failedCompressCallIds = collectFailedCompressCallIds(messages, config);
-  for (const m of messages) {
-    if (m.contentType === "tool-call" && m.toolCallId && isMessageProtected(m, config, failedCompressCallIds)) {
-      ids.add(m.toolCallId);
-    }
-  }
-  return ids;
-}
-function isMessageProtectedWithPairing(msg, config, protectedCallIds, failedToolCallIds) {
-  if (isMessageProtected(msg, config, failedToolCallIds)) return true;
-  if (msg.contentType === "tool-result" && msg.toolCallId && !isFailedCompressResult(msg, config) && // #4289: a failed compress result is never re-protected via pairing
-  protectedCallIds.has(msg.toolCallId)) {
-    return true;
-  }
-  return false;
-}
-function collectLatestProtected(messages, config) {
-  var _a;
-  const callIds = /* @__PURE__ */ new Set();
-  const msgIds = /* @__PURE__ */ new Set();
-  const patterns = (_a = config.protectedLatestTools) != null ? _a : [];
-  if (patterns.length === 0) return { callIds, msgIds };
-  for (const pattern of patterns) {
-    if (pattern.includes("/")) {
-      const lastByPath = /* @__PURE__ */ new Map();
-      for (const m of messages) {
-        if (m.contentType === "tool-call" && m.toolName) {
-          if (!matchToolMessagePattern(m, pattern)) continue;
-          lastByPath.set(toolPathOf(m), m);
-          continue;
-        }
-        const virtualPath = virtualToolPathOf(m, config);
-        if (virtualPath && matchToolPath(virtualPath, pattern)) {
-          lastByPath.set(virtualPath, m);
-        }
-      }
-      for (const last2 of lastByPath.values()) {
-        if (last2.toolCallId) callIds.add(last2.toolCallId);
-        else msgIds.add(last2.id);
-      }
-      continue;
-    }
-    let last;
-    for (const m of messages) {
-      if (m.contentType === "tool-call" && m.toolName) {
-        if (matchToolMessagePattern(m, pattern)) {
-          last = m;
-        }
-        continue;
-      }
-      const virtualPath = virtualToolPathOf(m, config);
-      if (virtualPath && matchToolPath(virtualPath, pattern)) {
-        last = m;
-      }
-    }
-    if (!last) continue;
-    if (last.toolCallId) callIds.add(last.toolCallId);
-    else msgIds.add(last.id);
-  }
-  return { callIds, msgIds };
-}
-function isMessageLatestProtected(msg, latest) {
-  if (latest.msgIds.has(msg.id)) return true;
-  if ((msg.contentType === "tool-call" || msg.contentType === "tool-result") && msg.toolCallId && latest.callIds.has(msg.toolCallId)) {
-    return true;
-  }
-  return false;
-}
-function hasMediaPayload(msg) {
-  var _a;
-  const m = msg;
-  if (typeof m.imageBase64 === "string" && m.imageBase64.length > 0)
-    return true;
-  if (m.rawOpenaiContent != null) return true;
-  if (Array.isArray(m.rawOpenaiContentParts) && m.rawOpenaiContentParts.length > 0)
-    return true;
-  const ab = m.rawAnthropicBlock;
-  if (isObjWith(ab, "type", "image")) return true;
-  if (isObjWith(ab, "type", "tool_result")) {
-    const content = ab.content;
-    if (Array.isArray(content))
-      return content.some((p) => !isObjWith(p, "type", "text"));
-  }
-  const abType = (_a = asObj(ab)) == null ? void 0 : _a.type;
-  if (typeof abType === "string" && abType !== "image" && abType !== "tool_result" && abType !== "redacted_thinking")
-    return true;
-  const item = m.rawResponsesItem;
-  if (isObjWith(item, "type", "input_image")) return true;
-  if (item && typeof item === "object") {
-    const content = item.content;
-    if (Array.isArray(content)) {
-      return content.some((p) => isObjWith(p, "type", "input_image"));
-    }
-  }
-  return false;
-}
-function hasUnrecoverableMediaPayload(msg) {
-  var _a, _b, _c, _d;
-  const m = msg;
-  if (m.rawAnthropicMessage != null)
-    return !isPlainTextSystemMessage(m.rawAnthropicMessage);
-  if (m.rawOpenaiMessage != null)
-    return !isPlainTextSystemMessage(m.rawOpenaiMessage);
-  if (m.role === "system" && m.rawResponsesItem != null)
-    return !isPlainTextResponsesSystemItem(m.rawResponsesItem);
-  const roc = m.rawOpenaiContent;
-  if (roc != null) {
-    const part = asObj(roc);
-    const url = (part == null ? void 0 : part.type) === "image_url" ? (_a = asObj(part.image_url)) == null ? void 0 : _a.url : void 0;
-    if (!isInlineDataUrl(url)) return true;
-  }
-  if (Array.isArray(m.rawOpenaiContentParts)) {
-    for (const p of m.rawOpenaiContentParts) {
-      const part = asObj(p);
-      const url = (part == null ? void 0 : part.type) === "image_url" ? (_b = asObj(part.image_url)) == null ? void 0 : _b.url : void 0;
-      if (!isInlineDataUrl(url)) return true;
-    }
-  }
-  const ab = asObj(m.rawAnthropicBlock);
-  if (ab) {
-    if (ab.type === "image" && !anthropicSourceArchivable(asObj(ab.source)))
-      return true;
-    if (ab.type === "tool_result") {
-      const content = ab.content;
-      if (Array.isArray(content)) {
-        for (const b of content) {
-          const blk = asObj(b);
-          if (!blk || blk.type === "text") continue;
-          if (blk.type === "image") {
-            if (!anthropicSourceArchivable(asObj(blk.source))) return true;
-            continue;
-          }
-          return true;
-        }
-      }
-    }
-    if (typeof ab.type === "string" && ab.type !== "image" && ab.type !== "tool_result" && ab.type !== "redacted_thinking")
-      return true;
-  }
-  const item = asObj(m.rawResponsesItem);
-  if (item) {
-    const parts = [];
-    if (item.type === "input_image") parts.push(item);
-    for (const key of ["content", "output"]) {
-      const arr = item[key];
-      if (Array.isArray(arr)) {
-        for (const p of arr) if (((_c = asObj(p)) == null ? void 0 : _c.type) === "input_image") parts.push(p);
-      }
-    }
-    for (const p of parts) {
-      if (!isInlineDataUrl((_d = asObj(p)) == null ? void 0 : _d.image_url)) return true;
-    }
-  }
-  if (Array.isArray(m.rawGoogleParts)) {
-    for (const p of m.rawGoogleParts) {
-      const part = asObj(p);
-      if (!part) continue;
-      if (part.fileData != null || part.videoMetadata != null) return true;
-      const fr = asObj(part.functionResponse);
-      if (fr && Array.isArray(fr.parts)) {
-        for (const np of fr.parts) {
-          const sub = asObj(np);
-          if (sub && (sub.fileData != null || sub.videoMetadata != null))
-            return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-function anthropicSourceArchivable(source) {
-  if (!source) return false;
-  if (source.type === "base64") return typeof source.data === "string";
-  if (source.type === "url") return isInlineDataUrl(source.url);
-  return false;
-}
-function isPlainTextSystemMessage(raw) {
-  const m = asObj(raw);
-  if (!m || Object.keys(m).some((k) => k !== "role" && k !== "content"))
-    return false;
-  if (typeof m.content === "string") return true;
-  return Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => {
-    const o = asObj(b);
-    return (o == null ? void 0 : o.type) === "text" && Object.keys(o).every(
-      (k) => k === "type" || k === "text" || k === "cache_control"
-    );
-  });
-}
-function isPlainTextResponsesSystemItem(raw) {
-  const m = asObj(raw);
-  if (!m || Object.keys(m).some(
-    (k) => k !== "type" && k !== "role" && k !== "content"
-  ))
-    return false;
-  if (typeof m.content === "string") return true;
-  return Array.isArray(m.content) && m.content.length > 0 && m.content.every((b) => {
-    const o = asObj(b);
-    return o != null && (o.type === "input_text" || o.type === "output_text") && typeof o.text === "string" && Object.keys(o).every((k) => k === "type" || k === "text");
-  });
-}
-function asObj(v) {
-  return typeof v === "object" && v !== null ? v : void 0;
-}
-function isInlineDataUrl(u) {
-  return typeof u === "string" && /^data:[^;,]+(?:;base64)?,.+$/i.test(u);
-}
-function isObjWith(v, key, value) {
-  return typeof v === "object" && v !== null && v[key] === value;
-}
-
-// ../../tmp/billion-context/kernel/dist/index.js
+// dist/index.js
 var import_crypto = require("crypto");
 var import_path = require("path");
 var import_fs = require("fs");
@@ -1790,7 +1937,7 @@ function syncBlocks(messages, state) {
     if (typeof message.id === "string") presentBases.add(baseIdOf(message.id));
   }
   const deactivated = [];
-  const result = {
+  const result = __spreadProps(__spreadValues(__spreadValues({
     blocks: state.blocks.map((block) => __spreadProps(__spreadValues({}, block), {
       directMessageIds: [...block.directMessageIds],
       effectiveMessageIds: [...block.effectiveMessageIds],
@@ -1835,13 +1982,14 @@ function syncBlocks(messages, state) {
     // dropping it re-arms restampRefsToLedger on every turn, re-populating
     // the host's superseded map forever (the "one-time" restamp stops being
     // one-time; reference/ref-keyed-surfaces.md, flag-propagation contract).
-    refLedgerAligned: state.refLedgerAligned,
+    refLedgerAligned: state.refLedgerAligned
+  }, state.timestampsHighWaterRefSeq !== void 0 ? { timestampsHighWaterRefSeq: state.timestampsHighWaterRefSeq } : {}), state.suppressMintingOnce !== void 0 ? { suppressMintingOnce: state.suppressMintingOnce } : {}), {
     // #4313: first-sight time stamps must survive the sync clone — dropping
     // them here would re-mint every stamped message a fresh wall-clock value
     // on the very next turn (timestamp drift = receipt range churn, and the
     // stored-value contract of the tag's time attribute broken).
     tsStamps: state.tsStamps ? __spreadValues({}, state.tsStamps) : void 0
-  };
+  });
   const liveRefs = new Set(
     messages.map((m) => result.messageRefs.byRaw[m.id]).filter((r) => typeof r === "string")
   );
@@ -1891,7 +2039,14 @@ function defaultConfig(modelContextLimit, overrides = {}) {
       minGrowthFloor: 2e4,
       minGrowthRatio: 0.45,
       emergencyThresholdPct: 0.95,
-      tier2GrowthMultiplier: 1.5
+      tier2GrowthMultiplier: 1.5,
+      // Phantom-pressure guard ON by default: pressure-band injection waits
+      // for a usage-grade meter reading when the host reports one is absent.
+      requireUsageSampleForPressure: true,
+      // #5865 backstop bound: the wait above lasts at most this many
+      // consecutive estimate-grade rounds; a never-reporting upstream must not
+      // starve its pressure nudges forever (0 = no holding at all).
+      maxEstimateHoldRounds: 2
     },
     promotionThreshold: 5,
     truncate: { threshold: 0.95, terminalEscapeAfter: 3 },
@@ -2173,28 +2328,30 @@ var COMPRESS_TOOL_OPENAI = {
 };
 var FUNCTION_ACP_TAGS_DEFAULT = `ACP TAGS
 
-Each message in the conversation is annotated with a <acp tokens="2.1K" type="tool:bash">m00175</acp> tag showing its reference ID, approximate token size, and content type. These tags are system metadata injected by the proxy. NEVER echo, repeat, or reference these XML tags in your responses \u2014 the tags must not appear in your output. Use only the ref ID (e.g. m00005) inside compress calls, never the XML wrapper. The token size is approximate \u2014 treat it as a relative guide, not an exact count.`;
+Addressable messages in the conversation are annotated with a <acp tokens="2.1K" type="tool:bash">m00175</acp> tag showing its reference ID, approximate token size, and content type. These tags are system metadata injected by the proxy. NEVER echo, repeat, or reference these XML tags in your responses \u2014 the tags must not appear in your output. Use only the ref ID (e.g. m00005) inside compress calls, never the XML wrapper. The token size is approximate \u2014 treat it as a relative guide, not an exact count.`;
 var FUNCTION_ACP_TAGS_TIMESTAMPED = `ACP TAGS
 
-Each message in the conversation is annotated with a <acp tokens="2.1K" type="tool:bash" time="2026-10-30 09:02:11">m00175</acp> tag showing its reference ID, approximate token size, content type, and local time of occurrence (yyyy-mm-dd hh:mm:ss). Ordering: smaller ref number = earlier message; smaller time = earlier message. These tags are system metadata injected by the proxy. NEVER echo, repeat, or reference these XML tags in your responses \u2014 the tags must not appear in your output. Use only the ref ID (e.g. m00005) inside compress calls, never the XML wrapper. The token size is approximate \u2014 treat it as a relative guide, not an exact count.`;
+Addressable messages in the conversation are annotated with a <acp tokens="2.1K" type="tool:bash" time="2026-10-30 09:02:11">m00175</acp> tag showing its reference ID, approximate token size, content type, and local time of occurrence (yyyy-mm-dd hh:mm:ss). Ordering: smaller ref number = earlier message; smaller time = earlier message. These tags are system metadata injected by the proxy. NEVER echo, repeat, or reference these XML tags in your responses \u2014 the tags must not appear in your output. Use only the ref ID (e.g. m00005) inside compress calls, never the XML wrapper. The token size is approximate \u2014 treat it as a relative guide, not an exact count.`;
 var TEXT_ACP_TAGS_DEFAULT = `ACP TAGS
 
-Each message in the conversation is annotated with a <acp tokens="2.1K" type="tool:bash">m00175</acp> tag showing its reference ID, approximate token size, and content type. These tags are system metadata. NEVER echo these history tags. Use only the ref ID (e.g. m00005), never the XML wrapper.`;
+Addressable messages in the conversation are annotated with a <acp tokens="2.1K" type="tool:bash">m00175</acp> tag showing its reference ID, approximate token size, and content type. These tags are system metadata. NEVER echo these history tags. Use only the ref ID (e.g. m00005), never the XML wrapper.`;
 var TEXT_ACP_TAGS_TIMESTAMPED = `ACP TAGS
 
-Each message in the conversation is annotated with a <acp tokens="2.1K" type="tool:bash" time="2026-10-30 09:02:11">m00175</acp> tag showing its reference ID, approximate token size, content type, and local time of occurrence (yyyy-mm-dd hh:mm:ss). Ordering: smaller ref number = earlier message; smaller time = earlier message. These tags are system metadata. NEVER echo these history tags. Use only the ref ID (e.g. m00005), never the XML wrapper.`;
+Addressable messages in the conversation are annotated with a <acp tokens="2.1K" type="tool:bash" time="2026-10-30 09:02:11">m00175</acp> tag showing its reference ID, approximate token size, content type, and local time of occurrence (yyyy-mm-dd hh:mm:ss). Ordering: smaller ref number = earlier message; smaller time = earlier message. These tags are system metadata. NEVER echo these history tags. Use only the ref ID (e.g. m00005), never the XML wrapper.`;
 var FUNCTION_PROMPT_SECTIONS = [
   ["acpTags", FUNCTION_ACP_TAGS_DEFAULT],
   [
     "tools",
     `TOOLS
 
-You have five context-management tools:
+You have four context-management tools:
 
 - compress \u2014 Replace consumed conversation ranges with self-contained summaries you write. ONE call carries EVERY range: compress({ content: "m00150\u2013m00220 Auth\\nsummary\u2026\\nm00300\u2013m00350 Deploy\\nsummary\u2026" }) \u2014 one plain string, one block per range, each block starting with its 'mNNNNN\u2013mNNNNN optional topic' header line followed by that block's summary (a valid JSON string: \\" and \\n). A single range is the same shape with one block. Never split a batch into one call per range.
-- decompress \u2014 Restore a previously compressed block's content. By default restores one tier up (T2\u2192T1 summaries, not raw messages). Use full: true to restore all the way to original messages. Use toFile to write to file instead of inflating context. Example: decompress({ blockId: "b5" }) or decompress({ blockId: "b5", toFile: "path" }) or decompress({ blockId: "b5", full: true }).
-- search_context \u2014 Search compressed block summaries (and optionally visible messages) by keyword. Use BEFORE decompressing to find the right block. Example: search_context({ query: "auth token refresh" }).
-- acp_status \u2014 Context status with compressible ranges. No args = overview + ranges. Use to find what to compress next.`
+- decompress \u2014 Restore a previously compressed block's content. By default restores one tier up (T2\u2192T1 summaries, not raw messages); a leaf block has no lower tier, so the default already returns its content. Use full: true to restore all the way to original messages. Use toFile to write to file instead of inflating context. Example: decompress({ blockId: "b5" }) or decompress({ blockId: "b5", toFile: "path" }) or decompress({ blockId: "b5", full: true }).
+- search_context \u2014 Search stored compressed-block summaries and folded-away originals by keyword \u2014 NOT your currently visible messages. Use BEFORE decompressing to find the right block. Example: search_context({ query: "auth token refresh" }).
+- acp_status \u2014 Context status with compressible ranges. No args = overview + ranges. Use to find what to compress next.
+
+Message refs are per-generation: mNNNNN ids are assigned in ingest order for THIS conversation view. Switching model or upstream mid-conversation starts a fresh generation whose refs restart at m00001 and old ones stop resolving \u2014 after any such switch (or any unknown-ref failure), call acp_status for current refs before compressing.`
   ],
   [
     "summariesInContext",
@@ -2276,7 +2433,7 @@ var HYBRID_PROMPT_SECTIONS = [
     "acpTags",
     `ACP TAGS
 
-Each message in the conversation is annotated with a <acp> tag showing its reference ID, approximate token size, and content type. These tags are system metadata. NEVER echo these history tags. Use only the ref ID (e.g. m00005), never the XML wrapper.`
+Addressable messages in the conversation are annotated with a <acp> tag showing its reference ID, approximate token size, and content type. These tags are system metadata. NEVER echo these history tags. Use only the ref ID (e.g. m00005), never the XML wrapper.`
   ],
   [
     "textProtocol",
@@ -2358,18 +2515,44 @@ var SEARCH_CONTEXT_TOOL_OPENAI = {
     }
   }
 };
+var ACP_STATUS_PARAMETERS = {
+  type: "object",
+  properties: {
+    scope: {
+      type: "string",
+      description: '"uncompressed": history outside active blocks; "compressed": block ledger; omit = default overview'
+    },
+    view: {
+      type: "string",
+      description: '"messages" for a per-message listing; "ranges" is the default'
+    },
+    tool: {
+      type: "string",
+      description: 'With view:"messages": only list results of this tool name'
+    },
+    sort: {
+      type: "string",
+      description: 'With view:"messages": order by "size", "time", "tool", or "age"'
+    },
+    limit: {
+      type: "number",
+      description: "Max entries to list"
+    },
+    archiveDetail: {
+      type: "boolean",
+      description: "List pre-compaction archived blocks per-id instead of grouped by reason"
+    }
+  }
+};
 var ACP_STATUS_TOOL_OPENAI = {
   type: "function",
   function: {
     name: ACP_STATUS_TOOL_NAME,
-    description: "Show context usage and compressible ranges. No args = overview. Use to find what to compress next.",
-    parameters: {
-      type: "object",
-      properties: {}
-    }
+    description: "Show context usage and compressible ranges. No args = overview; pass scope/view/tool/sort/limit/archiveDetail for targeted listings.",
+    parameters: ACP_STATUS_PARAMETERS
   }
 };
-var ACP_CACHE_TOOL_DESCRIPTION = `Prompt-cache reconciliation: grand ledger (total input/cached/output, overall hit rate) with every request's miss split into new content / compression re-pay / upstream-ttl-or-client-rewrite (unattributed stable-prefix misses), plus per-fold economics (breakeven turns vs measured cadence). Defaults to a compact summary (totals + verdicts + anomalies only); pass detail="full" for every fold and line item. Read-only. Call when asked about cache hits, cache invalidation, or what compression costs.`;
+var ACP_CACHE_TOOL_DESCRIPTION = `Prompt-cache reconciliation: grand ledger (total input/cached/output, overall hit rate) with every request's miss split into new content / compression re-pay / upstream-ttl-or-client-rewrite (unattributed stable-prefix misses), plus per-fold economics (breakeven turns vs measured cadence). Defaults to a compact summary (totals + verdicts + anomalies only); pass detail="full" for every fold and its line-item breakdown. Read-only. Call when asked about cache hits, cache invalidation, or what compression costs.`;
 var ACP_CACHE_TOOL_OPENAI = {
   type: "function",
   function: {
@@ -2381,7 +2564,7 @@ var ACP_CACHE_TOOL_OPENAI = {
         detail: {
           type: "string",
           enum: ["summary", "full"],
-          description: '"summary" (default): totals, verdicts, notable folds, anomalous requests only. "full": every retained fold and line item.'
+          description: '"summary" (default): totals, verdicts, notable folds, anomalous requests only. "full": every retained fold and its line-item breakdown (most-recent window \u2014 the output states the cap).'
         }
       }
     }
@@ -2480,7 +2663,7 @@ var ACP_READONLY_TOOLS = /* @__PURE__ */ new Set([
   ACP_STATUS_TOOL_NAME,
   ACP_CACHE_TOOL_NAME
 ]);
-var ABSORB_TOOL_DESCRIPTION = "Distill a tool result into a compact summary you write. REQUIRED immediately after a tool result ends with an [ACP absorb] instruction: pass its ref and the distilled essentials (outcome, key values, paths:lines, errors, decisions). The original output is then removed from context; your summary is the durable record.";
+var ABSORB_TOOL_DESCRIPTION = "Distill a tool result into a compact summary you write. REQUIRED immediately after a tool result ends with an [ACP absorb] instruction: pass its ref and the distilled essentials (outcome, key values, paths:lines, errors, decisions). The original output is then removed from context; your summary is the durable record. If nothing worth keeping survives, say so in the summary (e.g. '(nothing needed)') \u2014 that discards the output cleanly.";
 var ABSORB_PARAMETERS = {
   type: "object",
   properties: {
@@ -2528,11 +2711,17 @@ var ACP_STATUS_TOOL_GOOGLE = {
   description: ACP_STATUS_TOOL_OPENAI.function.description,
   parameters: ACP_STATUS_TOOL_OPENAI.function.parameters
 };
+var ACP_CACHE_TOOL_GOOGLE = {
+  name: ACP_CACHE_TOOL_NAME,
+  description: ACP_CACHE_TOOL_DESCRIPTION,
+  parameters: ACP_CACHE_TOOL_OPENAI.function.parameters
+};
 var ACP_TOOLS_GOOGLE = [
   COMPRESS_TOOL_GOOGLE,
   DECOMPRESS_TOOL_GOOGLE,
   SEARCH_CONTEXT_TOOL_GOOGLE,
-  ACP_STATUS_TOOL_GOOGLE
+  ACP_STATUS_TOOL_GOOGLE,
+  ACP_CACHE_TOOL_GOOGLE
 ];
 var ABSORB_TOOL_GOOGLE = {
   name: ABSORB_TOOL_NAME,
@@ -2540,13 +2729,13 @@ var ABSORB_TOOL_GOOGLE = {
   parameters: ABSORB_PARAMETERS
 };
 var RETRIEVE_TOOL_NAME = "acp_retrieve";
-var RETRIEVE_TOOL_DESCRIPTION = "Retrieve the full original text of a stored tool result. REQUIRED when you need details from a placeholder that starts with \u{1F4E6} [acp-stored #mNNNNN: pass its ref. Returns the exact original text; the placeholder stays in context. Unknown refs return not-found.";
+var RETRIEVE_TOOL_DESCRIPTION = "Retrieve the full original text of a stored tool result. REQUIRED when you need details from a placeholder that starts with \u{1F4E6} [acp-stored #mNNNNN: pass its ref. Returns the exact original text inline \u2014 very large originals are exported to a file instead, and the result then carries the exported file's path. The placeholder stays in context. Unknown refs return not-found.";
 var RETRIEVE_PARAMETERS = {
   type: "object",
   properties: {
     ref: {
       type: "string",
-      description: "mNNNNN ref shown in the \u{1F4E6} [acp-stored placeholder"
+      description: "mNNNNN ref shown in the \u{1F4E6} [acp-stored \u2026] placeholder"
     }
   },
   required: ["ref"]
@@ -5351,113 +5540,6 @@ function applyViewLatch(io, ctx) {
     }), digest !== void 0 ? { viewLatchConfigDigest: digest } : {})
   });
 }
-var bareIsCompressTool = (toolName) => toolName === "compress";
-function planRelocateCompressCarriers(messages, state, opts = {}) {
-  var _a, _b, _c;
-  const isCompressTool = (_a = opts.isCompressTool) != null ? _a : bareIsCompressTool;
-  const byRaw = state.messageRefs.byRaw;
-  const endRefNumByCallId = /* @__PURE__ */ new Map();
-  for (const block of state.blocks) {
-    if (!block.active || !block.compressCallId) continue;
-    const n = refNum(block.endRef);
-    if (n === null) continue;
-    const prev = (_b = endRefNumByCallId.get(block.compressCallId)) != null ? _b : 0;
-    if (n > prev) endRefNumByCallId.set(block.compressCallId, n);
-  }
-  if (endRefNumByCallId.size === 0) {
-    return { moves: [], removedInputIndices: /* @__PURE__ */ new Set(), changed: false };
-  }
-  const refOf = (m) => {
-    const ref = byRaw[m.id];
-    return ref === void 0 || ref === BLOCKED_REF ? null : refNum(ref);
-  };
-  const callsByCallId = /* @__PURE__ */ new Map();
-  for (let i = 0; i < messages.length; i++) {
-    const m = messages[i];
-    if (m.contentType !== "tool-call" || !m.toolCallId) continue;
-    if (!isCompressTool((_c = m.toolName) != null ? _c : "")) continue;
-    if (!endRefNumByCallId.has(m.toolCallId)) continue;
-    const list = callsByCallId.get(m.toolCallId);
-    if (list === void 0) callsByCallId.set(m.toolCallId, [i]);
-    else list.push(i);
-  }
-  const moves = [];
-  const removed = /* @__PURE__ */ new Set();
-  for (const [callId, callIndices] of [...callsByCallId.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)) {
-    if (callIndices.length !== 1) continue;
-    const j = callIndices[0];
-    const resultIndex = j + 1;
-    const r = messages[resultIndex];
-    if (!r || r.contentType !== "tool-result" || r.toolCallId !== callId) continue;
-    removed.add(j);
-    removed.add(resultIndex);
-    const droppedReasoningIndices = [];
-    if (opts.clearThinking && typeof opts.reasoningDroppable === "function") {
-      for (let k = j - 1; k >= 0; k--) {
-        const c = messages[k];
-        if (c.contentType !== "reasoning") break;
-        if (opts.reasoningDroppable(c)) {
-          droppedReasoningIndices.push(k);
-          removed.add(k);
-        }
-      }
-    }
-    moves.push({ callId, callIndex: j, insertAtOutput: 0, droppedReasoningIndices });
-  }
-  if (moves.length === 0) {
-    return { moves: [], removedInputIndices: /* @__PURE__ */ new Set(), changed: false };
-  }
-  for (const move of moves) {
-    const boundary = endRefNumByCallId.get(move.callId);
-    let at = messages.length;
-    for (let i = 0; i < messages.length; i++) {
-      if (removed.has(i)) continue;
-      const n = refOf(messages[i]);
-      if (n !== null && n > boundary) {
-        at = i;
-        break;
-      }
-    }
-    let out = 0;
-    for (let i = 0; i < at; i++) {
-      if (!removed.has(i)) out++;
-    }
-    move.insertAtOutput = out;
-  }
-  moves.sort((a, b) => a.callId < b.callId ? -1 : 1);
-  return { moves, removedInputIndices: removed, changed: true };
-}
-function relocateCompressCarriers(messages, state, opts = {}) {
-  const plan = planRelocateCompressCarriers(messages, state, opts);
-  if (!plan.changed) return messages;
-  const dueAt = /* @__PURE__ */ new Map();
-  for (const move of plan.moves) {
-    const list = dueAt.get(move.insertAtOutput);
-    if (list === void 0) dueAt.set(move.insertAtOutput, [move]);
-    else list.push(move);
-  }
-  for (const list of dueAt.values()) {
-    list.sort((a, b) => a.callIndex - b.callIndex);
-  }
-  const out = [];
-  const flushDue = (k) => {
-    const due = dueAt.get(k);
-    if (due === void 0) return;
-    dueAt.delete(k);
-    for (const move of due) {
-      out.push(messages[move.callIndex], messages[move.callIndex + 1]);
-    }
-  };
-  let survivors = 0;
-  for (let i = 0; i < messages.length; i++) {
-    if (plan.removedInputIndices.has(i)) continue;
-    flushDue(survivors);
-    out.push(messages[i]);
-    survivors++;
-  }
-  flushDue(survivors);
-  return out;
-}
 var registry = /* @__PURE__ */ new Map();
 function registerMessageFilter(filter) {
   const existing = registry.get(filter.name);
@@ -5773,7 +5855,7 @@ function buildIntegrityPre(messages) {
     groups: computeTurnGroups(messages)
   };
 }
-function computeIntegrityWithdrawals(messages, foldedIds, pre) {
+function computeIntegrityWithdrawals(messages, foldedIds, pre, invisibleIds) {
   const remaining = new Set(foldedIds);
   const withdrawn = /* @__PURE__ */ new Set();
   const handledTurns = /* @__PURE__ */ new Set();
@@ -5795,7 +5877,7 @@ function computeIntegrityWithdrawals(messages, foldedIds, pre) {
       );
       if (!foldHasReasoning) continue;
       const keptHasCall = group.some(
-        (id) => !remaining.has(id) && callIds.has(id)
+        (id) => !remaining.has(id) && callIds.has(id) && !(invisibleIds == null ? void 0 : invisibleIds.has(id))
       );
       if (!keptHasCall) continue;
       handledTurns.add(g);
@@ -5861,41 +5943,50 @@ function adjustBoundariesForReasoningPairs(startIndex, endIndex, messages) {
   }
   return { startIndex: newStartIndex, endIndex: newEndIndex };
 }
-function adjustBoundariesForToolPairs(startIndex, endIndex, messages, maxScan = 20) {
-  const callIdsInRange = /* @__PURE__ */ new Set();
-  for (let i = startIndex; i <= endIndex; i++) {
+function buildToolPairExtremes(messages) {
+  const extremes = /* @__PURE__ */ new Map();
+  for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (!msg || !msg.toolCallId) continue;
-    if (msg.toolName === "compress") continue;
-    callIdsInRange.add(msg.toolCallId);
-  }
-  if (callIdsInRange.size === 0) {
-    return { startIndex, endIndex };
-  }
-  let newEndIndex = endIndex;
-  for (let i = endIndex + 1; i < messages.length && i <= endIndex + maxScan; i++) {
-    const msg = messages[i];
-    if (!msg) break;
-    if (msg.toolCallId && callIdsInRange.has(msg.toolCallId)) {
-      newEndIndex = i;
-    } else if (newEndIndex > endIndex) {
-      break;
+    const cur = extremes.get(msg.toolCallId);
+    if (cur === void 0) {
+      extremes.set(msg.toolCallId, [i, i]);
+    } else {
+      if (i < cur[0]) cur[0] = i;
+      if (i > cur[1]) cur[1] = i;
     }
   }
+  return extremes;
+}
+function adjustBoundariesForToolPairs(startIndex, endIndex, messages, extremes) {
+  const pairExtremes = extremes != null ? extremes : buildToolPairExtremes(messages);
   let newStartIndex = startIndex;
-  for (let i = startIndex - 1; i >= 0 && i >= startIndex - maxScan; i--) {
-    const msg = messages[i];
-    if (!msg) break;
-    if (msg.toolCallId && callIdsInRange.has(msg.toolCallId)) {
-      newStartIndex = i;
-    } else if (newStartIndex < startIndex) {
-      break;
+  let newEndIndex = endIndex;
+  const settled = /* @__PURE__ */ new Set();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = newStartIndex; i <= newEndIndex && i < messages.length; i++) {
+      const msg = messages[i];
+      if (!msg || !msg.toolCallId) continue;
+      if (settled.has(msg.toolCallId)) continue;
+      if (msg.toolName === "compress") continue;
+      settled.add(msg.toolCallId);
+      const ext = pairExtremes.get(msg.toolCallId);
+      if (ext[0] < newStartIndex) {
+        newStartIndex = ext[0];
+        changed = true;
+      }
+      if (ext[1] > newEndIndex) {
+        newEndIndex = ext[1];
+        changed = true;
+      }
     }
   }
   return { startIndex: newStartIndex, endIndex: newEndIndex };
 }
 function projectUnit(input) {
-  var _a, _b, _c, _d, _e, _f;
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i;
   const warnings = (_a = input.warnings) != null ? _a : [];
   let withdrawnIds = /* @__PURE__ */ new Set();
   let splitTurnCount = 0;
@@ -5924,7 +6015,11 @@ function projectUnit(input) {
       }
     }
   }
-  const adjustedIds = applyPairBoundaryAdjustments(resolved, input.messages);
+  const adjustedIds = applyPairBoundaryAdjustments(
+    resolved,
+    input.messages,
+    shared
+  );
   const skippedCarrierIds = adjustedIds.filter((id) => liveCarrierIds.has(id));
   if (skippedCarrierIds.length > 0) {
     warnings.push(
@@ -5956,7 +6051,12 @@ function projectUnit(input) {
     isBlockBoundary
   );
   const outputTier = isBlockBoundary ? Math.min(3, targetTier + 1) : 1;
-  const consumedBlockIds = resolved.nestedBlockIds.filter((id) => {
+  const excludedNestedBlockIds = input.excludeNestedBlockIds ? resolved.nestedBlockIds.filter(
+    (id) => input.excludeNestedBlockIds.has(id)
+  ) : [];
+  let consumedBlockIds = resolved.nestedBlockIds.filter((id) => {
+    var _a2;
+    if ((_a2 = input.excludeNestedBlockIds) == null ? void 0 : _a2.has(id)) return false;
     const block = blockById(input.state, id);
     return (block == null ? void 0 : block.active) && block.tier === targetTier;
   });
@@ -5989,7 +6089,7 @@ function projectUnit(input) {
   });
   if (mediaExcluded.length > 0) {
     warnings.push(
-      `Excluded ${mediaExcluded.length} message(s) carrying unrecoverable media (remote URL / file references with no stored bytes) from compression range \u2014 folding would destroy them permanently (billion-context#1188/#2609). Inline images fold normally and stay restorable via decompress({ imageRef }).`
+      `Excluded ${mediaExcluded.length} message(s) carrying unrecoverable media (no stored bytes and no re-access handle in the message) from compression range \u2014 folding would destroy them permanently (billion-context#1188/#2609). Ref-based media (remote URL / file id) folds normally since #5620 with its handle recorded in the summary; inline images fold normally too and stay restorable via decompress({ imageRef }).`
     );
   }
   const protectedRefs = input.protectedMessageIds;
@@ -6027,10 +6127,13 @@ function projectUnit(input) {
     const hitRefs = hitProtectedRaw.map((id) => input.state.messageRefs.byRaw[id]).filter((v) => typeof v === "string");
     if (filteredIds.length === 0 && consumedBlockIds.length === 0) {
       const recentN = input.config.preserveRecentMessages;
+      const excludedFatal = excludedNestedBlockIds.length > 0 ? new Error(
+        `Merging ${resolved.nestedBlockIds.join(", ")} cannot proceed: excluding ${excludedNestedBlockIds.join(", ")} (their coverage would strand a live turn-integrity conflict) leaves nothing left to fold in ${input.startRef}..${input.endRef}. Fold the stranded visible partner(s) first with a plain message-range compress so the turn closes, or retry once those block(s) can fold whole.`
+      ) : null;
       return finish2({
         fatal: {
-          kind: "zone",
-          error: new Error(
+          kind: excludedFatal ? "split" : "zone",
+          error: excludedFatal != null ? excludedFatal : new Error(
             `Range is entirely within the protected zone (the last ${recentN} messages and/or the most recent user message): ${hitRefs.join(
               ", "
             )}. Adjust startId/endId to older messages.`
@@ -6066,7 +6169,8 @@ function projectUnit(input) {
     const initial = computeIntegrityWithdrawals(
       input.messages,
       foldedRef,
-      shared == null ? void 0 : shared.integrityPre
+      shared == null ? void 0 : shared.integrityPre,
+      isMerge ? void 0 : input.preExistingCoverage
     );
     splitTurnCount = initial.splitTurnCount;
     splitPairCount = initial.splitPairCount;
@@ -6123,23 +6227,162 @@ function projectUnit(input) {
           ).withdrawn;
         }
         if (stuck || current.size > 0) {
-          const sample = [...consumedCoverage].slice(0, 5).join(", ");
-          return finish2({
-            fatal: {
-              kind: "split",
-              error: new Error(
-                `Merging ${consumedBlockIds.join(", ")} cannot satisfy turn integrity without unfolding already-folded message(s) owned by those blocks (${sample}) \u2014 doing so would drop their existing coverage. Align the range to whole turns (do not cut through a reasoning/tool-call/result group) or merge fewer blocks.`
-              )
+          const mergeOwned = /* @__PURE__ */ new Set([
+            ...filteredIds,
+            ...consumedCoverage
+          ]);
+          const relevantUnresolved = [...current].filter(
+            (id) => mergeOwned.has(id)
+          );
+          if (relevantUnresolved.length === 0) {
+            warnings.push(
+              `Inherited a pre-existing turn-integrity conflict this merge does not touch (${[...current].slice(0, 6).map((id) => {
+                var _a2;
+                return (_a2 = input.state.messageRefs.byRaw[id]) != null ? _a2 : id;
+              }).join(", ")}): the partner(s) are already covered by other blocks or still visible. Left as-is \u2014 fold the visible partner(s) into coverage to clear it.`
+            );
+          } else {
+            const refOf5919 = (id) => {
+              var _a2;
+              return (_a2 = input.state.messageRefs.byRaw[id]) != null ? _a2 : id;
+            };
+            const isNeverFoldable5919 = (id) => {
+              var _a2;
+              const ref = refOf5919(id);
+              const msg = msgById(id);
+              if (ref === "BLOCKED" || !msg) return true;
+              if ((_a2 = input.protectedMessageIds) == null ? void 0 : _a2.has(ref)) return true;
+              if (filterProtectedToolMessages(
+                [id],
+                input.messages,
+                input.config,
+                shared
+              ).length === 0)
+                return true;
+              return hasUnrecoverableMediaPayload(msg);
+            };
+            const visibleStranded = [...current].filter(
+              (id) => !survivingCoverage.has(id) && !consumedCoverage.has(id)
+            );
+            const doomedStranded = visibleStranded.filter(isNeverFoldable5919);
+            if (doomedStranded.length > 0) {
+              const foldablePartners = visibleStranded.filter(
+                (id) => !isNeverFoldable5919(id)
+              );
+              warnings.push(
+                `Merge of ${consumedBlockIds.join(", ")} skipped \u2014 its turn cannot be closed now: ${doomedStranded.map(refOf5919).join(", ")} ${doomedStranded.length === 1 ? "is" : "are"} protected (never foldable) while the rest of their turn is covered by block(s). Do not retry this merge.${foldablePartners.length > 0 ? ` The foldable partner(s) ${foldablePartners.map(refOf5919).join(", ")} can only close their turn together with the protected member(s) \u2014 they stay visible until the protection lifts.` : ""}`
+              );
+              consumedBlockIds = [];
+              filteredIds = [];
+              return finish2({ fatal: null });
             }
-          });
+            let extended5919 = false;
+            const tryExtend5919 = () => {
+              if (extended5919 || visibleStranded.length === 0 || visibleStranded.length > 16)
+                return false;
+              const extended = new Set(effectiveMessageIds);
+              for (const id of unfolded) extended.delete(id);
+              for (const id of visibleStranded) extended.add(id);
+              const checkBase = new Set(extended);
+              for (const id of survivingCoverage) checkBase.add(id);
+              let clean = false;
+              let check = new Set(checkBase);
+              for (let guard2 = 0; guard2 < 8; guard2++) {
+                const w = computeIntegrityWithdrawals(
+                  input.messages,
+                  check,
+                  shared == null ? void 0 : shared.integrityPre
+                ).withdrawn;
+                if (w.size === 0) {
+                  clean = true;
+                  break;
+                }
+                let touchesFold = false;
+                for (const id of w) {
+                  if (extended.has(id)) {
+                    touchesFold = true;
+                    break;
+                  }
+                }
+                if (touchesFold) break;
+                const next = new Set(check);
+                for (const id of w) next.delete(id);
+                if (next.size === check.size) break;
+                check = next;
+              }
+              if (!clean) return false;
+              for (const id of visibleStranded) {
+                if (skippedCarrierIds.includes(id)) continue;
+                effectiveMessageIds.add(id);
+                if (!directMessageIds.includes(id))
+                  directMessageIds.push(id);
+                if (!filteredIds.includes(id)) filteredIds.push(id);
+              }
+              warnings.push(
+                `Extended this merge to fold stranded partner(s) ${visibleStranded.map(refOf5919).join(", ")} so the turn closes (billion-context#5919) \u2014 the new block's coverage includes them.`
+              );
+              extended5919 = true;
+              return true;
+            };
+            let retried = null;
+            if (((_h = (_g = input.excludeNestedBlockIds) == null ? void 0 : _g.size) != null ? _h : 0) < 64) {
+              const ownerByMessageId = /* @__PURE__ */ new Map();
+              for (const bid of consumedBlockIds) {
+                const block = blockById(input.state, bid);
+                if (!block) continue;
+                for (const id of block.effectiveMessageIds)
+                  ownerByMessageId.set(id, bid);
+              }
+              const offending = [
+                ...new Set(
+                  relevantUnresolved.filter((id) => !survivingCoverage.has(id)).map((id) => ownerByMessageId.get(id)).filter((bid) => bid !== void 0)
+                )
+              ].sort();
+              if (offending.length > 0) {
+                retried = projectUnit(__spreadProps(__spreadValues({}, input), {
+                  excludeNestedBlockIds: /* @__PURE__ */ new Set([
+                    ...(_i = input.excludeNestedBlockIds) != null ? _i : [],
+                    ...offending
+                  ])
+                }));
+                const retriedFoldedNothing = retried.fatal === null && retried.filteredIds.length === 0 && retried.consumedBlockIds.length === 0;
+                if (retried.fatal === null && !retriedFoldedNothing) {
+                  warnings.push(
+                    `Excluded ${offending.join(", ")} from this merge \u2014 their coverage cuts through a turn group whose partner(s) are still visible outside the span, and unfolding them would drop their only coverage. They stay ACTIVE (coverage intact); the merge proceeded around them.`
+                  );
+                  return retried;
+                }
+                tryExtend5919();
+              } else {
+                tryExtend5919();
+              }
+            } else {
+              tryExtend5919();
+            }
+            if (!extended5919) {
+              if (retried !== null && retried.fatal === null) {
+                return retried;
+              }
+              return finish2({
+                fatal: {
+                  kind: "split",
+                  error: new Error(
+                    actionableSplitError(consumedBlockIds, current, input)
+                  )
+                }
+              });
+            }
+          }
         }
         withdrawnIds = unfolded;
         for (const id of unfolded) effectiveMessageIds.delete(id);
         const beforeWithdraw = filteredIds.length;
         filteredIds = filteredIds.filter((id) => !unfolded.has(id));
-        warnings.push(
-          `Withdrew ${beforeWithdraw - filteredIds.length} newly-folded message(s) from the merge to keep ${splitDesc} intact while preserving the existing coverage of ${consumedBlockIds.join(", ")}.`
-        );
+        if (beforeWithdraw !== filteredIds.length) {
+          warnings.push(
+            `Withdrew ${beforeWithdraw - filteredIds.length} newly-folded message(s) from the merge to keep ${splitDesc} intact while preserving the existing coverage of ${consumedBlockIds.join(", ")}.`
+          );
+        }
       }
     }
   }
@@ -6185,6 +6428,7 @@ function buildProjectionShared(messages, state, config) {
     agedCompressCallIds,
     baseProtectedCallIds,
     pairByCallId: buildPairMap(messages),
+    toolPairExtremes: buildToolPairExtremes(messages),
     anchorMessage: lastUserAnchor(messages, coveredMessageIds(state), config),
     integrityPre: buildIntegrityPre(messages)
   };
@@ -6210,7 +6454,7 @@ function collectCoverage(state) {
   }
   return coverage;
 }
-function applyPairBoundaryAdjustments(resolved, messages) {
+function applyPairBoundaryAdjustments(resolved, messages, shared) {
   if (resolved.boundaryKind === "block") {
     return resolved.messageIds;
   }
@@ -6225,7 +6469,8 @@ function applyPairBoundaryAdjustments(resolved, messages) {
     const toolAdjusted = adjustBoundariesForToolPairs(
       reasoningAdjusted.startIndex,
       reasoningAdjusted.endIndex,
-      messages
+      messages,
+      shared == null ? void 0 : shared.toolPairExtremes
     );
     const changed = toolAdjusted.startIndex !== startIndex || toolAdjusted.endIndex !== endIndex;
     startIndex = toolAdjusted.startIndex;
@@ -6290,6 +6535,37 @@ function resolveTargetTier(state, nestedBlockIds, isBlockBoundary) {
     if (block && block.tier < minTier) minTier = block.tier;
   }
   return minTier;
+}
+function actionableSplitError(consumedBlockIds, unresolved, input) {
+  const refOf = (id) => {
+    var _a;
+    return (_a = input.state.messageRefs.byRaw[id]) != null ? _a : id;
+  };
+  const consumedOwners = /* @__PURE__ */ new Map();
+  const survivingOwners = /* @__PURE__ */ new Map();
+  for (const block of activeBlocks(input.state)) {
+    const map = consumedBlockIds.includes(block.blockId) ? consumedOwners : survivingOwners;
+    for (const id of block.effectiveMessageIds) map.set(id, block.blockId);
+  }
+  const detail = [...unresolved].slice(0, 6).map((id) => {
+    var _a;
+    const ref = refOf(id);
+    const owner = (_a = consumedOwners.get(id)) != null ? _a : survivingOwners.get(id);
+    return owner ? `${ref} (covered by ${owner})` : `${ref} (visible)`;
+  }).join(", ");
+  const survivingOffenders = [
+    ...new Set(
+      [...unresolved].map((id) => survivingOwners.get(id)).filter((bid) => bid !== void 0)
+    )
+  ];
+  const visibleRefs = [...unresolved].filter((id) => !consumedOwners.has(id) && !survivingOwners.has(id)).map(refOf).sort((a, b) => refNum5919(a) - refNum5919(b) || a.localeCompare(b)).slice(0, 6);
+  const unblockHint = visibleRefs.length > 0 ? ` The exact unblock: one plain message-range compress over ${visibleRefs[0]}..${visibleRefs[visibleRefs.length - 1]} (it may cover extra messages \u2014 that is fine), then retry this merge \u2014 the conflict clears once those partner(s) are covered.` : ` The exact unblock: fold the stranded partner(s) listed above into coverage with a plain message-range compress, then retry this merge.`;
+  const tail = survivingOffenders.length > 0 ? ` Block(s) ${survivingOffenders.join(", ")} stay active with their current coverage; this merge will not touch them.` : ` Merge a sub-span that stops before or resumes after the offending block instead.`;
+  return `Merging ${consumedBlockIds.join(", ")} cannot satisfy turn integrity without dropping existing coverage: folding would strand ${detail}. Do not retry the same span \u2014 fold the stranded visible partner(s) first with a plain message-range compress so the turn closes.${unblockHint}${tail}`;
+  function refNum5919(ref) {
+    const m = /^m(\d+)$/.exec(ref);
+    return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+  }
 }
 function parseBlockIdArg(arg) {
   const normalized = arg.trim().toLowerCase();
@@ -6724,7 +7000,9 @@ function buildCompressibleRanges(messages, state, config, protectedZoneRefs, cou
   }
   const unfoldedIds = computeIntegrityWithdrawals(
     integritySource != null ? integritySource : messages,
-    new Set(compressibleMsgs.map((info) => info.id))
+    new Set(compressibleMsgs.map((info) => info.id)),
+    void 0,
+    covered
   ).withdrawn;
   if (unfoldedIds.size > 0) {
     let gapPending = false;
@@ -6931,6 +7209,7 @@ function runPipeline(nodes, initial, ctx) {
   return io;
 }
 var MAX_TRUNCATE_LATCH = 64;
+var STALL_HARVEST_RATIO = 0.5;
 function rangeError(spec, message) {
   return `range ${spec.startRef}..${spec.endRef}: ${message}`;
 }
@@ -7004,19 +7283,23 @@ function tierActionHint(config, state) {
   return "";
 }
 function applyRefolds(input) {
-  validateSummaryLength(input.spec, input.config.compress);
+  validateSummaryLength(input.spec, input.config.compress, {
+    skipMin: input.minFloorCovered === true
+  });
   const targets = new Set(input.blockIds);
-  input.state.blocks = input.state.blocks.map(
-    (block) => {
-      var _a;
-      return targets.has(block.blockId) ? __spreadProps(__spreadValues({}, block), {
-        summary: input.spec.summary,
-        topic: (_a = input.spec.topic) != null ? _a : block.topic,
-        runId: input.runId,
-        restoredInline: false
-      }) : block;
-    }
-  );
+  input.state.blocks = input.state.blocks.map((block) => {
+    var _a;
+    if (!targets.has(block.blockId)) return block;
+    const carriedRefs = parseMediaRefsSection(block.summary).map(
+      scrubLoneSurrogates
+    );
+    return __spreadProps(__spreadValues({}, block), {
+      summary: appendMediaRefsSection(input.spec.summary, carriedRefs),
+      topic: (_a = input.spec.topic) != null ? _a : block.topic,
+      runId: input.runId,
+      restoredInline: false
+    });
+  });
 }
 function createCore(ports = {}) {
   var _a;
@@ -7249,8 +7532,9 @@ function createCore(ports = {}) {
         };
       }
     }
+    let batchFloorByTotal = false;
     {
-      const lengthFailures = [];
+      const foldCandidates = [];
       for (const spec of input.ranges) {
         if (skipSpecs.has(spec)) continue;
         const resolution = classifications.get(spec);
@@ -7258,17 +7542,51 @@ function createCore(ports = {}) {
         const foldsFresh = resolution.status === "ok";
         const foldsRefold = resolution.status === "consumed" && ((_e = refoldDecisions.get(spec)) == null ? void 0 : _e.kind) === "refold";
         if (!foldsFresh && !foldsRefold) continue;
+        foldCandidates.push(spec);
+      }
+      const lengthFailures = [];
+      const minLen = input.config.compress.minSummaryLength;
+      if (foldCandidates.length === 1) {
+        const solo = foldCandidates[0];
         try {
-          validateSummaryLength(spec, input.config.compress);
+          validateSummaryLength(solo, input.config.compress);
         } catch (error) {
           lengthFailures.push(
             rangeError(
-              spec,
+              solo,
               error instanceof Error ? error.message : String(error)
             )
           );
         }
+      } else {
+        for (const spec of foldCandidates) {
+          try {
+            validateSummaryLength(spec, input.config.compress, { skipMin: true });
+          } catch (error) {
+            lengthFailures.push(
+              rangeError(
+                spec,
+                error instanceof Error ? error.message : String(error)
+              )
+            );
+          }
+        }
+        if (minLen > 0 && foldCandidates.length > 1) {
+          const total = foldCandidates.reduce(
+            (sum, spec) => {
+              var _a3, _b2;
+              return sum + ((_b2 = (_a3 = spec.summary) == null ? void 0 : _a3.trim()) != null ? _b2 : "").length;
+            },
+            0
+          );
+          if (total < minLen) {
+            lengthFailures.push(
+              `Batch summary too short (${total} chars across ${foldCandidates.length} ranges, min ${minLen}). The combined summaries must capture the compressed content's key information.`
+            );
+          }
+        }
       }
+      batchFloorByTotal = foldCandidates.length > 1;
       if (lengthFailures.length > 0) {
         return {
           state,
@@ -7301,7 +7619,8 @@ function createCore(ports = {}) {
               state,
               runId: runIdOf(),
               config: input.config,
-              blockIds: decision.blocks.map((block) => block.blockId)
+              blockIds: decision.blocks.map((block) => block.blockId),
+              minFloorCovered: batchFloorByTotal
             });
             blocksCreated += decision.blocks.length;
           } catch (error) {
@@ -7337,7 +7656,8 @@ function createCore(ports = {}) {
           config: input.config,
           protectedMessageIds,
           countTokens,
-          preExistingCoverage
+          preExistingCoverage,
+          minFloorCovered: batchFloorByTotal
         });
         blocksCreated += outcome.noop ? 0 : outcome.refolded ? outcome.refolded.length : 1;
         tokensCompressed += outcome.tokens;
@@ -7386,6 +7706,18 @@ function createCore(ports = {}) {
       state.nudge.lastShownByTier = {};
       state.nudge.absorbedDebt = 0;
       state.nudge.absorbCount = 0;
+      const distilled = state.blocks.filter((b) => !preFoldBlockIds.has(b.blockId)).some((b) => {
+        var _a3;
+        return ((_a3 = b.tier) != null ? _a3 : 1) > 1;
+      });
+      const firePending = state.nudge.lastT1FirePending;
+      if (distilled) {
+        state.nudge.t1HarvestStall = false;
+        state.nudge.lastT1FirePending = void 0;
+      } else if (firePending !== void 0 && firePending > 0) {
+        state.nudge.t1HarvestStall = tokensCompressed < STALL_HARVEST_RATIO * firePending;
+        state.nudge.lastT1FirePending = void 0;
+      }
       state.terminalStreak = 0;
       state.emergencyTruncateLatch = void 0;
       state.renderDeferredRefs = void 0;
@@ -7413,6 +7745,7 @@ function createCore(ports = {}) {
     const ctx = {
       config: input.config,
       tokenCount: input.tokenCount,
+      tokenCountSource: input.tokenCountSource,
       countTokens,
       contentStore
     };
@@ -7503,11 +7836,6 @@ function createCore(ports = {}) {
       absorbPromptNode,
       filterNode,
       hideCompressCallsNode,
-      // EXPERIMENTAL, default off (Config.compressAtFoldPoint): move still-visible
-      // carrier pairs onto their fold point. Must run AFTER hide-compress-calls
-      // (whose orphan sweep just settled which carriers survive) and BEFORE
-      // view-latch so the latch records the relocated bytes.
-      relocateCompressCarriersNode,
       viewLatchNode,
       recommendNode,
       nudgeNode,
@@ -7543,23 +7871,31 @@ function createStampTimestampsNode(enabled) {
       const stamps = __spreadValues({}, (_a = io.state.tsStamps) != null ? _a : {});
       const knownIds = io.state.messageRefs.byRaw;
       let changed = false;
+      const hwmFresh = io.state.timestampsHighWaterRefSeq === void 0;
+      const hwm = hwmFresh ? highestUsedIndex(io.state.messageRefs) : io.state.timestampsHighWaterRefSeq;
+      const suppressed = io.state.suppressMintingOnce === true;
       const messages = io.messages.map((m) => {
         if (!m.id || m.id.startsWith(RETRIEVED_ID_PREFIX)) return m;
         const stamped = stamps[m.id];
         if (stamped !== void 0) {
           if (m.ts === stamped) return m;
+          const cur = knownIds[m.id];
+          const seq = cur === void 0 ? null : refToIndex(cur);
+          if (seq === null || seq <= hwm) return m;
           changed = true;
           return __spreadProps(__spreadValues({}, m), { ts: stamped });
         }
         const carried = typeof m.ts === "number" ? m.ts : void 0;
-        const ts = carried != null ? carried : knownIds[m.id] === void 0 ? Date.now() : void 0;
+        const ts = carried != null ? carried : !suppressed && knownIds[m.id] === void 0 ? Date.now() : void 0;
         if (ts === void 0) return m;
         stamps[m.id] = ts;
         changed = true;
         return __spreadProps(__spreadValues({}, m), { ts });
       });
-      if (!changed) return io;
-      return __spreadProps(__spreadValues({}, io), { messages, state: __spreadProps(__spreadValues({}, io.state), { tsStamps: stamps }) });
+      if (!changed && !hwmFresh && !suppressed) return io;
+      const nextState = __spreadProps(__spreadValues({}, io.state), { tsStamps: stamps, timestampsHighWaterRefSeq: hwm });
+      if (suppressed) delete nextState.suppressMintingOnce;
+      return __spreadProps(__spreadValues({}, io), { messages, state: nextState });
     }
   };
 }
@@ -7711,20 +8047,6 @@ var hideCompressCallsNode = {
     });
   }
 };
-var relocateCompressCarriersNode = {
-  name: "relocate-compress-carriers",
-  run(io, ctx) {
-    const cfg = ctx.config;
-    if (!cfg.compressAtFoldPoint) return io;
-    return __spreadProps(__spreadValues({}, io), {
-      messages: relocateCompressCarriers(io.messages, io.state, {
-        isCompressTool: cfg.isCompressTool,
-        clearThinking: cfg.compressAtFoldPointClearThinking === true,
-        reasoningDroppable: cfg.reasoningDroppable
-      })
-    });
-  }
-};
 var recommendNode = {
   name: "recommend",
   run(io, ctx) {
@@ -7769,6 +8091,7 @@ var nudgeNode = {
     var _a;
     const nudge = decideNudge({
       tokenCount: ctx.tokenCount,
+      tokenCountSource: ctx.tokenCountSource,
       config: ctx.config,
       state: io.state,
       messages: io.messages,
@@ -7805,6 +8128,9 @@ var nudgeNode = {
         stamped.lastShownByTier = __spreadProps(__spreadValues({}, stamped.lastShownByTier), {
           [nudge.tier]: ctx.tokenCount
         });
+      }
+      if (nudge.tier === 1 && nudge.breakdown) {
+        stamped.lastT1FirePending = nudge.breakdown.pendingT1;
       }
     }
     return __spreadProps(__spreadValues({}, io), {
@@ -7954,7 +8280,8 @@ function applySingleRange(input) {
         state: input.state,
         runId: input.runId,
         config: input.config,
-        blockIds: decision.blocks.map((block2) => block2.blockId)
+        blockIds: decision.blocks.map((block2) => block2.blockId),
+        minFloorCovered: input.minFloorCovered
       });
       return {
         tokens: 0,
@@ -7980,6 +8307,7 @@ function applySingleRange(input) {
     return {
       tokens: 0,
       warnings: [
+        ...warnings,
         `Range ${input.spec.startRef}..${input.spec.endRef} folded nothing \u2014 all of its content is protected or filtered (protected tool calls/results, media, or the recent-message zone), which always stays visible. Nothing failed; do not resend this range. Session highest allocated ref is ${highest > 0 ? indexToRef(highest) : "none"}.`
       ],
       noop: true
@@ -7996,6 +8324,10 @@ function applySingleRange(input) {
       compressedTokens += input.countTokens(consumed.summary);
     }
   }
+  const foldMediaRefs = collectFoldMediaRefs(
+    filteredIds.map((id) => input.messages.find((entry) => entry.id === id)),
+    consumedBlockIds.map((id) => blockById(input.state, id))
+  ).map(scrubLoneSurrogates);
   const blockId = allocateBlockId(input.state);
   const interval = resolveCoverageInterval(
     filteredIds.map((id) => input.messages.find((entry) => entry.id === id)),
@@ -8006,7 +8338,7 @@ function applySingleRange(input) {
     runId: input.runId,
     tier: outputTier,
     topic: input.spec.topic,
-    summary: input.spec.summary,
+    summary: appendMediaRefsSection(input.spec.summary, foldMediaRefs),
     directMessageIds: filteredIds,
     effectiveMessageIds: [...effectiveMessageIds],
     directBlockIds: [...consumedBlockIds],
@@ -8054,9 +8386,11 @@ function resolveCoverageInterval(directMessages, consumedBlocks) {
 }
 function validateCompressionRange(input) {
   const cfg = input.config.compress;
-  validateSummaryLength(input.spec, cfg);
+  validateSummaryLength(input.spec, cfg, {
+    skipMin: input.minFloorCovered === true
+  });
 }
-function validateSummaryLength(spec, cfg) {
+function validateSummaryLength(spec, cfg, opts = {}) {
   var _a, _b, _c;
   const summary = (_b = (_a = spec.summary) == null ? void 0 : _a.trim()) != null ? _b : "";
   if (summary.length === 0) {
@@ -8064,7 +8398,7 @@ function validateSummaryLength(spec, cfg) {
       "Summary is empty \u2014 provide a meaningful summary of the compressed range."
     );
   }
-  if (cfg.minSummaryLength > 0 && summary.length < cfg.minSummaryLength) {
+  if (!opts.skipMin && cfg.minSummaryLength > 0 && summary.length < cfg.minSummaryLength) {
     throw new Error(
       `Summary too short (${summary.length} chars, min ${cfg.minSummaryLength}). The summary must capture the compressed range's key information.`
     );
@@ -8116,7 +8450,7 @@ function pendingByTier(state, recommendation, countTokens, minCompressRange) {
   return out;
 }
 function decideNudge(input) {
-  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A;
+  var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k, _l, _m, _n, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _A, _B, _C, _D, _E, _F, _G;
   const { config, state, tokenCount, recommendation, countTokens } = input;
   const limit = config.modelContextLimit;
   const usage = limit > 0 ? tokenCount / limit : 0;
@@ -8125,6 +8459,13 @@ function decideNudge(input) {
   const overLimit = usage >= config.nudge.maxContextLimitPct;
   const emergencyOverride = usage >= config.nudge.emergencyThresholdPct;
   const pressure = overLimit || emergencyOverride;
+  const estimateHoldStreak = input.tokenCountSource === "estimate" ? ((_a = state.nudge.estimateHoldStreak) != null ? _a : 0) + 1 : 0;
+  state.nudge.estimateHoldStreak = estimateHoldStreak > 0 ? estimateHoldStreak : void 0;
+  const maxEstimateHoldRounds = Math.max(
+    0,
+    Math.floor((_b = config.nudge.maxEstimateHoldRounds) != null ? _b : 2)
+  );
+  const pressureDeferredNoSample = pressure && input.tokenCountSource === "estimate" && config.nudge.requireUsageSampleForPressure !== false && estimateHoldStreak <= maxEstimateHoldRounds;
   const baseline = state.nudge.lastPerMessageNudgeTokens;
   const hadPendingNudge = state.nudge.lastNudgeShownTokens > 0;
   const hasPendingNudge = hadPendingNudge;
@@ -8143,66 +8484,90 @@ function decideNudge(input) {
     config.compress.minCompressRange
   );
   const tier2Threshold = Math.round(
-    nudgeGrowthTokens * ((_a = config.nudge.tier2GrowthMultiplier) != null ? _a : 1.5)
+    nudgeGrowthTokens * ((_c = config.nudge.tier2GrowthMultiplier) != null ? _c : 1.5)
   );
   const tierThresholds = {
-    1: (_c = (_b = config.nudge.tierGrowthTokens) == null ? void 0 : _b.t1) != null ? _c : nudgeGrowthTokens,
-    2: (_e = (_d = config.nudge.tierGrowthTokens) == null ? void 0 : _d.t2) != null ? _e : tier2Threshold,
-    3: (_g = (_f = config.nudge.tierGrowthTokens) == null ? void 0 : _f.t3) != null ? _g : tier2Threshold
+    1: (_e = (_d = config.nudge.tierGrowthTokens) == null ? void 0 : _d.t1) != null ? _e : nudgeGrowthTokens,
+    2: (_g = (_f = config.nudge.tierGrowthTokens) == null ? void 0 : _f.t2) != null ? _g : tier2Threshold,
+    3: (_i = (_h = config.nudge.tierGrowthTokens) == null ? void 0 : _h.t3) != null ? _i : tier2Threshold
   };
   let injectedTier = null;
   let injectedReason = "";
   let bestPending = 0;
-  const t1Eff = (_i = (_h = tiers[1]) == null ? void 0 : _h.pending) != null ? _i : 0;
-  const t2Pen = (_k = (_j = tiers[2]) == null ? void 0 : _j.pending) != null ? _k : 0;
-  const t3Pen = (_m = (_l = tiers[3]) == null ? void 0 : _l.pending) != null ? _m : 0;
+  const t1Eff = (_k = (_j = tiers[1]) == null ? void 0 : _j.pending) != null ? _k : 0;
+  const t2Pen = (_m = (_l = tiers[2]) == null ? void 0 : _l.pending) != null ? _m : 0;
+  const t3Pen = (_o = (_n = tiers[3]) == null ? void 0 : _n.pending) != null ? _o : 0;
   const maxPending = Math.max(0, t1Eff, t2Pen, t3Pen);
+  const t1HarvestStall = config.tiers.enabled && state.nudge.t1HarvestStall === true;
+  let stallEscalated = false;
   const firstSightMassReady = state.nudge.lastNudgeShownTokens === 0 && baseline === 0 && usage >= config.nudge.minContextLimitPct && Math.max(t1Eff, t2Pen, t3Pen) >= nudgeGrowthTokens;
-  const absorbedDebt = (_n = state.nudge.absorbedDebt) != null ? _n : 0;
-  const absorbCount = (_o = state.nudge.absorbCount) != null ? _o : 0;
+  const absorbedDebt = (_p = state.nudge.absorbedDebt) != null ? _p : 0;
+  const absorbCount = (_q = state.nudge.absorbCount) != null ? _q : 0;
   const repeatAbsorbs = absorbCount >= 2;
   const payableDebt = repeatAbsorbs ? absorbedDebt : 0;
   const backlogDrainReady = repeatAbsorbs && absorbedDebt > 0 && state.nudge.lastNudgeShownTokens === 0 && Math.max(t1Eff, t2Pen, t3Pen) >= 2 * tierThresholds[1] && usage >= config.nudge.minContextLimitPct;
   const growthReady = firstSightMassReady || backlogDrainReady || growthSinceReference + payableDebt >= growthFloor;
-  const t2Count = (_q = (_p = tiers[2]) == null ? void 0 : _p.targetBlocks.length) != null ? _q : 0;
-  const t3Count = (_s = (_r = tiers[3]) == null ? void 0 : _r.targetBlocks.length) != null ? _s : 0;
+  const t2Count = (_s = (_r = tiers[2]) == null ? void 0 : _r.targetBlocks.length) != null ? _s : 0;
+  const t3Count = (_u = (_t = tiers[3]) == null ? void 0 : _t.targetBlocks.length) != null ? _u : 0;
   const t2CountReady = t2Count >= config.tiers.tier2Trigger;
   const t3CountReady = t3Count >= config.tiers.tier3Trigger;
   if (pressure) {
-    const candidates = [1];
+    const candidates = [];
+    if (!(t1HarvestStall && Math.max(t2Pen, t3Pen) >= minPressureBenefit)) {
+      candidates.push(1);
+    }
     if (config.tiers.enabled) {
       candidates.push(2, 3);
     }
     let best = null;
     for (const t of candidates) {
-      const p = (_u = (_t = tiers[t]) == null ? void 0 : _t.pending) != null ? _u : 0;
+      const p = (_w = (_v = tiers[t]) == null ? void 0 : _v.pending) != null ? _w : 0;
       if (p > bestPending) {
         bestPending = p;
         best = t;
       }
     }
-    if (best !== null && bestPending >= minPressureBenefit) {
+    if (best !== null && bestPending >= minPressureBenefit && !pressureDeferredNoSample) {
       injectedTier = best;
+      stallEscalated = t1HarvestStall && best !== 1;
       const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
       injectedReason = best === 1 ? `${label} T1: max effective pending ${bestPending}, usage ${Math.round(usage * 100)}%` : `${label} T${best} distill: max pending ${bestPending} (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}), usage ${Math.round(usage * 100)}%`;
     }
   } else if (growthReady) {
-    if (t1Eff >= tierThresholds[1]) {
-      injectedTier = 1;
-      injectedReason = `T1 effective ${t1Eff} >= ${tierThresholds[1]}, growth ${growthSinceReference}, usage ${Math.round(usage * 100)}%`;
-    } else if (config.tiers.enabled && (t2CountReady || t2Pen >= tierThresholds[2] && t2Pen > t1Eff)) {
-      const lastShown = (_v = state.nudge.lastShownByTier[2]) != null ? _v : 0;
-      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
-      if (cadenceMet) {
-        injectedTier = 2;
-        injectedReason = t2CountReady ? `T2 distill ready: ${t2Count} tier-1 blocks >= tier2Trigger ${config.tiers.tier2Trigger} (${t2Pen} tokens), usage ${Math.round(usage * 100)}%` : `T2 distill ready: ${tiers[2].targetBlocks.length} tier-1 blocks (${t2Pen} tokens) >= ${tierThresholds[2]}${((_w = config.nudge.tierGrowthTokens) == null ? void 0 : _w.t2) === void 0 ? " (1.5x)" : ""} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
-      }
-    } else if (config.tiers.enabled && (t3CountReady || t3Pen >= tierThresholds[3] && t3Pen > t2Pen && t3Pen > t1Eff)) {
+    if (t1HarvestStall && t3Pen >= tierThresholds[3] && t3Pen > t2Pen) {
       const lastShown = (_x = state.nudge.lastShownByTier[3]) != null ? _x : 0;
       const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
       if (cadenceMet) {
         injectedTier = 3;
-        injectedReason = t3CountReady ? `T3 condense ready: ${t3Count} tier-2 blocks >= tier3Trigger ${config.tiers.tier3Trigger} (${t3Pen} tokens), usage ${Math.round(usage * 100)}%` : `T3 condense ready: ${tiers[3].targetBlocks.length} tier-2 blocks (${t3Pen} tokens) >= ${tierThresholds[3]}${((_y = config.nudge.tierGrowthTokens) == null ? void 0 : _y.t3) === void 0 ? " (1.5x)" : ""} and > T2 ${t2Pen} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
+        stallEscalated = true;
+        injectedReason = `T3 condense ready: ${tiers[3].targetBlocks.length} tier-2 blocks (${t3Pen} tokens) >= ${tierThresholds[3]}${((_y = config.nudge.tierGrowthTokens) == null ? void 0 : _y.t3) === void 0 ? " (1.5x)" : ""} and > T2 ${t2Pen}, usage ${Math.round(usage * 100)}%`;
+      }
+    }
+    if (injectedTier === null && t1HarvestStall && t2Pen >= tierThresholds[2]) {
+      const lastShown = (_z = state.nudge.lastShownByTier[2]) != null ? _z : 0;
+      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
+      if (cadenceMet) {
+        injectedTier = 2;
+        stallEscalated = true;
+        injectedReason = `T2 distill ready: ${tiers[2].targetBlocks.length} tier-1 blocks (${t2Pen} tokens) >= ${tierThresholds[2]}${((_A = config.nudge.tierGrowthTokens) == null ? void 0 : _A.t2) === void 0 ? " (1.5x)" : ""}, usage ${Math.round(usage * 100)}%`;
+      }
+    }
+    if (injectedTier === null && t1Eff >= tierThresholds[1]) {
+      injectedTier = 1;
+      injectedReason = `T1 effective ${t1Eff} >= ${tierThresholds[1]}, growth ${growthSinceReference}, usage ${Math.round(usage * 100)}%`;
+    } else if (injectedTier === null && config.tiers.enabled && (t2CountReady || t2Pen >= tierThresholds[2] && t2Pen > t1Eff)) {
+      const lastShown = (_B = state.nudge.lastShownByTier[2]) != null ? _B : 0;
+      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
+      if (cadenceMet) {
+        injectedTier = 2;
+        injectedReason = t2CountReady ? `T2 distill ready: ${t2Count} tier-1 blocks >= tier2Trigger ${config.tiers.tier2Trigger} (${t2Pen} tokens), usage ${Math.round(usage * 100)}%` : `T2 distill ready: ${tiers[2].targetBlocks.length} tier-1 blocks (${t2Pen} tokens) >= ${tierThresholds[2]}${((_C = config.nudge.tierGrowthTokens) == null ? void 0 : _C.t2) === void 0 ? " (1.5x)" : ""} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
+      }
+    } else if (injectedTier === null && config.tiers.enabled && (t3CountReady || t3Pen >= tierThresholds[3] && t3Pen > t2Pen && t3Pen > t1Eff)) {
+      const lastShown = (_D = state.nudge.lastShownByTier[3]) != null ? _D : 0;
+      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
+      if (cadenceMet) {
+        injectedTier = 3;
+        injectedReason = t3CountReady ? `T3 condense ready: ${t3Count} tier-2 blocks >= tier3Trigger ${config.tiers.tier3Trigger} (${t3Pen} tokens), usage ${Math.round(usage * 100)}%` : `T3 condense ready: ${tiers[3].targetBlocks.length} tier-2 blocks (${t3Pen} tokens) >= ${tierThresholds[3]}${((_E = config.nudge.tierGrowthTokens) == null ? void 0 : _E.t3) === void 0 ? " (1.5x)" : ""} and > T2 ${t2Pen} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
       }
     }
   }
@@ -8210,9 +8575,15 @@ function decideNudge(input) {
   if (shouldInject && firstSightMassReady) {
     injectedReason += " [first-sight mass]";
   }
+  if (shouldInject && stallEscalated) {
+    injectedReason += " [T1 harvest stall]";
+  }
   let reason;
   if (injectedTier !== null) {
     reason = injectedReason;
+  } else if (pressure && pressureDeferredNoSample) {
+    const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
+    reason = `${label}: usage ${Math.round(usage * 100)}% but the meter reading is estimate-grade (no billing sample landed this cycle, max pending ${maxPending}) \u2014 pressure injection held (estimate round ${estimateHoldStreak} of ${maxEstimateHoldRounds}) until a usage-grade reading decides or the estimate-hold backstop elapses; hard-overflow backstop unaffected`;
   } else if (pressure) {
     const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
     reason = bestPending === 0 ? `${label}: usage ${Math.round(usage * 100)}% but no tier has effective compressible content (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 nudge suppressed to avoid offering ranges below minCompressRange` : `${label}: usage ${Math.round(usage * 100)}% but max pending ${bestPending} < min benefit ${minPressureBenefit} tokens (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 suppressed: rewriting below the benefit floor reclaims almost nothing while usage stays high; truncate.threshold remains the safety valve`;
@@ -8268,8 +8639,8 @@ function decideNudge(input) {
   return {
     shouldInject,
     reason,
-    compressibleRanges: (_z = rec == null ? void 0 : rec.recommendedRanges) != null ? _z : [],
-    protectedRanges: (_A = rec == null ? void 0 : rec.contextRanges.protected) != null ? _A : [],
+    compressibleRanges: (_F = rec == null ? void 0 : rec.recommendedRanges) != null ? _F : [],
+    protectedRanges: (_G = rec == null ? void 0 : rec.contextRanges.protected) != null ? _G : [],
     activeBlockSpans: activeBlockSpans(state),
     tierTargetBlocks: injectedTier ? tiers[injectedTier].targetBlocks : [],
     contextUsage: usage,
@@ -8284,6 +8655,8 @@ function decideNudge(input) {
       hasPendingNudge: hasPendingNudge ? 1 : 0,
       overLimit: overLimit ? 1 : 0,
       emergencyOverride: emergencyOverride ? 1 : 0,
+      pressureDeferredNoSample: pressureDeferredNoSample ? 1 : 0,
+      estimateHoldStreak,
       minPressureBenefit,
       pendingT1: tiers[1].pending,
       pendingT2: tiers[2].pending,
@@ -8315,7 +8688,7 @@ function computeContextBreakdown(messages, total, growth, countTokens) {
 }
 function cloneState(state) {
   var _a, _b, _c;
-  return {
+  return __spreadValues(__spreadValues({
     blocks: state.blocks.map((block) => __spreadProps(__spreadValues({}, block), {
       directMessageIds: [...block.directMessageIds],
       effectiveMessageIds: [...block.effectiveMessageIds],
@@ -8347,7 +8720,7 @@ function cloneState(state) {
     // too — same contract as the sync clone (kernel/src/sync.ts); dropping it
     // re-arms the restamp on every applyCompression.
     refLedgerAligned: state.refLedgerAligned
-  };
+  }, state.timestampsHighWaterRefSeq !== void 0 ? { timestampsHighWaterRefSeq: state.timestampsHighWaterRefSeq } : {}), state.suppressMintingOnce !== void 0 ? { suppressMintingOnce: state.suppressMintingOnce } : {});
 }
 function scoreRelevance(block, terms) {
   var _a;
@@ -8867,7 +9240,7 @@ function renderOverview(visible, summaryTokens, blocks, state, countTokens, limi
   }
   lines.push("");
   lines.push(
-    `Tip: buildStatusReport({scope:"uncompressed", view:"messages", tool:"${topTool != null ? topTool : "bash"}"}) for per-message listing`
+    `Tip: call again with scope:"uncompressed", view:"messages"${topTool ? `, tool:"${topTool}"` : ""} for a per-message listing`
   );
   return lines.join("\n");
 }
@@ -9824,6 +10197,12 @@ function parseObjectValue(value, callId, diag) {
           diag.kind = "ok";
           return finish([flat], diag);
         }
+        const single = stringifiedEntryFromContent(content, callId);
+        if (single !== void 0) {
+          diag.contentSalvage = true;
+          diag.kind = "ok";
+          return finish([single], diag);
+        }
       }
       diag.invalidItems = invalid2;
       if (reasons2.length > 0) diag.invalidReasons = reasons2;
@@ -9863,6 +10242,13 @@ function isHeaderlessLineEntry(e) {
   const nl = e.indexOf("\n");
   const head = (nl === -1 ? e : e.slice(0, nl)).trim();
   return !REF_PAIR_IN_LINE.test(head) && !SINGLE_REF_IN_LINE.test(head);
+}
+function stringifiedEntryFromContent(content, callId) {
+  const parsed = tryParseLenient(stripFence(content.trim()));
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return void 0;
+  const outcome = validateEntry(parsed, callId);
+  return "range" in outcome ? outcome.range : void 0;
 }
 function flatSingleRangeFromContent(value, content, callId) {
   var _a, _b, _c, _d;
@@ -9963,7 +10349,7 @@ function validateEntries(entries, callId) {
   }
   return { ranges, invalid, reasons };
 }
-var REF_PAIR_IN_LINE = /^([mb]\d{1,7})\s*(?:[-\u2013\u2014\u2026~\u2212\uFF0D]|\.\.\.|to)\s*([mb]\d{1,7})\b/i;
+var REF_PAIR_IN_LINE = /^([mb]\d{1,7})\s*(?:[-\u2013\u2014\u2026~\u2212\uFF0D]|\.{2,3}|to)\s*([mb]\d{1,7})\b/i;
 var SINGLE_REF_IN_LINE = /^([mb]\d{1,7})\b/i;
 var UNRECOGNIZED_REF_SEP_RE = /^\s*[^\p{L}\p{N}\s]{1,3}\s*[mb]\d{1,7}\b/iu;
 function normalizeLineRef(raw) {
@@ -10016,7 +10402,7 @@ function deriveTopicFromSummary(summary) {
   if (text.length === 0) return void 0;
   return text.length > 60 ? clampPrefix(text, 60).trimEnd() : text;
 }
-var LINE_ENTRY_REFS_RE = /[mb]\d{1,7}\s*(?:[-\u2013\u2014\u2026~\u2212\uFF0D]|\.\.\.|to)\s*[mb]\d{1,7}\b/iy;
+var LINE_ENTRY_REFS_RE = /[mb]\d{1,7}\s*(?:[-\u2013\u2014\u2026~\u2212\uFF0D]|\.{2,3}|to)\s*[mb]\d{1,7}\b/iy;
 var WHITESPACE_RE = /\s/;
 function skipWhitespace(s, i) {
   while (i < s.length && WHITESPACE_RE.test(s[i])) i++;
