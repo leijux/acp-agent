@@ -1,6 +1,6 @@
 # internal/kernel
 
-[`billion-context/kernel`](https://github.com/ranxianglei/billion-context/tree/master/kernel)（`acp-kernel`）的 Go 封装：**无 Node 进程**，纯 goja 解释执行，内置上游 CJS 产物（`go:embed kernel.dist.cjs`，约 400 KB）。
+[`billion-context/kernel`](https://github.com/ranxianglei/billion-context/tree/master/kernel)（`acp-kernel`）的 Go 封装：**无 Node 进程**，纯 Go 引擎（[moejs](https://github.com/MoeForge/moejs)）解释执行，内置上游 CJS 产物（`go:embed kernel.dist.cjs`，约 400 KB）。
 
 上游是什么：一个 agent 的上下文管理器——给消息打 `<acp>` 引用标签、预算裁剪、压缩分块（tier 1/2/3）、BM25 检索、持久化状态。
 
@@ -136,17 +136,31 @@ agent 自己只保留了廉价的阈值预判（`shouldCompact`），不再算�
 
 ## 性能与并发
 
-全部数据来自 `bench_test.go`（`go test ./internal/kernel/ -run XXX -bench . -benchtime 10x`，
-Windows / 8 核 / goja v0.0.0-20261024）。fixture 是混合对话：约 1/5 是 40 行的 grep 结果，
-其余是中英混合说明文本。
+> **2026-11 换了引擎：goja → moejs。** 本节下面的表格是 **goja 时代**的历史数据，
+> 保留下来做对比。同一台 Windows 机器、同一份 bundle、`-benchtime 3x` 重新测得：
+>
+> | 项 | goja | moejs |
+> |---|---|---|
+> | `Turn` 40 条 | — | 3.6ms |
+> | `Turn` 200 条 | 68ms | **16–20ms** |
+> | `TurnSteady` 800 条 | 727ms | **64ms** |
+> | 首次 `NewSession`（含编译 bundle） | ~35ms | **~100ms** |
+> | 之后每次 `NewSession` | 4.7ms | **0.7–3ms** |
+>
+> 代价是首次编译慢了一倍多（moejs 的编译器更重、生成的字节码更快），
+> 收益是每次 turn 快 4–10 倍。CLI 只在启动时付一次编译。
+>
+> 全部数据来自 `bench_test.go`（`go test ./internal/kernel/ -run XXX -bench . -benchtime 10x`，
+> Windows / 8 核 / goja v0.0.0-20261024）。fixture 是混合对话：约 1/5 是 40 行的 grep 结果，
+> 其余是中英混合说明文本。
 
 ### 三次优化
 
 | 优化 | 做法 | 效果 |
 |---|---|---|
-| token 计数下移到 Go | kernel 默认 `countTokens` 是 JS 正则 `text.match(/[一-鿿...]/g)`，goja 里走 regexp2 回溯引擎（pprof：78% 分配、33% CPU）。用 `CountTokens` 精确复刻同一算法并默认注入 `ports.countTokens` | Turn 200 条：198ms → 68ms；分配 167MB → 19MB |
-| bundle 预编译 | `goja.Compile` 一次，每个新 VM 用 `vm.RunProgram` 复用 `*goja.Program` | `NewSession` 35ms → 4.7ms |
-| refs 直读 | `refsLocked` 不再对整个 `messageRefs` 做 stringify→parse→unmarshal，直接从 goja 对象读 | 每轮省一次全表 JSON 往返 |
+| token 计数下移到 Go | kernel 默认 `countTokens` 是 JS 正则 `text.match(/[一-鿿...]/g)`，goja 时代要进 regexp2 回溯引擎（pprof：78% 分配、33% CPU）。用 `CountTokens` 精确复刻同一算法并默认注入 `ports.countTokens` | Turn 200 条：198ms → 68ms；分配 167MB → 19MB |
+| bundle 预编译 | `CompileScript` 一次，每个新 runtime 用 `RunScript` 复用 `*moejs.Script`（goja 时代是 `goja.Compile` + `vm.RunProgram`） | `NewSession` 35ms → 4.7ms（现 moejs 下稳定态 1–3ms） |
+| refs 直读 | `refsLocked` 不再对整个 `messageRefs` 做 stringify→parse→unmarshal，直接从引擎对象读（`ToGo` 拿 map） | 每轮省一次全表 JSON 往返 |
 
 `TurnMeta` 相对 `Turn` 省的是**输出侧**：200 条时 55ms vs 60ms（差距在噪声附近），
 分配 15.9MB vs 19.0MB（-17%）。它真正的价值不在于毫秒，而在于
@@ -191,12 +205,14 @@ GC 是全局的 —— 8 个 VM 并行跑，GC 成了共同瓶颈。这也意味
 
 ## 三个必须知道的限制
 
-1. **中文分词取决于构建 tag**。上游在**加载期**执行 `new Intl.Segmenter("zh")`（`src/search/tokenizer.ts`），goja 无 Intl。
+1. **中文分词取决于构建 tag**。上游在**加载期**执行 `new Intl.Segmenter("zh")`（`src/search/tokenizer.ts`）。
 
-   带 `segmenter ne` tag 的构建（`task build:full` 与发布矩阵）里**默认就是 gse 真词典**，
-   不需要任何开关；轻量构建（`task build`，无 tag）里只有无依赖的 `RuneSegmenter`：
-   在 CJK 边界切「单字 + 连续 ASCII 词」，连续 CJK run 再在 kernel 内做 bigram 回退
-   —— 检索召回够用，但**词级切分质量低于 Node 的 CLDR**。
+   引擎自带 `Intl.Segmenter`（UAX#29、无词典：汉字逐字成段），默认路径直接用。
+   带 `segmenter ne` tag 的构建（`task build:full` 与发布矩阵）里**默认是 gse 真词典**，
+   不需要任何开关（注入方式：`WithSegmenter` 打开 `MutableIntrinsics`，再用一段 JS
+   把 `Intl.Segmenter` 换成走 Go 的 class）；轻量构建（`task build`，无 tag）不注入，
+   保留引擎的默认行为 —— 在 CJK 边界切「单字 + 连续 ASCII 词」，连续 CJK run 再在
+   kernel 内做 bigram 回退，检索召回够用，**但词级切分质量低于 Node 的 CLDR**。
 
    | 运行时值 | 词表 | 加载 | 备注 |
    |---|---|---|---|
@@ -226,22 +242,27 @@ GC 是全局的 —— 8 个 VM 并行跑，GC 成了共同瓶颈。这也意味
    `Segment.Index` 的契约是 **rune 偏移**（不是 JS 的 UTF-16 码元），kernel 自身只用 `Text`。
    gse 实例可跨会话共享（Segment 只读词典，`go test -race` 16 goroutine × 200 次干净）。
 
-2. **`processTurn` 比 Node 慢，且随消息数超线性增长**。200 条消息约 68ms（优化前 198ms），
-   800 条约 730ms —— 消息翻倍耗时乘 2.6~3.6（详见「性能与并发」）。
-   这不是 Go 封装引入的：kernel 对每条消息做多趟全表扫描，而 goja 是单线程解释执行。
+2. **`processTurn` 仍随消息数超线性增长**。200 条消息约 16ms（换引擎前 68ms，优化前 198ms），
+   800 条约 64ms（换引擎前 727ms）—— 消息翻倍耗时乘 2.6~3.6（详见「性能与并发」）。
+   这不是 Go 封装引入的：kernel 对每条消息做多趟全表扫描，而引擎是单线程解释执行。
    **对策是控制活跃消息数在 200–300 条内并及时 `ApplyCompression`**，
    而不是指望在 Go 侧做增量 —— `processTurn` 的语义要求输入全量历史，跳不过去。
 
-3. **async 只在脚本边界 drain**。内核里 `async` 函数用到的 Promise 在单次调用结束前是 pending 状态。kernel 的同步 API 不受影响；如果你用 `Call` 调了上游的异步导出，需要自己 pump（`goja.RunProgram` 后重新调用）。
+3. **Promise / `queueMicrotask` 在单次调用结束前跑完**。moejs 在 `RunScript`/`CallFunction`
+   返回前 drain 完排队作业，所以 `await` 不会「等到下一次调用」（goja 时代需要宿主自己 pump）。
+   kernel 走同步 API，不依赖这个行为；但它意味着**异步导出也能直接调**。
 
 ## 其他事实
 
 - 时间、随机数、locale **不受支持也不需要**：默认路径里 kernel 不用 `Date`/`Math.random`（否则 hash 不会与 Node 一致）。
   唯一的例外是上游 0.0.171+ 的消息时间戳特性：开了 `Ports.timestamps` 才会在 stamp 节点里
   调 `Date.now()`，我们没开（见下面「上游新增但 Go 侧未接线」）。
-- `structuredClone` / `TextEncoder` / `queueMicrotask` / RegExp `d` flag 在 goja 缺失，kernel 未使用。
+- `structuredClone` / `TextEncoder` / `queueMicrotask` / `Intl.*` 现在引擎都有（goja 时代缺，kernel 当时也没用）。
 - 已支持：`??=`、`Object.hasOwn`、`Array.at`、`findLast`、class fields、`#private`、static block、Proxy get、BigInt、lookbehind。
-- `goja_nodejs/eventloop` **没有**用：kernel 的 fs/path 由 Go 侧 `WithFS` 注入，不需要事件循环。
+- **没有**用 `eventloop` 包：kernel 的 fs/path 由 Go 侧 `WithFS` 注入，不需要事件循环。
+- **没有设 `Options.MemoryLimit`**：kernel 的输入就是全量历史（几 MB 文本 + 分词索引），
+  而它干的正是「上下文太长就压缩」—— 在这里限死堆只会在最需要压的时候把压缩本断。
+  工具侧的 `js` / 内建 `goja` 是另一回事（单次脚本、输入有预算），那边设了 64MB。
 - 产出与 Node **逐字节一致**：同一 workload 的 `messagesHash = 6a8561416f02cde1`、`blockNoTimeHash = 0cbd1741d253e587`。
   这条断言在三次性能优化、以及 0.0.177 → 0.0.193 的 bundle 更新之后依然通过 —— 因为
   `CountTokens` 是与上游 `defaultCountTokens` 逐字节等价的 Go 复刻
@@ -286,7 +307,7 @@ cd /tmp/billion-context/kernel && npm ci && npm run build   # 产 ESM dist/
 cd /path/to/acp-agent
 KERNEL=/tmp/billion-context/kernel ./script/build-cjs.sh    # ESM -> CJS(ES2017)
 go test ./internal/kernel/ -run TestGoldenHashes -v         # 与 Node 的逐字节 hash
-go run ./cmd/verify-kernel                                  # 裸 goja 全链路（不复用 internal/kernel）
+go run ./cmd/verify-kernel                                  # 全链路（走 kernel API，打印 hash）
 go test ./...                                               # agent/tools 侧回归
 ```
 
@@ -308,13 +329,14 @@ esbuild 会留下过期的旧值（`TestBundleDigest` 会立刻红）。手工�
 node -e "const c=require('crypto'),f=require('fs');console.log(c.createHash('sha256').update(f.readFileSync('internal/kernel/kernel.dist.cjs')).digest('hex'))"
 ```
 
-`build-cjs.sh` 做的四件事：`--format=cjs`（goja 无 ESM loader）、`--target=es2017`、
-`--define:import.meta.url`（上游 `src/tokenize.ts` 顶层 `createRequire` 会读它）、
+`build-cjs.sh` 做的四件事：`--format=cjs`（宿主管道是 CommonJS wrapper：`CompileScript` 出一个
+函数、宿主传 `(module, exports, require)` 进去；上游是 ESM，不转就没法在无 loader 的引擎里跑）、
+`--target=es2017`、`--define:import.meta.url`（上游 `src/tokenize.ts` 顶层 `createRequire` 会读它）、
 以及生成 `version_gen.go`（版本 + sha256 + esbuild 版本）。
 
 ## 测试
 
 ```bash
 go test ./internal/kernel -v   # 含与 Node 的 hash 一致性断言
-cd .. && task verify:kernel     # 裸 goja 全链路（不复用 internal/kernel）
+cd .. && task verify:kernel     # 全链路（走 kernel API，打印 hash）
 ```

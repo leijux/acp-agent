@@ -5,7 +5,7 @@
 
 | 文档 | 对应代码 | 内容 |
 |---|---|---|
-| [kernel.md](kernel.md) | `internal/kernel/` | goja 内嵌 billion-context 上下文引擎：API、Store、Intl 短板、重新打包 |
+| [kernel.md](kernel.md) | `internal/kernel/` | moejs 内嵌 billion-context 上下文引擎：API、Store、分词构建 tag、重新打包 |
 | [tools.md](tools.md) | `internal/tools/` | 工具契约与并发调度模型、写栅栏、截断预算、自定义工具 |
 | [agent.md](agent.md) | `internal/agent/` | Pi agent loop 移植：entry 树、turn loop、steering、压缩切点、事件 |
 | [acp.md](acp.md) | `internal/acp/` | ACP v1 agent 侧：方法表、session/update、权限门禁、通知顺序 |
@@ -13,6 +13,8 @@
 | [cli.md](cli.md) | `cmd/acp-agent/` | 终端 agent：flag、配置文件、斜杠命令、权限模式、输出约定 |
 | [skills.md](skills.md) | `internal/skills/`、`internal/tools/skill.go` | Skills（`.agents/skills`）：发现、frontmatter 校验、prompt 注入、`skill` 工具按需加载 |
 | [mentions.md](mentions.md) | `internal/mentions/`、`internal/fsutil/` | `@文件` / `@文件夹`：语法与转义、注入格式、预算上限、接线点、Tab 补全；`--no-mentions` 关闭 |
+| [pkg.md](pkg.md)（设计稿） | `pkg/` | 对外 Go SDK 门面：`pkg/ai` 三行起一个 agent、`pkg/provider`、别名白名单、权限默认 readonly、接线映射与不变量测试 |
+| [upstream-mvdan-sh-exitstatus.md](upstream-mvdan-sh-exitstatus.md) | `internal/tools/shell_builtin.go` | 上游 issue 草稿：mvdan/sh 的退出码截断导致 `Runner.Run` panic（Windows 256 的倍数）与本地兜底 |
 
 `internal/provider/`（OpenAI 兼容客户端与 DeepSeek 适配）暂无独立文档，
 端点与模型矩阵运行 `acp-agent -endpoints` 查看，设计说明见根 README「结构」一节。

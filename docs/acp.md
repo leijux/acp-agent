@@ -156,7 +156,7 @@ CompactionAbortEvent → compaction_update(failed, error)         ——同一�
 - **崩溃隔离**：子代理 panic / 被杀不会带走主进程；
 - **可换实现**：`SubagentSpec.Command` 指向任何 ACP agent 都行。
 
-代价是每次 delegate 起一个进程（kernel 的 goja VM 初始化 ~35ms），相对一次
+代价是每次 delegate 起一个进程（kernel 首次 `NewSession` 要编译 400KB bundle，约 100ms；之后每次 ~1–3ms），相对一次
 LLM 往返可以忽略；实测本地假 provider 下 delegate 往返 **19ms**。
 
 安全约束（缺一不可）：

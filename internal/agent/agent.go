@@ -137,6 +137,10 @@ type Agent struct {
 	abort    context.CancelFunc
 	abortCh  chan struct{}
 
+	// streamRewind 由宿主声明（见 SetStreamRewind）：下游能否撤销
+	// 「已经流式渲染但还没结束」的内容。默认 false。
+	streamRewind atomic.Bool
+
 	// kernel 是压缩引擎会话（惰性创建，见 kernel.go）。
 	kernelMu sync.Mutex
 	kernel   *kernelEngine
@@ -172,6 +176,19 @@ func New(opts Options) (*Agent, error) {
 		a.addContextPrompt()
 	}
 	return a, nil
+}
+
+// SetStreamRewind 声明下游能否撤销「已经流式渲染、但还没结束」的消息内容。
+//
+// 开启后，provider 遇到网络中断（连不上、连接被重置、流半截 EOF）时不只会在
+// 吐出任何增量前重试，还会在重试前让 Agent 清空半截内容并发出
+// MessageRewindEvent；下游据此把屏幕上那段擦掉重画，用户看到的是「重来」
+// 而不是「重复」。
+//
+// 默认关闭：ACP 客户端的 agent_message_chunk 是纯增量的，无法撤回，
+// 重发只会让用户看到两遍半截回复。能重绘的宿主（终端界面）自己打开。
+func (a *Agent) SetStreamRewind(enabled bool) {
+	a.streamRewind.Store(enabled)
 }
 
 // addContextPrompt 在系统 prompt 末尾追加上下文管理约定。
@@ -600,7 +617,7 @@ func runMessagesSince(s *Session, startIdx int) []Message {
 func (a *Agent) stream(ctx context.Context, _ *RunResult, shrinkOutput bool) (*AssistantMessage, error) {
 	partial := &AssistantMessage{Content: nil, StopReason: StopPending, At: now()}
 	started := false
-	sink := &SinkFunc{
+	sinkFn := &SinkFunc{
 		OnText: func(d string) {
 			if !started {
 				started = true
@@ -620,6 +637,16 @@ func (a *Agent) stream(ctx context.Context, _ *RunResult, shrinkOutput bool) (*A
 		OnToolCall: func(c ToolCallBlock) {
 			partial.Content = append(partial.Content, c)
 		},
+	}
+	// 宿主能撤销已渲染的内容时，把 Reset 能力暴露给 provider：
+	// 网络中断后它才能安全地重发已经吐过增量的请求。
+	var sink Sink = sinkFn
+	if a.streamRewind.Load() {
+		sink = &ResetSink{Sink: sinkFn, OnReset: func() {
+			partial.Content = nil
+			started = false
+			a.emit.Emit(MessageRewindEvent{Message: partial})
+		}}
 	}
 
 	req := a.buildRequest()

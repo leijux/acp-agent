@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 	"mvdan.cc/sh/v3/interp"
 )
 
@@ -46,6 +46,7 @@ const gojaUsage = `用法: goja [选项] [脚本文件] [参数...]
   -q, --quiet          不打印最后一个表达式的值
   --                   之后全部当作脚本参数（写入 argv）
 
+（命令名沿用旧引擎；实际执行者是 moejs）
 脚本内可用: console.log/info/warn/error、fs.readFile/readFileBytes/readFileBase64/
 readDir/stat/exists/glob/readStdin（只读，受 Root 约束）、crypto.sha256、argv。
 
@@ -182,49 +183,48 @@ func parseGojaTimeout(s string) (time.Duration, error) {
 
 // runGoja 执行脚本并把结果写到 hc。
 func runGoja(ctx context.Context, hc interp.HandlerContext, policy Policy, srcName, script string, argv []string, timeout time.Duration, quiet, stdinFree bool) error {
-	vm := goja.New()
+	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: jsMemoryLimit})
 
 	sink := &consoleSink{out: hc.Stdout, errOut: hc.Stderr}
-	if err := installConsole(vm, sink); err != nil {
+	if err := installConsole(rt, sink); err != nil {
 		fmt.Fprintf(hc.Stderr, "goja: 初始化 console 失败: %v\n", err)
-		return exitStatus(1)
-	}
-	if err := installFS(vm, policy); err != nil {
-		fmt.Fprintf(hc.Stderr, "goja: 初始化 fs 失败: %v\n", err)
-		return exitStatus(1)
-	}
-	if err := installCrypto(vm); err != nil {
-		fmt.Fprintf(hc.Stderr, "goja: 初始化 crypto 失败: %v\n", err)
 		return exitStatus(1)
 	}
 	// 管道里最常见的写法是 `cmd | goja -e '...'`：脚本来自 -e，数据从 stdin 来。
 	// Windows 上没有 /dev/stdin，stdin 又是解释器的 io.Reader 而不是文件，
-	// 所以只能由宿主提供 fs.readStdin()。
+	// 所以只能由宿主提供 fs.readStdin()。它必须在装 fs 的同一次 SetGlobal 里
+	// 加进去 —— moejs 建好的全局对象没有「事后加一个属性」的顶层 API。
+	fsObj := newJSFS(policy).methods(rt)
 	if stdinFree {
-		if err := installStdin(vm, builtinStdin(hc), 8<<20); err != nil {
-			fmt.Fprintf(hc.Stderr, "goja: 初始化 stdin 失败: %v\n", err)
-			return exitStatus(1)
-		}
+		fsObj["readStdin"] = stdinReader(rt, builtinStdin(hc), 8<<20)
 	}
-	if err := installArgv(vm, argv); err != nil {
+	if err := rt.SetGlobal("fs", fsObj); err != nil {
+		fmt.Fprintf(hc.Stderr, "goja: 初始化 fs 失败: %v\n", err)
+		return exitStatus(1)
+	}
+	if err := installCrypto(rt); err != nil {
+		fmt.Fprintf(hc.Stderr, "goja: 初始化 crypto 失败: %v\n", err)
+		return exitStatus(1)
+	}
+	if err := installArgv(rt, argv); err != nil {
 		fmt.Fprintf(hc.Stderr, "goja: 注入 argv 失败: %v\n", err)
 		return exitStatus(1)
 	}
 
-	// 超时与取消都靠 vm.Interrupt（goja 支持跨 goroutine 调用）。
-	timer := time.AfterFunc(timeout, func() { vm.Interrupt("timeout") })
+	// 超时与取消都靠 Interrupt（moejs 支持跨 goroutine 调用）。
+	timer := time.AfterFunc(timeout, func() { rt.Interrupt("timeout") })
 	defer timer.Stop()
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
 	go func() {
 		select {
 		case <-ctx.Done():
-			vm.Interrupt("canceled")
+			rt.Interrupt("canceled")
 		case <-stopWatch:
 		}
 	}()
 
-	value, err := vm.RunScript(srcName, script)
+	value, err := runJSScript(rt, srcName, script)
 	if err != nil {
 		fmt.Fprintf(hc.Stderr, "%s\n", jsErrorText(err, int64(timeout/time.Millisecond)))
 		return exitStatus(1)
@@ -236,52 +236,47 @@ func runGoja(ctx context.Context, hc interp.HandlerContext, policy Policy, srcNa
 	//
 	// 注意不能用「字符串等于 "undefined"」来判断：脚本返回**字符串** "undefined"
 	// 时也要打印出来（`typeof x` 的结果就是这样）。
-	if !goja.IsUndefined(value) && !goja.IsNull(value) {
-		if s := jsValueString(value); s != "" {
+	if !value.IsNullish() {
+		if s := jsValueString(rt, value); s != "" {
 			fmt.Fprintln(hc.Stdout, s)
 		}
 	}
 	return nil
 }
 
-// installStdin 给 fs 加上 readStdin()，只允许读一次（管道不可回退）。
+// stdinReader 构造 fs.readStdin()：只允许读一次（管道不可回退）。
 //
 // 有了它，`cmd | goja -e '...'` 这种最自然的写法才成立；否则脚本来自 -e 时
 // 上游数据根本没法被读到（Windows 连 /dev/stdin 都没有）。
-func installStdin(vm *goja.Runtime, r io.Reader, limit int64) error {
-	obj := vm.Get("fs")
-	if obj == nil || goja.IsUndefined(obj) || goja.IsNull(obj) {
-		return fmt.Errorf("fs 未初始化")
-	}
-	fsObj := obj.ToObject(vm)
+func stdinReader(rt *moejs.Runtime, r io.Reader, limit int64) moejs.NativeFunc {
 	used := false
-	return fsObj.Set("readStdin", func(goja.FunctionCall) goja.Value {
+	return func(_ *moejs.Realm, _ moejs.Value, _ []moejs.Value) (moejs.Value, error) {
 		if used {
-			throwJS(vm, "readStdin: stdin 只能读一次")
+			return moejs.Undefined(), throwErr("readStdin: stdin 只能读一次")
 		}
 		used = true
 		data, err := readAllLimited(r, limit)
 		if err != nil {
-			throwJS(vm, "readStdin: "+err.Error())
+			return moejs.Undefined(), throwErr("readStdin: %v", err)
 		}
-		return vm.ToValue(string(data))
-	})
+		return moejs.String(string(data)), nil
+	}
 }
 
 // installArgv 把命令行参数注入为原生的 JS 数组。
-func installArgv(vm *goja.Runtime, argv []string) error {
+func installArgv(rt *moejs.Runtime, argv []string) error {
 	if len(argv) == 0 {
-		return vm.Set("argv", []any{})
+		return rt.SetGlobal("argv", []string{})
 	}
 	data, err := json.Marshal(argv)
 	if err != nil {
 		return err
 	}
-	v, err := jsonParse(vm, string(data))
+	v, err := rt.ParseJSONString(string(data))
 	if err != nil {
 		return err
 	}
-	return vm.Set("argv", v)
+	return rt.SetGlobal("argv", v)
 }
 
 // readAllLimited 读全部内容但不超过 limit 字节（防止在管道里吃爆内存）。

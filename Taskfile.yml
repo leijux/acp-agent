@@ -261,7 +261,7 @@ tasks:
       - go run ./cmd/acp-agent -mcp-status {{.CLI_ARGS}}
 
   verify:kernel:
-    desc: 裸 goja 全链路验证（不复用 internal/kernel）
+    desc: 全链路验证（内嵌 bundle 走一遍 Turn/Compress/Search，并打印与 Node 比对的 hash）
     cmds:
       - go run ./cmd/verify-kernel
 

@@ -1,9 +1,8 @@
 // Package segmenter 给 internal/kernel 提供基于真实词典的中文分词器。
 //
 // 背景：kernel 上游用 `new Intl.Segmenter("zh", {granularity:"word"})` 切分中文
-// 检索词，goja 没有 Intl，默认回退到 kernel.RuneSegmenter（单个汉字一段 +
-// CJK run 内 bigram 回退）。单字粒度能保证检索召回，但拿不到"词"，
-// 中文 BM25 的精度不如 Node + CLDR。
+// 检索词。引擎自带的 Segmenter 是 UAX#29 默认规则（无词典，汉字逐字一段），
+// 单字粒度能保证召回，但拿不到"词"，中文 BM25 的精度不如 Node + CLDR。
 //
 // 这里的实现通过 kernel.WithSegmenter 注入，让 kernel 拿到真正的词：
 //

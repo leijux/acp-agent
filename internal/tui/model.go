@@ -70,6 +70,9 @@ type Model struct {
 	breakBlk bool
 	mouse    bool
 	turnFrom int // 本次 turn 起始的块下标（结束后自动折叠本轮思考）
+	// streamMark 是「当前这条流式消息从哪个块开始」（-1 = 不知道）。
+	// 重连回滚就截到这里，避免误删上一条回复。
+	streamMark int
 
 	// flat 是当前完整内容（/freeze 用它写进 scrollback）。
 	flat string
@@ -108,11 +111,12 @@ func newModel(ui *UI, opts Options) *Model {
 		vp:       newViewport(),
 		header:   opts.Header,
 		status:   opts.Status,
-		selBlock: -1,
-		mouse:    !opts.NoMouse,
-		turnFrom: -1,
-		histPos:  -1,
-		complete: opts.Complete,
+		selBlock:   -1,
+		mouse:      !opts.NoMouse,
+		turnFrom:   -1,
+		streamMark: -1,
+		histPos:    -1,
+		complete:   opts.Complete,
 	}
 	m.vp.MouseWheelEnabled = true
 	return m
@@ -136,6 +140,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RunningMsg:
 		if msg.On {
 			m.turnFrom = len(m.blocks)
+			m.streamMark = -1
 			m.running = true
 			m.turnStart = time.Now()
 			m.turnSeq++
@@ -189,6 +194,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ResetMsg:
 		m.clear()
+		return m, nil
+
+	case MarkStreamMsg:
+		// 标记位置 + 强制断块：不断块的话，上一条同 Kind 的块会被继续追加，
+		// 消息边界在界面上就消失了，回滚只能连上一条一起删。
+		m.streamMark = len(m.blocks)
+		m.breakBlk = true
+		return m, nil
+
+	case RewindMsg:
+		m.rewindStream()
 		return m, nil
 
 	case tickMsg:
@@ -914,10 +930,43 @@ func (m *Model) clear() {
 	m.anchors = nil
 	m.selBlock = -1
 	m.turnFrom = -1
+	m.streamMark = -1
 	m.sel.reset()
 	m.flat = ""
 	m.vp.SetContent("")
 	m.vp.GotoTop()
+	m.needRebuild = true
+}
+
+// rewindStream 撤销当前这条流式消息已渲染的块（网络中断重连，内容会重新生成）。
+//
+// 优先截到最近一次 MarkStream 标记处：只按「尾部 Kind 连续块」删会连上一条
+// 回复一起删 —— 本轮还没吐出任何块时（内容还在行缓冲里），尾部连续块就是
+// 上一条的正文。没有标记时才退回该启发式。
+func (m *Model) rewindStream() {
+	from := m.streamMark
+	if from < 0 || from > len(m.blocks) {
+		from = len(m.blocks)
+		for from > 0 {
+			if k := m.blocks[from-1].Kind; k != KindText && k != KindThinking {
+				break
+			}
+			from--
+		}
+	}
+	m.streamMark = -1
+	if from == len(m.blocks) {
+		return // 没有可撤销的块
+	}
+	m.blocks = m.blocks[:from]
+	// 必须断块：截断后尾块可能还是正文（上一条回复），不断开的话重发的
+	// 增量会 append 进上一条回复里。
+	m.breakBlk = true
+	if m.turnFrom > from {
+		m.turnFrom = from
+	}
+	m.sel.reset() // 块被删，旧选区的行列全部失效
+	m.selBlock = -1
 	m.needRebuild = true
 }
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
 // ErrClosed 表示 Session 已关闭。
@@ -18,9 +18,9 @@ var ErrClosed = errors.New("kernel: session closed")
 // 彼此不共享 state 与 runtime。
 type Session struct {
 	rt    *runtime
-	cfg   goja.Value
-	state goja.Value
-	last  goja.Value // 上一轮渲染后的 messages（applyCompression 需要）
+	cfg   moejs.Value
+	state moejs.Value
+	last  moejs.Value // 上一轮渲染后的 messages（applyCompression 需要）
 	limit int
 
 	mu     sync.Mutex
@@ -29,15 +29,14 @@ type Session struct {
 
 func (s *Session) init(cfg Config) error {
 	rt := s.rt
-	vm := rt.vm
 
-	cfgFn, ok := goja.AssertFunction(rt.exports.Get("defaultConfig"))
-	if !ok {
+	cfgFn := rt.prop(rt.exports, "defaultConfig")
+	if !cfgFn.IsObject() {
 		return errors.New("kernel: defaultConfig is not exported")
 	}
-	args := []goja.Value{vm.ToValue(s.limit)}
+	args := []moejs.Value{rt.val(s.limit)}
 	if len(cfg.Overrides) > 0 {
-		args = append(args, vm.ToValue(cfg.Overrides))
+		args = append(args, rt.val(cfg.Overrides))
 	}
 	v, err := rt.callFn(cfgFn, args...)
 	if err != nil {
@@ -45,8 +44,8 @@ func (s *Session) init(cfg Config) error {
 	}
 	s.cfg = v
 
-	stateFn, ok := goja.AssertFunction(rt.exports.Get("createInitialState"))
-	if !ok {
+	stateFn := rt.prop(rt.exports, "createInitialState")
+	if !stateFn.IsObject() {
 		return errors.New("kernel: createInitialState is not exported")
 	}
 	st, err := rt.callFn(stateFn)
@@ -54,7 +53,7 @@ func (s *Session) init(cfg Config) error {
 		return fmt.Errorf("kernel: createInitialState: %w", err)
 	}
 	s.state = st
-	s.last = vm.NewArray()
+	s.last = rt.val([]any{})
 	return nil
 }
 
@@ -63,9 +62,9 @@ func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
-	s.state = nil
-	s.last = nil
-	s.cfg = nil
+	s.state = moejs.Undefined()
+	s.last = moejs.Undefined()
+	s.cfg = moejs.Undefined()
 	return nil
 }
 
@@ -76,12 +75,28 @@ func (s *Session) ensureOpen() error {
 	return nil
 }
 
-func (s *Session) messagesToJS(msgs []Message) *goja.Object {
-	vm := s.rt.vm
-	arr := vm.NewArray()
-	for i, m := range msgs {
-		o := vm.NewObject()
-		_ = o.Set("id", m.ID)
+// jsMessage 是传给 JS 的消息形状。
+//
+// 字段顺序是**契约**：kernel 会把消息透传/拷贝进渲染结果，渲染后的 JSON
+// 的 key 顺序参与 messagesHash 与上游的逐字节比对。以前是逐个 o.Set(...)
+// 建对象（插入顺序），现在走 json.Marshal + JSON.parse，所以顺序只能靠
+// struct 字段顺序固定 —— 调整字段等于改上游比对基准。
+type jsMessage struct {
+	ID               string      `json:"id"`
+	Role             Role        `json:"role"`
+	ContentType      ContentType `json:"contentType"`
+	Text             string      `json:"text"`
+	ToolName         string      `json:"toolName,omitempty"`
+	ToolCallID       string      `json:"toolCallId,omitempty"`
+	ThinkingTokens   int         `json:"thinkingTokens,omitempty"`
+	SummaryOfBlockID string      `json:"summaryOfBlockId,omitempty"`
+	LedgerSeq        int64       `json:"ledgerSeq,omitempty"`
+}
+
+// messagesToJS 把消息视图转成 JS 数组（一次 JSON.parse，不在 JS 里逐个建对象）。
+func (s *Session) messagesToJS(msgs []Message) moejs.Value {
+	out := make([]jsMessage, 0, len(msgs))
+	for _, m := range msgs {
 		role := m.Role
 		if role == "" {
 			role = RoleUser
@@ -94,27 +109,23 @@ func (s *Session) messagesToJS(msgs []Message) *goja.Object {
 				ct = ContentText
 			}
 		}
-		_ = o.Set("role", string(role))
-		_ = o.Set("contentType", string(ct))
-		_ = o.Set("text", m.Text)
-		if m.ToolName != "" {
-			_ = o.Set("toolName", m.ToolName)
-		}
-		if m.ToolCallID != "" {
-			_ = o.Set("toolCallId", m.ToolCallID)
-		}
-		if m.ThinkingTokens > 0 {
-			_ = o.Set("thinkingTokens", m.ThinkingTokens)
-		}
-		if m.SummaryOfBlockID != "" {
-			_ = o.Set("summaryOfBlockId", m.SummaryOfBlockID)
-		}
-		if m.LedgerSeq > 0 {
-			_ = o.Set("ledgerSeq", m.LedgerSeq)
-		}
-		_ = arr.Set(intToKey(i), o)
+		out = append(out, jsMessage{
+			ID:               m.ID,
+			Role:             role,
+			ContentType:      ct,
+			Text:             m.Text,
+			ToolName:         m.ToolName,
+			ToolCallID:       m.ToolCallID,
+			ThinkingTokens:   m.ThinkingTokens,
+			SummaryOfBlockID: m.SummaryOfBlockID,
+			LedgerSeq:        m.LedgerSeq,
+		})
 	}
-	return arr
+	data, err := json.Marshal(out)
+	if err != nil {
+		return moejs.Undefined()
+	}
+	return s.rt.parse(data)
 }
 
 type turnRaw struct {
@@ -150,31 +161,30 @@ func (s *Session) TurnSource(msgs []Message, tokenCount int, source TokenCountSo
 		return TurnResult{}, err
 	}
 
-	vm := s.rt.vm
-	in := vm.NewObject()
-	_ = in.Set("messages", s.messagesToJS(msgs))
-	_ = in.Set("state", s.state)
-	_ = in.Set("config", s.cfg)
-	_ = in.Set("tokenCount", tokenCount)
+	in := map[string]any{
+		"messages":   s.messagesToJS(msgs),
+		"state":      s.state,
+		"config":     s.cfg,
+		"tokenCount": tokenCount,
+	}
 	if source != TokenCountUnspecified {
-		_ = in.Set("tokenCountSource", string(source))
+		in["tokenCountSource"] = string(source)
 	}
 
-	out, err := s.rt.coreCall("processTurn", in)
+	out, err := s.rt.coreCall("processTurn", s.rt.val(in))
 	if err != nil {
 		return TurnResult{}, fmt.Errorf("kernel: processTurn: %w", err)
 	}
-	obj := out.ToObject(vm)
 
-	if st := obj.Get("state"); st != nil && !goja.IsUndefined(st) && !goja.IsNull(st) {
+	if st := s.rt.prop(out, "state"); !st.IsNullish() {
 		s.state = st
 	}
-	if mv := obj.Get("messages"); mv != nil && !goja.IsUndefined(mv) {
+	if mv := s.rt.prop(out, "messages"); !mv.IsNullish() {
 		s.last = mv
 	}
 
 	var res TurnResult
-	msgJSON, err := s.rt.toJSON(obj.Get("messages"))
+	msgJSON, err := s.rt.toJSON(s.rt.prop(out, "messages"))
 	if err != nil {
 		return TurnResult{}, fmt.Errorf("kernel: processTurn: encode messages: %w", err)
 	}
@@ -184,7 +194,7 @@ func (s *Session) TurnSource(msgs []Message, tokenCount int, source TokenCountSo
 		}
 		res.MessagesJSON = msgJSON
 	}
-	if res.NudgeJSON, err = s.rt.toJSON(obj.Get("nudge")); err != nil {
+	if res.NudgeJSON, err = s.rt.toJSON(s.rt.prop(out, "nudge")); err != nil {
 		return TurnResult{}, err
 	}
 	if len(res.NudgeJSON) > 0 && string(res.NudgeJSON) != "null" {
@@ -193,10 +203,10 @@ func (s *Session) TurnSource(msgs []Message, tokenCount int, source TokenCountSo
 			res.Nudge = &n
 		}
 	}
-	if res.TerminalEscape, err = s.rt.toJSON(obj.Get("terminalEscape")); err != nil {
+	if res.TerminalEscape, err = s.rt.toJSON(s.rt.prop(out, "terminalEscape")); err != nil {
 		return TurnResult{}, err
 	}
-	if v := obj.Get("truncationSkipped"); v != nil && !goja.IsUndefined(v) {
+	if v := s.rt.prop(out, "truncationSkipped"); !v.IsNullish() {
 		res.TruncationSkipped = v.String()
 	}
 
@@ -220,40 +230,39 @@ func (s *Session) ApplyCompression(ranges []Range) (CompressionResult, error) {
 	if err := s.ensureOpen(); err != nil {
 		return CompressionResult{}, err
 	}
-	vm := s.rt.vm
-
-	rs := vm.NewArray()
-	for i, r := range ranges {
-		o := vm.NewObject()
-		_ = o.Set("startRef", r.StartRef)
-		_ = o.Set("endRef", r.EndRef)
-		_ = o.Set("summary", r.Summary)
+	rs := make([]any, 0, len(ranges))
+	for _, r := range ranges {
+		o := map[string]any{
+			"startRef": r.StartRef,
+			"endRef":   r.EndRef,
+			"summary":  r.Summary,
+		}
 		if r.Topic != "" {
-			_ = o.Set("topic", r.Topic)
+			o["topic"] = r.Topic
 		}
 		if r.SummaryMaxChars > 0 {
-			_ = o.Set("summaryMaxChars", r.SummaryMaxChars)
+			o["summaryMaxChars"] = r.SummaryMaxChars
 		}
-		_ = rs.Set(intToKey(i), o)
+		rs = append(rs, o)
 	}
 
-	in := vm.NewObject()
-	_ = in.Set("ranges", rs)
-	_ = in.Set("messages", s.last)
-	_ = in.Set("state", s.state)
-	_ = in.Set("config", s.cfg)
+	in := map[string]any{
+		"ranges":   rs,
+		"messages": s.last,
+		"state":    s.state,
+		"config":   s.cfg,
+	}
 
-	out, err := s.rt.coreCall("applyCompression", in)
+	out, err := s.rt.coreCall("applyCompression", s.rt.val(in))
 	if err != nil {
 		return CompressionResult{}, fmt.Errorf("kernel: applyCompression: %w", err)
 	}
-	obj := out.ToObject(vm)
-	if st := obj.Get("state"); st != nil && !goja.IsUndefined(st) && !goja.IsNull(st) {
+	if st := s.rt.prop(out, "state"); !st.IsNullish() {
 		s.state = st
 	}
 
 	var res CompressionResult
-	if data, err := s.rt.toJSON(obj.Get("result")); err == nil && len(data) > 0 {
+	if data, err := s.rt.toJSON(s.rt.prop(out, "result")); err == nil && len(data) > 0 {
 		if err := json.Unmarshal(data, &res); err != nil {
 			return CompressionResult{}, fmt.Errorf("kernel: applyCompression: decode result: %w", err)
 		}
@@ -279,7 +288,7 @@ func (s *Session) Search(query string) ([]json.RawMessage, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
-	out, err := s.rt.coreCall("search", s.rt.vm.ToValue(query), s.state)
+	out, err := s.rt.coreCall("search", s.rt.val(query), s.state)
 	if err != nil {
 		return nil, fmt.Errorf("kernel: search: %w", err)
 	}
@@ -299,21 +308,21 @@ func (s *Session) SearchBlocksWith(query string, options map[string]any) ([]json
 		return nil, err
 	}
 	rt := s.rt
-	bd, ok := goja.AssertFunction(rt.exports.Get("blockDocs"))
-	if !ok {
+	bd := rt.prop(rt.exports, "blockDocs")
+	if !bd.IsObject() {
 		return nil, errors.New("kernel: blockDocs is not exported")
 	}
 	docs, err := rt.callFn(bd, s.state)
 	if err != nil {
 		return nil, fmt.Errorf("kernel: blockDocs: %w", err)
 	}
-	sb, ok := goja.AssertFunction(rt.exports.Get("searchBlocks"))
-	if !ok {
+	sb := rt.prop(rt.exports, "searchBlocks")
+	if !sb.IsObject() {
 		return nil, errors.New("kernel: searchBlocks is not exported")
 	}
-	args := []goja.Value{docs, rt.vm.ToValue(query)}
+	args := []moejs.Value{docs, rt.val(query)}
 	if len(options) > 0 {
-		args = append(args, rt.vm.ToValue(options))
+		args = append(args, rt.val(options))
 	}
 	hits, err := rt.callFn(sb, args...)
 	if err != nil {
@@ -322,8 +331,8 @@ func (s *Session) SearchBlocksWith(query string, options map[string]any) ([]json
 	return s.toRawSlice(hits)
 }
 
-func (s *Session) toRawSlice(v goja.Value) ([]json.RawMessage, error) {
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+func (s *Session) toRawSlice(v moejs.Value) ([]json.RawMessage, error) {
+	if v.IsNullish() {
 		return nil, nil
 	}
 	data, err := s.rt.toJSON(v)
@@ -344,8 +353,7 @@ func (s *Session) Status(tokenCount int) (Status, error) {
 	if err := s.ensureOpen(); err != nil {
 		return Status{}, err
 	}
-	vm := s.rt.vm
-	out, err := s.rt.coreCall("status", s.state, vm.ToValue(tokenCount), s.cfg)
+	out, err := s.rt.coreCall("status", s.state, s.rt.val(tokenCount), s.cfg)
 	if err != nil {
 		return Status{}, fmt.Errorf("kernel: status: %w", err)
 	}
@@ -367,11 +375,11 @@ func (s *Session) Decompress(blockID string) (*Block, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
-	out, err := s.rt.coreCall("decompress", s.rt.vm.ToValue(blockID), s.state)
+	out, err := s.rt.coreCall("decompress", s.rt.val(blockID), s.state)
 	if err != nil {
 		return nil, fmt.Errorf("kernel: decompress: %w", err)
 	}
-	if out == nil || goja.IsUndefined(out) || goja.IsNull(out) {
+	if out.IsNullish() {
 		return nil, nil
 	}
 	var b Block
@@ -396,9 +404,8 @@ func (s *Session) Blocks() ([]Block, error) {
 }
 
 func (s *Session) blocksLocked() ([]Block, error) {
-	st := s.state.ToObject(s.rt.vm)
-	v := st.Get("blocks")
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+	v := s.rt.prop(s.state, "blocks")
+	if v.IsNullish() {
 		return nil, nil
 	}
 	data, err := s.rt.toJSON(v)
@@ -419,8 +426,8 @@ func (s *Session) BlocksJSON() ([]byte, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
-	v := s.state.ToObject(s.rt.vm).Get("blocks")
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+	v := s.rt.prop(s.state, "blocks")
+	if v.IsNullish() {
 		return []byte("[]"), nil
 	}
 	return s.rt.toJSON(v)
@@ -438,58 +445,62 @@ func (s *Session) Refs() (RefMap, error) {
 
 func (s *Session) refsLocked() (RefMap, error) {
 	var out RefMap
-	st := s.state.ToObject(s.rt.vm)
-	v := st.Get("messageRefs")
+	v := s.rt.prop(s.state, "messageRefs")
 	if !isValue(v) {
 		return out, nil
 	}
-	// 直接从 goja 对象读：refs 表随消息数线性增长，每轮做一次
+	// 直接从引擎对象读：refs 表随消息数线性增长，每轮做一次
 	// stringify → parse → unmarshal 是纯浪费（pprof 里 refs 曾是独立热点）。
-	out.ByRaw = readStringMap(v, "byRaw")
-	out.ByRef = readStringMap(v, "byRef")
-	if blocked := readBoolMap(v, "blocked"); len(blocked) > 0 {
+	out.ByRaw = readStringMap(s.rt, v, "byRaw")
+	out.ByRef = readStringMap(s.rt, v, "byRef")
+	if blocked := readBoolMap(s.rt, v, "blocked"); len(blocked) > 0 {
 		out.Blocked = blocked
 	}
 	return out, nil
 }
 
 // readStringMap 读取 JS 对象的某个子对象为 Go map（不经过 JSON）。
-func readStringMap(v goja.Value, key string) map[string]string {
-	obj, ok := v.(*goja.Object)
-	if !ok || obj == nil {
+func readStringMap(rt *runtime, v moejs.Value, key string) map[string]string {
+	sub := rt.prop(v, key)
+	if !sub.IsObject() {
 		return nil
 	}
-	sub, ok := obj.Get(key).(*goja.Object)
-	if !ok || sub == nil {
+	x, err := rt.rt.ToGo(sub)
+	if err != nil {
 		return nil
 	}
-	keys := sub.Keys()
-	if len(keys) == 0 {
+	m, ok := x.(map[string]any)
+	if !ok || len(m) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		out[k] = sub.Get(k).String()
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		if s, ok := val.(string); ok {
+			out[k] = s
+			continue
+		}
+		out[k] = fmt.Sprint(val)
 	}
 	return out
 }
 
-func readBoolMap(v goja.Value, key string) map[string]bool {
-	obj, ok := v.(*goja.Object)
-	if !ok || obj == nil {
+func readBoolMap(rt *runtime, v moejs.Value, key string) map[string]bool {
+	sub := rt.prop(v, key)
+	if !sub.IsObject() {
 		return nil
 	}
-	sub, ok := obj.Get(key).(*goja.Object)
-	if !ok || sub == nil {
+	x, err := rt.rt.ToGo(sub)
+	if err != nil {
 		return nil
 	}
-	keys := sub.Keys()
-	if len(keys) == 0 {
+	m, ok := x.(map[string]any)
+	if !ok || len(m) == 0 {
 		return nil
 	}
-	out := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		out[k] = sub.Get(k).ToBoolean()
+	out := make(map[string]bool, len(m))
+	for k, val := range m {
+		b, _ := val.(bool)
+		out[k] = b
 	}
 	return out
 }
@@ -533,9 +544,9 @@ func (s *Session) CallCore(name string, args ...any) ([]byte, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
-	vals := make([]goja.Value, 0, len(args))
+	vals := make([]moejs.Value, 0, len(args))
 	for _, a := range args {
-		vals = append(vals, s.rt.vm.ToValue(a))
+		vals = append(vals, s.rt.val(a))
 	}
 	v, err := s.rt.coreCall(name, vals...)
 	if err != nil {
@@ -551,9 +562,9 @@ func (s *Session) Call(name string, args ...any) ([]byte, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
-	vals := make([]goja.Value, 0, len(args))
+	vals := make([]moejs.Value, 0, len(args))
 	for _, a := range args {
-		vals = append(vals, s.rt.vm.ToValue(a))
+		vals = append(vals, s.rt.val(a))
 	}
 	v, err := s.rt.call(name, vals...)
 	if err != nil {

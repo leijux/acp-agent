@@ -6,14 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
 // testProgram 编译默认 bundle 的 wrapper（与 Kernel.program 等价）。
-func testProgram(t *testing.T) *goja.Program {
+func testProgram(t *testing.T) *moejs.Script {
 	t.Helper()
 	src := "(function(module, exports, require){" + string(defaultBundle) + "})"
-	prog, err := goja.Compile("test.wrapper.js", src, false)
+	prog, err := moejs.CompileScript("test.wrapper.js", src)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -30,7 +30,7 @@ func (s spySeg) Segment(text string) []Segment {
 	return s.inner.Segment(text)
 }
 
-// TestSegmenterWired 检查 Intl.Segmenter 注入是否真的被 kernel 使用。
+// TestSegmenterWired 检查宿主注入的分词器是否真的被 kernel 使用。
 func TestSegmenterWired(t *testing.T) {
 	n := 0
 	rt, err := newRuntime(testProgram(t), Options{Segmenter: spySeg{n: &n, inner: RuneSegmenter{}}})
@@ -39,8 +39,8 @@ func TestSegmenterWired(t *testing.T) {
 	}
 
 	v, err := rt.call("searchBlocks",
-		rt.vm.ToValue([]map[string]any{{"kind": "block", "ref": "b1", "text": "压缩上下文 cache 摘要", "title": "t"}}),
-		rt.vm.ToValue("压缩"))
+		rt.val([]map[string]any{{"kind": "block", "ref": "b1", "text": "压缩上下文 cache 摘要", "title": "t"}}),
+		rt.val("压缩"))
 	if err != nil {
 		t.Fatalf("searchBlocks: %v", err)
 	}
@@ -50,7 +50,12 @@ func TestSegmenterWired(t *testing.T) {
 	}
 
 	// 再确认 segment 的结果形状与 kernel 期望一致。
-	raw, err := rt.vm.RunString(`(function(){var s=new Intl.Segmenter("zh",{granularity:"word"}).segment("上下文 cache");var o=[];for(var i=0;i<s.length;i++)o.push(s[i].segment);return o.join("|");})()`)
+	raw, err := rt.evalString(`(function(){
+		var s = new Intl.Segmenter("zh", {granularity:"word"}).segment("上下文 cache");
+		var o = [];
+		for (var i = 0; i < s.length; i++) o.push(s[i].segment);
+		return o.join("|");
+	})()`)
 	if err != nil {
 		t.Fatalf("segmenter probe: %v", err)
 	}
@@ -64,66 +69,61 @@ func TestDumpView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfgV, _ := rt.call("defaultConfig", rt.vm.ToValue(200000))
+	cfgV, _ := rt.call("defaultConfig", rt.val(200000))
 	stV, _ := rt.call("createInitialState")
 
-	msgs := rt.vm.NewArray()
+	msgs := make([]any, 0, 12)
 	for i := 0; i < 12; i++ {
-		o := rt.vm.NewObject()
-		_ = o.Set("id", fmt.Sprintf("x_%02d", i))
-		_ = o.Set("role", "user")
-		_ = o.Set("contentType", "text")
-		_ = o.Set("text", strings.Repeat("上下文压缩 context window budget 讨论。", 60))
-		_ = msgs.Set(fmt.Sprintf("%d", i), o)
+		msgs = append(msgs, map[string]any{
+			"id":          fmt.Sprintf("x_%02d", i),
+			"role":        "user",
+			"contentType": "text",
+			"text":        strings.Repeat("上下文压缩 context window budget 讨论。", 60),
+		})
 	}
-	in := rt.vm.NewObject()
-	_ = in.Set("messages", msgs)
-	_ = in.Set("state", stV)
-	_ = in.Set("config", cfgV)
-	_ = in.Set("tokenCount", 90000)
-	out, err := rt.coreCall("processTurn", in)
+	out, err := rt.coreCall("processTurn", rt.val(map[string]any{
+		"messages":   rt.val(msgs),
+		"state":      stV,
+		"config":     cfgV,
+		"tokenCount": 90000,
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := out.ToObject(rt.vm)
-	view := obj.Get("messages")
-	in2 := rt.vm.NewObject()
-	_ = in2.Set("ranges", rt.vm.ToValue([]map[string]any{{
-		"startRef": "m00001", "endRef": "m00006",
-		"summary": strings.Repeat("压缩摘要 summary of earlier turns 关于上下文预算的讨论。", 3),
-	}}))
-	_ = in2.Set("messages", view)
-	_ = in2.Set("state", obj.Get("state"))
-	_ = in2.Set("config", cfgV)
-	ac, err := rt.coreCall("applyCompression", in2)
+	view := rt.prop(out, "messages")
+	ac, err := rt.coreCall("applyCompression", rt.val(map[string]any{
+		"ranges": rt.val([]map[string]any{{
+			"startRef": "m00001", "endRef": "m00006",
+			"summary": strings.Repeat("压缩摘要 summary of earlier turns 关于上下文预算的讨论。", 3),
+		}}),
+		"messages": view,
+		"state":    rt.prop(out, "state"),
+		"config":   cfgV,
+	}))
 	if err != nil {
 		t.Fatalf("applyCompression: %v", err)
 	}
-	acObj := ac.ToObject(rt.vm)
 
-	in3 := rt.vm.NewObject()
-	_ = in3.Set("messages", view)
-	_ = in3.Set("state", acObj.Get("state"))
-	_ = in3.Set("config", cfgV)
-	_ = in3.Set("tokenCount", 40000)
-	out3, err := rt.coreCall("processTurn", in3)
+	out3, err := rt.coreCall("processTurn", rt.val(map[string]any{
+		"messages":   view,
+		"state":      rt.prop(ac, "state"),
+		"config":     cfgV,
+		"tokenCount": 40000,
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	v3 := out3.ToObject(rt.vm).Get("messages")
-	data, _ := rt.toJSON(v3)
-	var any []map[string]any
-	_ = json.Unmarshal(data, &any)
-	for i, m := range any {
+	data, _ := rt.toJSON(rt.prop(out3, "messages"))
+	var view2 []map[string]any
+	_ = json.Unmarshal(data, &view2)
+	for i, m := range view2 {
 		if i > 2 {
 			break
 		}
 		b, _ := json.Marshal(m)
 		t.Logf("msg[%d] = %s", i, b)
 	}
-	nd, _ := rt.toJSON(out.ToObject(rt.vm).Get("nudge"))
-	b, _ := json.Marshal(json.RawMessage(nd))
-	_ = b
+	nd, _ := rt.toJSON(rt.prop(out, "nudge"))
 	t.Logf("nudge = %s", truncate(string(nd), 700))
 }
 

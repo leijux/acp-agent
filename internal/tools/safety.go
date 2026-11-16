@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/leijux/acp-agent/internal/fsutil"
@@ -69,23 +70,51 @@ func (p Policy) Rel(abs string) string {
 }
 
 // 危险命令检测：best effort，只拦明显破坏性操作（不是安全边界）。
-var dangerousPatterns = []string{
-	"rm -rf /",
-	":(){:|:&};:",
-	"mkfs",
-	"dd if=/dev/zero of=/dev/",
-	"> /dev/sda",
-	"chmod -R 777 /",
-	"shutdown",
-	"reboot",
+//
+// 必须按「参数边界」匹配，不能用裸子串：`rm -rf /tmp/hold` 里同样含有
+// "rm -rf /"，裸 Contains 会把所有「删某个绝对路径下的目录」的正常操作
+// 一并拒掉。每条规则的根路径都要紧跟空白/命令分隔符/引号/行尾才算命中。
+var dangerousCommands = []struct {
+	desc string // 报错里显示的可读模式
+	re   *regexp.Regexp
+}{
+	{
+		desc: "rm -rf /",
+		// 目标是根目录本身：rm -rf /、rm -fr /*、sudo rm -rf //、rm -rf --no-preserve-root /
+		re: regexp.MustCompile(`(?i)\brm\s+(?:-{1,2}[\w-]+\s+)*/(?:[*/.]*)(?:\s|;|&|\||\)|['"]|$)`),
+	},
+	{
+		desc: "chmod -R 777 /",
+		re:   regexp.MustCompile(`(?i)\bchmod\s+(?:-{1,2}[\w-]+\s+)*0?777\s+/(?:[*/.]*)(?:\s|;|&|\||\)|['"]|$)`),
+	},
+	{
+		desc: ":(){:|:&};:",
+		re:   regexp.MustCompile(`:\s*\(\s*\)\s*\{[^}]*:\s*\|`),
+	},
+	{
+		desc: "mkfs",
+		re:   regexp.MustCompile(`(?i)\bmkfs(?:\.\w+)?\b`),
+	},
+	{
+		desc: "dd if=/dev/zero of=/dev/",
+		re:   regexp.MustCompile(`(?i)\bdd\b[^|;&]*\bif=/dev/(?:zero|random|urandom)\b[^|;&]*\bof=/dev/`),
+	},
+	{
+		desc: "> /dev/sda",
+		re:   regexp.MustCompile(`>\s*/dev/(?:sd|hd|vd|nvme|mmcblk|disk)`),
+	},
+	{
+		desc: "shutdown/reboot/poweroff/halt",
+		// 只认命令段起始处的开关机，避免 `grep reboot` 之类被误伤。
+		re: regexp.MustCompile(`(?i)(?:^|[;&|(\n])\s*(?:sudo\s+)?(?:shutdown|reboot|poweroff|halt)\b`),
+	},
 }
 
 // CheckCommand 对 shell 命令做基本防护。返回非 nil 表示拒绝。
 func (p Policy) CheckCommand(cmd string) error {
-	lower := strings.ToLower(cmd)
-	for _, pat := range dangerousPatterns {
-		if strings.Contains(lower, pat) {
-			return fmt.Errorf("命令被安全策略拒绝（匹配到 %q）", pat)
+	for _, d := range dangerousCommands {
+		if d.re.MatchString(cmd) {
+			return fmt.Errorf("命令被安全策略拒绝（匹配到 %q）", d.desc)
 		}
 	}
 	return nil

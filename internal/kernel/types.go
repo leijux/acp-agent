@@ -1,5 +1,5 @@
 // Package kernel 把 billion-context 的 acp-kernel（TypeScript 上下文压缩引擎）
-// 封装成可嵌入 Go 进程的库：goja 执行其 CJS 产物，Go 侧提供宿主能力
+// 封装成可嵌入 Go 进程的库：moejs 执行其 CJS 产物，Go 侧提供宿主能力
 // （Intl.Segmenter 分词、crypto、path、fs、状态持久化）。
 //
 // 上游：https://github.com/ranxianglei/billion-context/tree/master/kernel

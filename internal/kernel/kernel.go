@@ -18,9 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"sort"
 	"sync"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
 //go:embed kernel.dist.cjs
@@ -76,7 +77,7 @@ func WithBundle(b []byte) Option {
 
 // Kernel 是 bundle 的持有者；本身无状态，可为多个 Session 共享。
 //
-// bundle 只在首次需要时编译一次（goja.Program），之后的每个 Session
+// bundle 只在首次需要时编译一次（moejs.Script），之后的每个 Session
 // 都用 vm.RunProgram 复用编译产物 —— 这是 NewSession 从 ~35ms 降下来的关键。
 type Kernel struct {
 	opts Options
@@ -85,7 +86,7 @@ type Kernel struct {
 	// Version() 对它不报版本。
 	customBundle bool
 	progOnce sync.Once
-	prog     *goja.Program
+	prog     *moejs.Script
 	progErr  error
 
 	// shared 是 Version/Functions/Call 共用的只读 runtime（避免每次重建）。
@@ -106,8 +107,8 @@ func New(opts ...Option) (*Kernel, error) {
 		}
 		o.Bundle = defaultBundle
 	}
-	// 关键优化：kernel 的默认 countTokens 是 JS 正则（goja 下走回溯引擎，
-	// 占 Turn 七成以上分配）。用 Go 的等价实现替掉，语义不变。
+	// 关键优化：kernel 的默认 countTokens 是 JS 正则（goja 时代 pprof 显示
+	// 它占 Turn 七成以上分配）。用 Go 的等价实现替掉，语义不变。
 	if o.CountTokens == nil {
 		o.CountTokens = CountTokens
 	}
@@ -115,10 +116,10 @@ func New(opts ...Option) (*Kernel, error) {
 }
 
 // program 编译（并缓存）bundle 的 wrapper。进程内只编译一次。
-func (k *Kernel) program() (*goja.Program, error) {
+func (k *Kernel) program() (*moejs.Script, error) {
 	k.progOnce.Do(func() {
 		src := "(function(module, exports, require){" + string(k.opts.Bundle) + "\n})"
-		k.prog, k.progErr = goja.Compile("acp-kernel.wrapper.js", src, false)
+		k.prog, k.progErr = moejs.CompileScript("acp-kernel.wrapper.js", src)
 		if k.progErr != nil {
 			k.progErr = fmt.Errorf("kernel: compile bundle: %w", k.progErr)
 		}
@@ -144,7 +145,7 @@ func (k *Kernel) sharedRuntime() (*runtime, error) {
 	return rt, nil
 }
 
-// NewSession 创建会话。每个 Session 持有独立 goja runtime；
+// NewSession 创建会话。每个 Session 持有独立 moejs runtime；
 // bundle 的编译产物由 Kernel 复用，初始化成本主要是 VM 分配与 createCore。
 func (k *Kernel) NewSession(cfg Config) (*Session, error) {
 	prog, err := k.program()
@@ -170,7 +171,7 @@ func (k *Kernel) Functions() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return rt.exports.Keys(), nil
+	return exportNames(rt), nil
 }
 
 // Call 直接调用 bundle 的导出函数，返回原始 JSON（逃生门：覆盖尚未封装的 API）。
@@ -181,15 +182,33 @@ func (k *Kernel) Call(name string, args ...any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	vals := make([]goja.Value, 0, len(args))
+	vals := make([]moejs.Value, 0, len(args))
 	for _, a := range args {
-		vals = append(vals, rt.vm.ToValue(a))
+		vals = append(vals, rt.val(a))
 	}
 	v, err := rt.call(name, vals...)
 	if err != nil {
 		return nil, err
 	}
 	return rt.toJSON(v)
+}
+
+// exportNames 列出 bundle 的导出符号（顺序稳定，供调试输出与测试比对）。
+func exportNames(rt *runtime) []string {
+	x, err := rt.rt.ToGo(rt.exports)
+	if err != nil {
+		return nil
+	}
+	m, ok := x.(map[string]any)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Version 返回嵌入 bundle 对应的上游 acp-kernel 版本。

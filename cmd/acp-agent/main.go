@@ -436,6 +436,11 @@ func run() error {
 	case f.acpMode:
 		return app.serveACP(ctx)
 	case f.print != "":
+		// -p 的正文只在结束时统一打印（term.quiet），重发不会让谁看到重复内容；
+		// --mode json 不同：message_update 已经流给调用方了，没法撤回。
+		if !cfg.JSONMode {
+			app.agent.SetStreamRewind(true)
+		}
 		prompt := f.print
 		if prompt == "-" {
 			b, err := io.ReadAll(os.Stdin)

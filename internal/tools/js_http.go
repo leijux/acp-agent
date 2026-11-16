@@ -11,7 +11,7 @@ package tools
 //     thenable 让脚本 `await` 一个 undefined。
 //
 //   - **有界**：单请求响应体、单次脚本的请求数与累计字节数都有上限；单请求超时
-//     不超过脚本剩余时间。原因很实际：`vm.Interrupt` 只在解释器执行 opcode 时
+//     不超过脚本剩余时间。原因很实际：`Interrupt` 只在解释器执行 opcode 时
 //     检查中断，打不断阻塞在 socket 上的 Go 调用 —— 超时必须由 http 层自己兜住，
 //     否则一个慢站点就能把工具调用挂到远超 timeout 的地方。
 //
@@ -28,10 +28,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
 const (
@@ -62,12 +63,12 @@ type jsHTTP struct {
 }
 
 // installFetch 注入全局函数 fetch(url[, options])。
-func installFetch(vm *goja.Runtime, p Policy, h *jsHTTP) error {
+func installFetch(rt *moejs.Runtime, p Policy, h *jsHTTP) error {
 	if h == nil {
 		h = &jsHTTP{policy: p, ctx: context.Background()}
 	}
 	h.policy = p
-	return vm.Set("fetch", h.fetch(vm))
+	return rt.SetGlobal("fetch", h.fetch(rt))
 }
 
 // fetchOptions 是 fetch 的第二个参数解析结果。
@@ -80,45 +81,49 @@ type fetchOptions struct {
 	timeout  time.Duration
 }
 
-func (h *jsHTTP) fetch(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		rawURL := strings.TrimSpace(jsArg(call, 0))
+func (h *jsHTTP) fetch(rt *moejs.Runtime) moejs.NativeFunc {
+	return func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		rawURL := strings.TrimSpace(jsArg(args, 0))
 		if rawURL == "" {
-			throwJS(vm, "fetch: 缺少 url")
+			return moejs.Undefined(), throwErr("fetch: 缺少 url")
 		}
 		lower := strings.ToLower(rawURL)
 		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-			throwJS(vm, fmt.Sprintf("fetch: 只支持 http/https URL（拿到 %q）", clip(rawURL, 80)))
+			return moejs.Undefined(), throwErr("fetch: 只支持 http/https URL（拿到 %q）", clip(rawURL, 80))
 		}
 		short := clip(rawURL, 80)
-		opts := parseFetchOptions(vm, call.Argument(1))
-
-		if h.policy.ReadOnly && opts.method != http.MethodGet && opts.method != http.MethodHead {
-			throwJS(vm, fmt.Sprintf(
-				"fetch: 只读模式（permissions=readonly）只允许 GET/HEAD，收到 %s。要改远端状态请用 bash", opts.method))
+		opts, err := parseFetchOptions(rt, jsArgValue(args, 1))
+		if err != nil {
+			return moejs.Undefined(), err
 		}
-		if !h.policy.AllowNetworkWrite && opts.method != http.MethodGet && opts.method != http.MethodHead {
+
+		write := opts.method != http.MethodGet && opts.method != http.MethodHead
+		if h.policy.ReadOnly && write {
+			return moejs.Undefined(), throwErr(
+				"fetch: 只读模式（permissions=readonly）只允许 GET/HEAD，收到 %s。要改远端状态请用 bash", opts.method)
+		}
+		if !h.policy.AllowNetworkWrite && write {
 			// 不是改动型工具，拦不住就不该放行：ask 模式下同样的事走 bash 会弹确认。
-			throwJS(vm, fmt.Sprintf(
-				"fetch: 当前权限模式不允许非 GET/HEAD 的请求（收到 %s）。要写远端请用 bash 发命令（会走确认），或在 permissions=auto 下运行", opts.method))
+			return moejs.Undefined(), throwErr(
+				"fetch: 当前权限模式不允许非 GET/HEAD 的请求（收到 %s）。要写远端请用 bash 发命令（会走确认），或在 permissions=auto 下运行", opts.method)
 		}
 
 		h.reqs++
 		if h.reqs > jsHTTPMaxRequests {
-			throwJS(vm, fmt.Sprintf(
+			return moejs.Undefined(), throwErr(
 				"fetch: 单次脚本最多 %d 次网络请求（已发 %d 次）。要批量抓请用一条 curl，或把任务拆成多次 js 调用",
-				jsHTTPMaxRequests, jsHTTPMaxRequests))
+				jsHTTPMaxRequests, jsHTTPMaxRequests)
 		}
 		if h.bytes >= jsHTTPMaxTotalBytes {
-			throwJS(vm, fmt.Sprintf(
-				"fetch: 本次脚本累计已读 %d 字节，超过上限 %d", h.bytes, jsHTTPMaxTotalBytes))
+			return moejs.Undefined(), throwErr(
+				"fetch: 本次脚本累计已读 %d 字节，超过上限 %d", h.bytes, jsHTTPMaxTotalBytes)
 		}
 
 		timeout := opts.timeout
 		if dl, ok := h.ctx.Deadline(); ok {
 			remain := time.Until(dl)
 			if remain <= 0 {
-				throwJS(vm, fmt.Sprintf("fetch %s: 脚本已超时/取消", short))
+				return moejs.Undefined(), throwErr("fetch %s: 脚本已超时/取消", short)
 			}
 			if remain < timeout {
 				timeout = remain
@@ -133,7 +138,7 @@ func (h *jsHTTP) fetch(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 		}
 		req, err := http.NewRequestWithContext(ctx, opts.method, rawURL, bodyReader)
 		if err != nil {
-			throwJS(vm, fmt.Sprintf("fetch %s: %s", short, err.Error()))
+			return moejs.Undefined(), throwErr("fetch %s: %s", short, err.Error())
 		}
 		for k, v := range opts.headers {
 			req.Header.Set(k, v)
@@ -144,7 +149,7 @@ func (h *jsHTTP) fetch(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 
 		resp, err := jsHTTPClient.Do(req)
 		if err != nil {
-			throwJS(vm, fmt.Sprintf("fetch %s: %s", short, netErrText(err, timeout)))
+			return moejs.Undefined(), throwErr("fetch %s: %s", short, netErrText(err, timeout))
 		}
 		defer resp.Body.Close()
 
@@ -157,7 +162,7 @@ func (h *jsHTTP) fetch(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 		}
 		data, rerr := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 		if rerr != nil && len(data) == 0 {
-			throwJS(vm, fmt.Sprintf("fetch %s: 读响应体失败: %s", short, errText(rerr)))
+			return moejs.Undefined(), throwErr("fetch %s: 读响应体失败: %s", short, errText(rerr))
 		}
 		truncated := int64(len(data)) > limit
 		if truncated {
@@ -165,7 +170,7 @@ func (h *jsHTTP) fetch(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 		}
 		h.bytes += int64(len(data))
 
-		return jsFetchResult(vm, resp, string(data), truncated)
+		return jsFetchResult(rt, resp, string(data), truncated)
 	}
 }
 
@@ -173,39 +178,42 @@ func (h *jsHTTP) fetch(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 //
 // 支持：method / headers / body / json（自动 JSON.stringify 并补 Content-Type）
 // / timeout（毫秒）/ maxBytes。未知字段忽略 —— 手滑写错一个键不该让整段脚本失败。
-func parseFetchOptions(vm *goja.Runtime, v goja.Value) fetchOptions {
+func parseFetchOptions(rt *moejs.Runtime, v moejs.Value) (fetchOptions, error) {
 	out := fetchOptions{method: http.MethodGet, timeout: jsHTTPDefaultTimeout}
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-		return out
+	if v.IsNullish() {
+		return out, nil
 	}
-	obj, ok := v.(*goja.Object)
-	if !ok {
-		throwJS(vm, "fetch: 第二个参数必须是对象，如 {method:'POST', json:{...}}")
+	if !v.IsObject() {
+		return out, throwErr("fetch: 第二个参数必须是对象，如 {method:'POST', json:{...}}")
 	}
 
-	if m := strings.TrimSpace(optString(obj, "method")); m != "" {
+	if m := strings.TrimSpace(jsPropString(rt, v, "method")); m != "" {
 		out.method = strings.ToUpper(m)
 	}
 	switch out.method {
 	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
 		http.MethodPatch, http.MethodDelete, http.MethodOptions:
 	default:
-		throwJS(vm, fmt.Sprintf("fetch: 不支持的 method %q", out.method))
+		return out, throwErr("fetch: 不支持的 method %q", out.method)
 	}
 
-	if hv := obj.Get("headers"); hv != nil && !goja.IsUndefined(hv) && !goja.IsNull(hv) {
-		hobj, ok := hv.(*goja.Object)
-		if !ok {
-			throwJS(vm, "fetch: headers 必须是对象，如 {headers:{'X-Token':'abc'}}")
-		}
-		out.headers = make(map[string]string, len(hobj.Keys()))
-		for _, k := range hobj.Keys() {
-			out.headers[k] = strings.TrimSpace(hobj.Get(k).String())
+	if hv := jsProp(rt, v, "headers"); !hv.IsNullish() {
+		if hm, ok := jsToGo(rt, hv).(map[string]any); ok {
+			out.headers = make(map[string]string, len(hm))
+			for k, val := range hm {
+				out.headers[k] = strings.TrimSpace(fmt.Sprint(val))
+			}
+		} else {
+			return out, throwErr("fetch: headers 必须是对象，如 {headers:{'X-Token':'abc'}}")
 		}
 	}
 
-	if jv := obj.Get("json"); jv != nil && !goja.IsUndefined(jv) && !goja.IsNull(jv) {
-		out.body = jsJSONStringify(vm, jv)
+	if jv := jsProp(rt, v, "json"); !jv.IsNullish() {
+		body, err := jsJSONStringify(rt, jv)
+		if err != nil {
+			return out, err
+		}
+		out.body = body
 		out.hasBody = true
 		if out.headers == nil {
 			out.headers = map[string]string{}
@@ -213,27 +221,22 @@ func parseFetchOptions(vm *goja.Runtime, v goja.Value) fetchOptions {
 		if !hasHeaderFold(out.headers, "Content-Type") {
 			out.headers["Content-Type"] = "application/json"
 		}
-	} else if bv := obj.Get("body"); bv != nil && !goja.IsUndefined(bv) && !goja.IsNull(bv) {
+	} else if bv := jsProp(rt, v, "body"); !bv.IsNullish() {
 		out.body = bv.String()
 		out.hasBody = true
 	}
 
-	if tv := obj.Get("timeout"); tv != nil && !goja.IsUndefined(tv) && !goja.IsNull(tv) {
-		ms := tv.ToInteger()
-		if ms > 0 {
-			d := time.Duration(ms) * time.Millisecond
-			if d > jsHTTPMaxTimeout {
-				d = jsHTTPMaxTimeout
-			}
-			out.timeout = d
+	if ms := jsPropNumber(rt, v, "timeout"); ms > 0 {
+		d := time.Duration(ms) * time.Millisecond
+		if d > jsHTTPMaxTimeout {
+			d = jsHTTPMaxTimeout
 		}
+		out.timeout = d
 	}
-	if mv := obj.Get("maxBytes"); mv != nil && !goja.IsUndefined(mv) && !goja.IsNull(mv) {
-		if n := mv.ToInteger(); n > 0 {
-			out.maxBytes = n
-		}
+	if n := jsPropNumber(rt, v, "maxBytes"); n > 0 {
+		out.maxBytes = n
 	}
-	return out
+	return out, nil
 }
 
 // jsFetchResult 把响应包装成普通 JS 对象。
@@ -244,25 +247,26 @@ func parseFetchOptions(vm *goja.Runtime, v goja.Value) fetchOptions {
 //
 // 非 2xx 不抛错（HTTP 语义 + 让脚本自己判 `ok`/`status`），抛错的只有传输层
 // 失败、URL 非法、超预算、超时这几类。
-func jsFetchResult(vm *goja.Runtime, resp *http.Response, bodyText string, truncated bool) goja.Value {
-	obj := vm.NewObject()
-	_ = obj.Set("status", resp.StatusCode)
-	_ = obj.Set("ok", resp.StatusCode >= 200 && resp.StatusCode < 300)
-	_ = obj.Set("url", resp.Request.URL.String())
-	_ = obj.Set("contentType", resp.Header.Get("Content-Type"))
-	headers := vm.NewObject()
+func jsFetchResult(rt *moejs.Runtime, resp *http.Response, bodyText string, truncated bool) (moejs.Value, error) {
+	headers := make(map[string]string, len(resp.Header))
 	for k, vs := range resp.Header {
 		// 全小写：HTTP header 不区分大小写，统一成小写省得脚本猜 `X-Trace` 还是 `x-trace`。
-		_ = headers.Set(strings.ToLower(k), strings.Join(vs, ", "))
+		headers[strings.ToLower(k)] = strings.Join(vs, ", ")
 	}
-	_ = obj.Set("headers", headers)
-	_ = obj.Set("size", len(bodyText))
-	_ = obj.Set("truncated", truncated)
-	_ = obj.Set("text", bodyText)
-	if v, err := jsonParse(vm, bodyText); err == nil {
-		_ = obj.Set("json", v)
+	out := map[string]any{
+		"status":      resp.StatusCode,
+		"ok":          resp.StatusCode >= 200 && resp.StatusCode < 300,
+		"url":         resp.Request.URL.String(),
+		"contentType": resp.Header.Get("Content-Type"),
+		"headers":     headers,
+		"size":        len(bodyText),
+		"truncated":   truncated,
+		"text":        bodyText,
 	}
-	return obj
+	if v, err := rt.ParseJSONString(bodyText); err == nil {
+		out["json"] = v
+	}
+	return rt.FromGo(out)
 }
 
 // netErrText 给网络错误补一句人话。
@@ -279,32 +283,70 @@ func netErrText(err error, timeout time.Duration) string {
 }
 
 // jsJSONStringify 用引擎自带的 JSON.stringify 序列化，保证与脚本语义一致。
-func jsJSONStringify(vm *goja.Runtime, v goja.Value) string {
-	jsonObj := vm.Get("JSON")
-	if jsonObj == nil || goja.IsUndefined(jsonObj) || goja.IsNull(jsonObj) {
-		throwJS(vm, "fetch: 引擎里没有 JSON")
-	}
-	fn, ok := goja.AssertFunction(jsonObj.ToObject(vm).Get("stringify"))
-	if !ok {
-		throwJS(vm, "fetch: JSON.stringify 不可调用")
-	}
-	res, err := fn(goja.Undefined(), v)
+func jsJSONStringify(rt *moejs.Runtime, v moejs.Value) (string, error) {
+	res, err := rt.AppendJSON(nil, v)
 	if err != nil {
-		throwJS(vm, fmt.Sprintf("fetch: JSON.stringify 失败: %v", err))
+		return "", throwErr("fetch: JSON.stringify 失败: %v", err)
 	}
-	if res == nil || goja.IsUndefined(res) {
-		return "null"
+	if len(res) == 0 || string(res) == "undefined" {
+		return "null", nil
 	}
-	return res.String()
+	return string(res), nil
 }
 
-// optString 读对象里的字符串字段（缺失/非字符串返回空串）。
-func optString(obj *goja.Object, key string) string {
-	v := obj.Get(key)
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+// jsProp 读对象属性（不是对象或读不到时返回 undefined）。
+func jsProp(rt *moejs.Runtime, obj moejs.Value, key string) moejs.Value {
+	if !obj.IsObject() {
+		return moejs.Undefined()
+	}
+	v, err := rt.Get(obj, key)
+	if err != nil {
+		return moejs.Undefined()
+	}
+	return v
+}
+
+// jsPropString 读对象里的字符串字段（缺失返回空串）。
+func jsPropString(rt *moejs.Runtime, obj moejs.Value, key string) string {
+	v := jsProp(rt, obj, key)
+	if v.IsNullish() {
 		return ""
 	}
 	return v.String()
+}
+
+// jsPropNumber 读对象里的数字字段（缺失/非数字返回 0）。
+//
+// 字符串也收（`timeout: "5000"` 是模型常见的写法）：旧实现用 ToInteger()
+// 会隐式转换，换成引擎之后得自己补这一步，否则会静默回落成默认值。
+func jsPropNumber(rt *moejs.Runtime, obj moejs.Value, key string) int64 {
+	v := jsProp(rt, obj, key)
+	if v.IsNumber() {
+		return int64(v.AsNumber())
+	}
+	if v.IsString() {
+		if n, err := strconv.ParseFloat(strings.TrimSpace(v.String()), 64); err == nil {
+			return int64(n)
+		}
+	}
+	return 0
+}
+
+// jsToGo 把 JS 值转成 Go 值（失败返回 nil）。
+func jsToGo(rt *moejs.Runtime, v moejs.Value) any {
+	x, err := rt.ToGo(v)
+	if err != nil {
+		return nil
+	}
+	return x
+}
+
+// jsArgValue 取第 i 个参数（越界返回 undefined）。
+func jsArgValue(args []moejs.Value, i int) moejs.Value {
+	if i >= len(args) {
+		return moejs.Undefined()
+	}
+	return args[i]
 }
 
 // hasHeaderFold 大小写不敏感地判断 header 是否已存在。

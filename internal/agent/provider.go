@@ -54,6 +54,28 @@ type Sink interface {
 	ToolCall(call ToolCallBlock)
 }
 
+// Resetter 是 Sink 的可选能力：撤销自上次重置以来吐出的全部增量。
+//
+// provider 在网络中断（连接断开、流半截 EOF）后重发同一个请求之前会调用
+// 它，让下游把已经渲染的半截内容擦掉。没有这个能力的 Sink 不会拿到
+// “吐过增量之后”的重发 —— 那些重发会重复内容（见 provider.Retry）。
+type Resetter interface{ Reset() }
+
+// ResetSink 给任意 Sink 补上 Reset 能力（嵌入 Sink 保持原有三个方法转发）。
+//
+// 用包装而不是给 Sink 接口加方法：ACP 客户端的 agent_message_chunk 是纯
+// 增量的，根本没有撤回语义，它们实现不了 Reset，也不该被迫实现。
+type ResetSink struct {
+	Sink
+	OnReset func()
+}
+
+func (r *ResetSink) Reset() {
+	if r.OnReset != nil {
+		r.OnReset()
+	}
+}
+
 // SinkFunc 用函数字段实现 Sink，nil 字段即忽略。
 type SinkFunc struct {
 	OnText     func(delta string)

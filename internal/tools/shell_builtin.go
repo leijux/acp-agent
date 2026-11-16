@@ -81,7 +81,7 @@ func panicStack() string {
 }
 
 // builtinExecHandler 返回 ExecHandler 中间件。policy 用于约束需要访问文件的
-// 内建命令（目前是 goja 的 fs 桥）。
+// 内建命令（目前是 js 桥）。
 func builtinExecHandler(policy Policy) func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
 		return func(ctx context.Context, args []string) (err error) {
@@ -101,14 +101,15 @@ func builtinExecHandler(policy Policy) func(next interp.ExecHandlerFunc) interp.
 				}
 			}()
 			// goja 需要一个 policy，单独分派（其它内建命令的签名里没有它）。
+			// 命令名沿用旧引擎的名字（已有脚本/文档在用它），实际执行者是 moejs。
 			if args[0] == "goja" && findExecutable(hc.Env, args[0]) == "" {
-				return cmdGoja(ctx, hc, args[1:], policy)
+				return normalizeExecErr(cmdGoja(ctx, hc, args[1:], policy))
 			}
 			fn, ok := builtinFor(hc.Env, args[0])
 			if !ok {
-				return next(ctx, args)
+				return normalizeExecErr(next(ctx, args))
 			}
-			return fn(ctx, hc, args[1:])
+			return normalizeExecErr(fn(ctx, hc, args[1:]))
 		}
 	}
 }
@@ -191,7 +192,41 @@ func isExecutableFile(p string) bool {
 // ---------------------------------------------------------------------------
 
 // exitStatus 返回指定退出码，供内建命令直接返回。
-func exitStatus(code int) error { return interp.ExitStatus(uint8(code)) }
+//
+// 退出码只有低 8 位有效：**0 表示成功，必须返回 nil**。
+// interp.ExitStatus(0) 不是「成功」，而是一个非 nil 的错误，mvdan/sh 在
+// Runner.Run 收尾时会因此 panic（interp.Run api.go:1030）；越界的码（负数、
+// >255）同样收敛成 1，绝不把无效值交给解释器。
+func exitStatus(code int) error {
+	switch {
+	case code == 0:
+		return nil
+	case code < 0 || code > 255:
+		return interp.ExitStatus(1)
+	}
+	return interp.ExitStatus(uint8(code))
+}
+
+// normalizeExecErr 把「码为 0 的 ExitStatus」修正成失败。
+//
+// Windows 的进程退出码是 32 位：256、512、0xC0000000 全都合法，而 mvdan/sh 的
+// DefaultExecHandler 用 ExitStatus(err.ExitCode()) 把它截成 uint8 —— 256 就成了
+// ExitStatus(0)，一个「非 nil 但码为 0」的错误。解释器收尾时据此 panic
+// （api.go:1030 "non-nil exitStatus.err but a zero exitStatus.code"），而那个
+// panic 在解释器 goroutine 里：没有 recover 的构建上，一条 `cmd /c exit 256`
+// 就能把整个 agent 进程带走；有 recover 的构建上也会退化成「shell 内部错误」。
+//
+// 原码在到达这里时已经被截断丢了，只能保住「失败」这一个事实。
+func normalizeExecErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var es interp.ExitStatus
+	if errors.As(err, &es) && es == 0 {
+		return interp.ExitStatus(1)
+	}
+	return err
+}
 
 func usagef(hc interp.HandlerContext, format string, a ...any) error {
 	fmt.Fprintf(hc.Stderr, format+"\n", a...)

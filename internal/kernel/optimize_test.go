@@ -59,7 +59,7 @@ func TestProgramCompiledOnce(t *testing.T) {
 		t.Fatalf("NewSession: %v", err)
 	}
 	defer s2.Close()
-	if s1.rt.vm == s2.rt.vm {
+	if s1.rt.rt == s2.rt.rt {
 		t.Fatal("两个 Session 共享了同一个 VM（并发不安全）")
 	}
 }

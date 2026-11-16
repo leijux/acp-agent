@@ -144,6 +144,41 @@ func TestClipHistory(t *testing.T) {
 	}
 }
 
+// TestHistoryItemsKeepsLastReplyWhole -c 接着聊时要照着上一轮结尾干活：
+// 最后一段正文不能截断，前面同样长的正文照旧截断。
+func TestHistoryItemsKeepsLastReplyWhole(t *testing.T) {
+	long := func() string {
+		lines := make([]string, historyMaxLines*3)
+		for i := range lines {
+			lines[i] = "行"
+		}
+		return strings.Join(lines, "\n")
+	}
+	entries := []*agent.Entry{
+		histEntry(userMsg("第一轮")),
+		histEntry(&agent.AssistantMessage{Content: []agent.Block{agent.TextBlock{Text: long()}}}),
+		histEntry(userMsg("第二轮")),
+		histEntry(&agent.AssistantMessage{Content: []agent.Block{agent.TextBlock{Text: long()}}}),
+	}
+	items := historyItems(entries, 0)
+	if len(items) != 4 {
+		t.Fatalf("段数 = %d：%+v", len(items), items)
+	}
+	if !strings.Contains(items[1].Text, "已截断") {
+		t.Fatal("较早的正文应该照旧截断")
+	}
+	last := items[3]
+	if last.Kind != tui.KindText {
+		t.Fatalf("最后一段类型 = %v", last.Kind)
+	}
+	if strings.Contains(last.Text, "已截断") {
+		t.Fatalf("最后一条回复不该被截断: %q", last.Text)
+	}
+	if n := strings.Count(last.Text, "\n") + 1; n != historyMaxLines*3 {
+		t.Fatalf("最后一条回复行数 = %d，期望全文 %d", n, historyMaxLines*3)
+	}
+}
+
 // TestHistoryItemsFromLoadedSession 回放必须跑在“从 JSONL 读回来的”会话上：
 // 反序列化后的消息/块是值类型还是指针，决定了 type switch 会不会静默落空。
 func TestHistoryItemsFromLoadedSession(t *testing.T) {

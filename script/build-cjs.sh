@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# 把 billion-context/kernel 的官方 ESM 产物重新打成 goja 可执行的 CJS(ES2017)，
+# 把 billion-context/kernel 的官方 ESM 产物重新打成宿主可直接跑的 CJS(ES2017)：
+# 宿主管道是 `(function(module, exports, require){ … })` 的经典脚本（CompileScript 出一个函数），
+# 所以上游 ESM 必须先转成 CJS，不依赖引擎自带模块加载器。
 # 并把上游版本号 + bundle 指纹写进 internal/kernel/version_gen.go。
 set -euo pipefail
 KERNEL=${KERNEL:-/tmp/billion-context/kernel}

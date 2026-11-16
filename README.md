@@ -2,7 +2,7 @@
 
 **单文件、无 cgo、无 Node 的终端编码 agent**：Pi 风格的 agent loop + 完整工具集 + 进程内上下文压缩 + OpenAI 兼容 Provider + ACP 协议服务。
 
-真正的差别在依赖：**Windows 上不需要 bash、不需要 coreutils、不需要 Node/Python**。`sh` 用 mvdan/sh 的纯 Go 解释器（PATH 里没有 coreutils 时还有内建命令顶上），`JS` 用 goja 内嵌执行，上下文压缩的引擎也是同一个 goja —— 没有一个环节要 fork 出外部运行时。
+真正的差别在依赖：**Windows 上不需要 bash、不需要 coreutils、不需要 Node/Python**。`sh` 用 mvdan/sh 的纯 Go 解释器（PATH 里没有 coreutils 时还有内建命令顶上），`JS` 用 [moejs](https://github.com/MoeForge/moejs)（纯 Go JS 引擎）内嵌执行，上下文压缩的引擎也是同一个 moejs —— 没有一个环节要 fork 出外部运行时。
 
 ## 特点
 
@@ -10,19 +10,19 @@
 
 - **默认走 mvdan/sh 纯 Go 解释器**：`for`/`if`/`case`/`$(…)`/管道/重定向/函数/heredoc 都在进程内执行，只把真正的外部程序交给 `os/exec`。Windows 上不需要装 bash，也没有每次 `fork/exec bash.exe` 的启动开销。
 - **PATH 里没有 coreutils 时自动回退到内建实现**：`ls cat head tail sleep pwd mkdir rm grep`。`grep` 是完整实现（`-i -v -n -c -l -L -o -q -w -x -F -E -r/-R -e`，退出码与 GNU 一致，上下文行同样用 `-` 分隔）；装了 Git Bash/MSYS2 的用户行为不变 —— 真程序优先，找不到才回退。
-- **内建 `goja` 命令**：可以在管道里跑 JS 做纯计算，`cat x | goja -e 'fs.readStdin().split("\n").length'`；纯 Windows 环境没有 node/python 也照样能算。
+- **内建 `goja` 命令**（名字沿用旧引擎，实际跑 moejs）：可以在管道里跑 JS 做纯计算，`cat x | goja -e 'fs.readStdin().split("\n").length'`；纯 Windows 环境没有 node/python 也照样能算。
 - **后台任务不必轮询**：`bash_output` 支持 `wait:"exit"` 直接等到命令结束、`wait:"output"` 等到有新输出、`cursor` 只取上次之后的新字节。
 
 ### 内置 JavaScript（`js` 工具）
 
-- goja 执行，零外部依赖：算数、JSON 变换、字符串/正则、日期换算。
-- **只读文件系统**（`fs.readFile/readDir/stat/glob`）+ **同步 `fetch`**：出网受超时、单脚本 16 次请求、累计 8MB 预算约束；非 GET/HEAD 只在 `permissions=auto` 下放行（否则等于绕开 bash 那条确认路径）。
+- moejs 执行，零外部依赖：算数、JSON 变换、字符串/正则、日期换算。
+- **只读文件系统**（`fs.readFile/readDir/stat/glob`）+ **同步 `fetch`**：出网受超时、单脚本 16 次请求、累计 8MB 预算约束，JS 堆另有 64MB 上限（超限被中断，不会把进程吃到 OOM）；非 GET/HEAD 只在 `permissions=auto` 下放行（否则等于绕开 bash 那条确认路径）。
 - 最后一个表达式的值就是结果；`console.*` 输出会被收集并限流，不会刷爆上下文。
 - 边界也写清楚：逐字符 JS 循环比 Go 慢两个数量级（实测 0.84MB 文本 447ms vs ~1ms），大文本处理交给 `grep`/`read`。
 
 ### 上下文压缩在进程内完成
 
-- 底座是 [`billion-context/kernel`](https://github.com/ranxianglei/billion-context/tree/master/kernel)：goja 解释执行上游 JS，无 Node、无 cgo、可静态编译；tier 1/2/3 分块、`<acp>` 引用标签、BM25 检索都来自上游。
+- 底座是 [`billion-context/kernel`](https://github.com/ranxianglei/billion-context/tree/master/kernel)：moejs 解释执行上游 JS，无 Node、无 cgo、可静态编译；tier 1/2/3 分块、`<acp>` 引用标签、BM25 检索都来自上游。
 - 何时压、压哪一段由 kernel 的 nudge 给出，压缩事件实时上报；`context_check/apply/search/decompress` 让模型自己决定摘要与检索，而不是由外部脚本代办。
 
 ### 与 Pi 对齐，可直接顶替运行时
@@ -108,23 +108,23 @@ sess.Persist(ctx, store, "user-42")          // store: NewFileStore(dir) / NewMe
 ```bash
 task check          # 格式 + vet + 全量测试
 task test:race      # 竞态检测
-task verify:kernel  # 裸 goja 全链路验证
+task verify:kernel  # 全链路验证（内嵌 bundle 走一遍 Turn/Compress/Search，并打印与 Node 比对的 hash）
 ```
 
 同一 workload 下 `messagesHash` / `blockNoTimeHash` 与 Node **逐字节一致**（`6a8561416f02cde1` / `0cbd1741d253e587`）。
 
 ## 已知限制
 
-1. **中文分词精度依赖构建 tag**：goja 没有 `Intl.Segmenter`。`task build:full`（`-tags "segmenter ne"`，发布矩阵用它）默认走真词典 gse；轻量构建只有单字 + bigram 回退，召回够用但词级精度低于 Node 的 CLDR。`ne` 不能漏，否则 gse 自带的 31MB 词典会被链进来（20MB → 52MB）。只影响中文 BM25 召回，不影响压缩结果的正确性。
-2. **`processTurn` 比 Node 慢且随消息数超线性增长**（200 条约 68ms，800 条约 727ms；Node 8.8ms）：上游算法要求全量历史 + goja 解释执行 + JS↔Go 序列化。对策是把活跃消息控制在 200–300 条并及时压缩。
-3. goja 缺 `structuredClone` / `TextEncoder` / `queueMicrotask`（kernel 未使用）；async 只在脚本边界 drain。
+1. **中文分词精度依赖构建 tag**。引擎自带 `Intl.Segmenter`（UAX#29、无词典：汉字逐字成段），默认路径就用它。`task build:full`（`-tags "segmenter ne"`，发布矩阵用它）换成真词典 gse，中文 BM25 召回更准。`ne` 不能漏，否则 gse 自带的 31MB 词典会被链进来（20MB → 52MB）。只影响中文 BM25 召回，不影响压缩结果的正确性。
+2. **`processTurn` 仍随消息数超线性增长**（上游算法要求全量历史）：实测 200 条约 16ms、800 条约 64ms（moejs，同一台机器；换引擎前分别是 68ms / 727ms）。对策不变：把活跃消息控制在 200–300 条并及时压缩。
+3. **首次 `NewSession` 要 ~100ms**（编译 400KB bundle + 初始化；之后每个会话 ~1–3ms）。CLI 只在启动时付一次；长驻进程可按工作目录复用 `Kernel`。
 
 细节见 [docs/kernel.md](docs/kernel.md)。
 
 ## 目录
 
 ```
-internal/kernel/    goja 里的上下文引擎（Turn / ApplyCompression / Search / persist）
+internal/kernel/    moejs 里的上下文引擎（Turn / ApplyCompression / Search / persist）
 internal/agent/     Pi agent loop：entry 树会话、turn loop、压缩编排、事件
 internal/tools/     Go 版 Pi 工具集（bash 内置解释器、并发调度、路径与命令策略）
 internal/skills/    Agent Skills（.agents/skills）：发现、frontmatter 校验、prompt 注入
@@ -135,7 +135,7 @@ internal/mcp/       MCP 客户端（官方 go-sdk，只用 tools 子集）
 internal/web/       web_search / web_fetch 后端（duckduckgo/searxng/tavily/brave/exa）
 internal/proc/      跨平台子进程树回收（Unix 进程组 / Windows Job Object）
 cmd/acp-agent/      可执行程序（TUI / -p / --acp / 子代理自举）
-cmd/verify-kernel/  裸 goja 全链路验证
+cmd/verify-kernel/  全链路验证（内嵌 bundle + 与 Node 的 hash 比对）
 ```
 
 仓库里的 `.md` 只放 `docs/`：kernel · tools · agent（Pi 语义对照）· skills · acp · mcp · cli。

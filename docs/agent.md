@@ -45,6 +45,11 @@ agent_start → turn_start → message_start → message_update* → message_end
                                    session_before_compact → session_compact（需要时）
 ```
 
+网络中断重连时，`message_update*` 中间会插一条 `message_rewind`：表示这条消息
+已渲染的内容被整体丢弃（provider 正在重发同一个请求），消费者应擦掉它，之后会
+重新收到 `message_start` 与增量。它只在宿主声明了能撤销时出现
+（`Agent.SetStreamRewind(true)`，见 `cmd/acp-agent` 的终端界面）。
+
 事件在调用 goroutine 上同步分发，handler 必须自己保证非阻塞（要写 UI 就丢进 channel）。
 
 ## Provider
@@ -58,6 +63,9 @@ type Provider interface {
 - `Stream` 必须尊重 `ctx` 取消，返回的 `StopReason` 必须是终态（不能是 `pending`）。
 - 增量通过 `Sink` 上报（`Text`/`Thinking`/`ToolCall`），上层可据此渲染流式输出。
   传 `nil` sink 表示不需要流式。
+- `Sink` 可选实现 `Resetter`（`Reset()`）声明「能不能撤销已渲染的增量」。实现了，
+  `provider.Retry` 才会在已经吐过增量之后仍然重发（网络中断）；没实现就只能报错，
+  否则用户会看到两遍半截回复。`agent.ResetSink` 用来给任意 sink 补上这个能力。
 - `req.Purpose == agent.PurposeSummarize` 时是压缩请求：**不要携带工具**，
   并应关闭 prompt-cache write（这类一次性 prompt 基本不会被复用）。
 - `agent.ScriptedProvider` 用于测试与回放，`TestRun*` 全靠它做到确定性。

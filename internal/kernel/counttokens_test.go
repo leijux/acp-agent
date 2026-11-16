@@ -38,11 +38,11 @@ func TestCountTokensMatchesUpstream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		v, err := rt.vm.RunString(strings.Replace(expr, "%s", string(lit), 1))
+		v, err := rt.evalString(strings.Replace(expr, "%s", string(lit), 1))
 		if err != nil {
 			t.Fatalf("js countTokens(%q): %v", truncForTest(c, 30), err)
 		}
-		want := int(v.ToInteger())
+		want := int(v.AsNumber())
 		if got := CountTokens(c); got != want {
 			t.Errorf("CountTokens(%q) = %d, js = %d", truncForTest(c, 40), got, want)
 		}

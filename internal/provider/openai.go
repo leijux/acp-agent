@@ -110,7 +110,13 @@ func (p *OpenAI) Stream(ctx context.Context, req agent.Request, sink agent.Sink)
 
 	resp, err := p.cfg.HTTP.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("provider/openai: 请求失败: %w", err)
+		// Do 在重定向失败等场景会同时返回非 nil 的 resp（body 已可读），
+		// 不关就是连接泄漏。
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		// 连不上 / 握手失败 / 连接被重置：标成 TransportError 让 Retry 能重试。
+		return nil, &TransportError{Op: "provider/openai: 请求失败", Err: err}
 	}
 	defer resp.Body.Close()
 
@@ -120,7 +126,7 @@ func (p *OpenAI) Stream(ctx context.Context, req agent.Request, sink agent.Sink)
 			Provider:   "openai",
 			StatusCode: resp.StatusCode,
 			Message:    strings.TrimSpace(string(msg)),
-			Retryable:  resp.StatusCode == 429 || resp.StatusCode >= 500,
+			Retryable:  isRetryableStatus(resp.StatusCode),
 		}
 	}
 
@@ -468,12 +474,14 @@ func (a *streamAcc) consume(r io.Reader) error {
 		ev, err := sse.Next()
 		if err == io.EOF {
 			if !a.done {
-				return ErrSSEUnexpectedEOF
+				// 没有 [DONE] / finish_reason 就 EOF：连接被上游或网络切断了。
+				return &TransportError{Op: "provider/openai: 读取流", Err: ErrSSEUnexpectedEOF}
 			}
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("provider/openai: 读取流: %w", err)
+			// 读 body 出错只可能是传输层（连接重置、TLS 中断、gzip 截断等）。
+			return &TransportError{Op: "provider/openai: 读取流", Err: err}
 		}
 		data := strings.TrimSpace(ev.Data)
 		if data == "" {

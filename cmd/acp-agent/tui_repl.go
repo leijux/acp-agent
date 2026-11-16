@@ -71,6 +71,11 @@ func (a *app) tuiRepl(ctx context.Context, cont bool) error {
 		},
 	})
 	a.ui = ui
+	// 界面能重绘：允许 provider 在网络中断时重发已经吐过增量的请求。
+	// 重发前会收到 MessageRewindEvent，把屏上那半截擦掉重画，用户看到的是
+	// 「重来」而不是「重复」。退出时恢复，避免其它模式误用。
+	a.agent.SetStreamRewind(true)
+	defer a.agent.SetStreamRewind(false)
 	// 先取宽度再接管 out：t.width() 靠 out 是不是 *os.File 来判断能不能 ioctl。
 	if w := a.term.width(); w > 0 {
 		a.term.setCols(w)

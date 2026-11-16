@@ -118,6 +118,20 @@ func (t *terminal) resetMarkdown() {
 	}
 }
 
+// rewindStream 复位流式渲染状态（正文 markdown 缓冲、思考/正文标记）。
+//
+// 网络中断重连时用：已经吐出的增量和已经 flush 的行不动 —— 能真正擦掉块的是
+// TUI（a.ui.RewindStream），这里只保证重发的增量从干净状态重新渲染。
+func (t *terminal) rewindStream() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.md != nil {
+		t.md.Reset()
+	}
+	t.thinking = false
+	t.inDelta = false
+}
+
 // humanOut 返回「人读输出」该去的 writer：正常是 stdout，安静模式（-p /
 // --mode json，stdout 已经另有用途）改走 stderr。
 // 以前各处直接写 t.out，一个 web 配置错误就能把中文塞进事件流。
@@ -258,6 +272,20 @@ func (a *app) renderHandler() agent.EventHandler {
 				t.markdown().Write(e.Delta)
 				t.inDelta = true
 				t.mu.Unlock()
+			}
+
+		case agent.MessageStartEvent:
+			// 记下这条消息从哪个块开始：重连回滚只能截到此处，否则会连
+			// 上一条回复一起删掉。
+			if a.ui != nil {
+				a.ui.MarkStream()
+			}
+
+		case agent.MessageRewindEvent:
+			// 网络中断重连：把已经流式渲染的半截内容擦掉，等重发的新内容。
+			t.rewindStream()
+			if a.ui != nil {
+				a.ui.RewindStream()
 			}
 
 		case agent.ToolExecutionStartEvent:

@@ -7,15 +7,14 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
-// JSTool 在内置 JavaScript 引擎（goja）里执行脚本。
+// JSTool 在内置 JavaScript 引擎（moejs）里执行脚本。
 //
 // 用途：计算、JSON 变换、正则处理、日期换算这类「不值得起一个进程」的活；
 // 另外提供**只读**的 fs 桥（readFile/readDir/stat/exists/glob），
@@ -48,7 +47,7 @@ func (*JSTool) Description() string {
 		"网络请求用同步的 fetch(url, {method, headers, body|json, timeout, maxBytes})，" +
 		"返回 {status, ok, url, headers, text, json, size, truncated}（不是 Promise，不能 await；" +
 		"非 2xx 不抛错，看 ok/status）。非 GET/HEAD 请求需要 permissions=auto；" +
-		"没有 require；仅支持同步代码；超时会被中断。"
+		"没有 require；仅支持同步代码；超时会被中断；单脚本 JS 堆上限 64MB（超限也会被中断，要拆小任务）。"
 }
 
 func (*JSTool) Parameters() map[string]any {
@@ -72,6 +71,18 @@ const (
 	// jsLogCap 限制 console 累计输出：脚本里一个 for 循环打印十万行，
 	// 之前的实现会把它们全攒在内存里再截断（真正超时的脚本能吃掉几百 MB）。
 	jsLogCap = 1 << 20
+
+	// jsMemoryLimit 是单个脚本能留住的 JS 堆上限（字节）。
+	//
+	// 换引擎前完全没有内存约束：`const a=[];for(;;)a.push(new Array(1<<16).fill(0))`
+	// 会把整个进程吃到内核 OOM kill —— 连一条 error 都拿不到（工具层的 recover
+	// 救不了 OOM）。moejs 的 MemoryLimit 在分配越过阈值时先测量「真正留住的量」
+	// 再决定是否打断，所以「制造大量垃圾但只留一点」的脚本（逐行扫文件、反复
+	// 拼临时串）不受影响。
+	//
+	// 64MB 的取法：工具自身的输入预算（fs 16MB、fetch 8MB、console 1MB）都远小于它，
+	// 正常计算留足余量；同时能挡住 `new Array(1e9)` 这类一口气吃掉几个 GB 的写法。
+	jsMemoryLimit = 64 << 20
 )
 
 func (t *JSTool) Execute(ctx context.Context, a Args) (Result, error) {
@@ -87,54 +98,52 @@ func (t *JSTool) Execute(ctx context.Context, a Args) (Result, error) {
 		timeout = jsMaxTimeout
 	}
 
-	vm := goja.New()
+	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: jsMemoryLimit})
 	var logs strings.Builder
 	sink := &consoleSink{out: &logs, max: jsLogCap}
-	if err := installConsole(vm, sink); err != nil {
+	if err := installConsole(rt, sink); err != nil {
 		return ErrorResult("初始化 console 失败: %v", err), nil
 	}
-	if err := installFS(vm, t.Policy); err != nil {
+	if err := installFS(rt, t.Policy); err != nil {
 		return ErrorResult("初始化 fs 失败: %v", err), nil
 	}
-	if err := installCrypto(vm); err != nil {
+	if err := installCrypto(rt); err != nil {
 		return ErrorResult("初始化 crypto 失败: %v", err), nil
 	}
 	deadline := time.Duration(timeout) * time.Millisecond
-	// fetch 需要知道脚本的截止时间：vm.Interrupt 打不断阻塞在 socket 上的 Go
+	// fetch 需要知道脚本的截止时间：Interrupt 打不断阻塞在 socket 上的 Go
 	// 调用，单请求超时只能由 http 层按「剩余时间」兜住（见 js_http.go）。
 	scriptCtx, cancelScript := context.WithTimeout(ctx, deadline)
 	defer cancelScript()
-	if err := installFetch(vm, t.Policy, &jsHTTP{policy: t.Policy, ctx: scriptCtx}); err != nil {
+	if err := installFetch(rt, t.Policy, &jsHTTP{policy: t.Policy, ctx: scriptCtx}); err != nil {
 		return ErrorResult("初始化 fetch 失败: %v", err), nil
 	}
-	// args 必须先变成真正的 JS 值：直接 Set Go map/slice 时，goja 每次访问
-	// 子属性都会包一层新的 Go 值，`args.a.push(x)` 的修改会丢掉
-	// （args.a === args.a 会是 false）。走一趟 JSON.parse 之后就正常了。
+	// args 必须先变成真正的 JS 值：moejs 的 FromGo 给的是**惰性**的 Go 容器
+	// 视图（JS 写入只改 JS 对象，Go 侧不动），`args.a.push(x)` 这类原地修改
+	// 会在后续读取时对不上。走一趟 JSON.parse 之后就是普通的 JS 对象/数组。
 	if raw, ok := a["args"].(map[string]any); ok && len(raw) > 0 {
 		if encoded, err := json.Marshal(raw); err == nil {
-			if v, err := jsonParse(vm, string(encoded)); err == nil {
-				_ = vm.Set("args", v)
-			} else {
-				_ = vm.Set("args", raw)
+			if v, err := rt.ParseJSONString(string(encoded)); err == nil {
+				_ = rt.SetGlobal("args", v)
 			}
 		}
 	}
 
-	// 超时与取消都通过 vm.Interrupt 打断解释器（goja 支持跨 goroutine 调用）。
-	timer := time.AfterFunc(deadline, func() { vm.Interrupt("timeout") })
+	// 超时与取消都通过 Interrupt 打断解释器（moejs 支持跨 goroutine 调用）。
+	timer := time.AfterFunc(deadline, func() { rt.Interrupt("timeout") })
 	defer timer.Stop()
 	stopWatch := make(chan struct{})
 	defer close(stopWatch)
 	go func() {
 		select {
 		case <-ctx.Done():
-			vm.Interrupt("canceled")
+			rt.Interrupt("canceled")
 		case <-stopWatch:
 		}
 	}()
 
 	start := time.Now()
-	value, runErr := vm.RunString(script)
+	value, runErr := runJSScript(rt, "js", script)
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	out := strings.TrimRight(logs.String(), "\n")
@@ -147,8 +156,8 @@ func (t *JSTool) Execute(ctx context.Context, a Args) (Result, error) {
 		return ErrorResult("%s", summary), nil
 	}
 	// 真正的 undefined/null 不打印（脚本返回字符串 "undefined" 时要照常打印）。
-	if !goja.IsUndefined(value) && !goja.IsNull(value) {
-		if res := jsValueString(value); res != "" {
+	if !value.IsNullish() {
+		if res := jsValueString(rt, value); res != "" {
 			if out != "" {
 				out += "\n"
 			}
@@ -166,21 +175,16 @@ func (t *JSTool) Execute(ctx context.Context, a Args) (Result, error) {
 	return TextResult("%s", text), nil
 }
 
-// jsonParse 用引擎自带的 JSON.parse 把字符串变成原生 JS 值。
+// runJSScript 编译并执行一段经典脚本，返回它的完成值。
 //
-// 为什么绕这一圈：vm.Set("args", map[string]any{...}) 会把 Go 容器直接交给
-// goja 包装，子属性每次读取都重新包装一次，写回不到原容器
-// （args.a.push(x) 静默丢失）。JSON.parse 的结果是普通的 JS 对象/数组。
-func jsonParse(vm *goja.Runtime, s string) (goja.Value, error) {
-	jsonObj := vm.Get("JSON")
-	if jsonObj == nil || goja.IsUndefined(jsonObj) || goja.IsNull(jsonObj) {
-		return nil, errors.New("引擎里没有 JSON")
+// 每次都重新编译：脚本来自模型、一次性使用，没有缓存价值；编译失败是
+// *moejs.SyntaxError，和运行期错误走同一套错误文案。
+func runJSScript(rt *moejs.Runtime, name, src string) (moejs.Value, error) {
+	s, err := moejs.CompileScript(name, src)
+	if err != nil {
+		return moejs.Undefined(), err
 	}
-	fn, ok := goja.AssertFunction(jsonObj.ToObject(vm).Get("parse"))
-	if !ok {
-		return nil, errors.New("JSON.parse 不可调用")
-	}
-	return fn(goja.Undefined(), vm.ToValue(s))
+	return rt.RunScript(s)
 }
 
 // consoleSink 决定 console.* 各级别写到哪，并限制累计输出量。
@@ -213,56 +217,46 @@ func (s *consoleSink) write(prefix, line string, toErr bool) {
 }
 
 // installConsole 注入 console.*。
-func installConsole(vm *goja.Runtime, sink *consoleSink) error {
-	console := vm.NewObject()
-	log := func(prefix string, toErr bool) func(goja.FunctionCall) goja.Value {
-		return func(call goja.FunctionCall) goja.Value {
-			parts := make([]string, 0, len(call.Arguments))
-			for _, arg := range call.Arguments {
-				parts = append(parts, jsValueString(arg))
+func installConsole(rt *moejs.Runtime, sink *consoleSink) error {
+	log := func(prefix string, toErr bool) moejs.NativeFunc {
+		return func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			parts := make([]string, 0, len(args))
+			for _, arg := range args {
+				parts = append(parts, jsValueString(rt, arg))
 			}
 			sink.write(prefix, strings.Join(parts, " ")+"\n", toErr)
-			return goja.Undefined()
+			return moejs.Undefined(), nil
 		}
 	}
-	methods := map[string]func(goja.FunctionCall) goja.Value{
+	return rt.SetGlobal("console", map[string]any{
 		"log":   log("", false),
 		"info":  log("", false),
 		"debug": log("[debug] ", false),
 		"warn":  log("[warn] ", true),
 		"error": log("[error] ", true),
 		"table": log("", false),
-	}
-	names := make([]string, 0, len(methods))
-	for name := range methods {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := console.Set(name, methods[name]); err != nil {
-			return err
-		}
-	}
-	return vm.Set("console", console)
+	})
 }
 
-// jsValueString 把 goja 值转成稳定可读的字符串。
-func jsValueString(v goja.Value) string {
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+// jsValueString 把引擎值转成稳定可读的字符串。
+//
+// 顺序有讲究：字符串原样（不套引号），其余先试 JSON.stringify（对象/数组/
+// 数字/布尔都得到模型习惯的形态），失败（循环引用、BigInt、函数）才退到
+// 有界渲染 —— 见 safeString 的注释，这里绝不能直接 fmt.Sprint。
+func jsValueString(rt *moejs.Runtime, v moejs.Value) string {
+	if v.IsNullish() {
 		return "undefined"
 	}
-	exported := v.Export()
-	if s, ok := exported.(string); ok {
-		return s
+	if v.IsString() {
+		return v.String()
 	}
-	if b, err := json.Marshal(exported); err == nil {
-		return string(b)
+	if out, err := rt.AppendJSON(nil, v); err == nil && len(out) > 0 && string(out) != "undefined" {
+		return string(out)
 	}
-	// JSON 序列化失败绝大多数是循环引用：goja 的 Export 会为自引用对象
-	// 生成真正的循环结构（map 里放 map），此时 fmt.Sprint / %v 会无限递归
-	// 直到 goroutine 栈溢出（fatal error: stack overflow，无法 recover）。
-	// 必须用带深度、条目数与环检测的有界渲染。
-	return safeString(exported)
+	if x, err := rt.ToGo(v); err == nil {
+		return safeString(x)
+	}
+	return v.String()
 }
 
 const (
@@ -372,11 +366,11 @@ func safeWrite(b *strings.Builder, rv reflect.Value, depth int, seen map[uintptr
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		b.WriteString(strconv.FormatUint(rv.Uint(), 10))
 	case reflect.Float32, reflect.Float64:
-		b.WriteString(strconv.FormatFloat(rv.Float(), 'g', -1, 64))
+		b.WriteString(strconv.FormatFloat(rv.Float(), 'f', -1, 64))
 	case reflect.Func:
 		b.WriteString("[function]")
 	default:
-		// goja 的 Export 只会产出 map/slice/基础类型；其余类型只报类型名，
+		// ToGo 只会产出 map/slice/基础类型；其余类型只报类型名，
 		// 不做递归 —— 递归就是栈溢出的来源。
 		b.WriteString("<")
 		b.WriteString(rv.Type().String())
@@ -386,34 +380,24 @@ func safeWrite(b *strings.Builder, rv reflect.Value, depth int, seen map[uintptr
 
 // jsErrorText 把脚本错误整理成模型能看懂的一段文本。
 func jsErrorText(err error, timeoutMs int64) string {
-	if _, ok := err.(*goja.InterruptedError); ok {
-		msg := fmt.Sprintf("脚本被中断（超时 %dms 或请求已取消）：检查是否有死循环", timeoutMs)
-		if ie, ok := err.(*goja.InterruptedError); ok {
-			if reason, ok := ie.Value().(string); ok && reason == "canceled" {
-				msg = "脚本执行被取消"
-			}
-		}
-		return msg
+	// 内存超限在引擎里也是一次 interrupt，必须先区分开：两者的处置完全不同
+	// （超时要查死循环，超限要拆小任务）。
+	var mle *moejs.MemoryLimitError
+	if errors.As(err, &mle) {
+		return fmt.Sprintf(
+			"脚本内存超限（上限 %dMB，本次已占用 %.1fMB）：把任务拆成多步，或者先在宿主侧过滤/截断数据再传进 args",
+			mle.Limit>>20, float64(mle.Live+mle.Allocated)/(1<<20))
 	}
-	var ex *goja.Exception
-	if ok := asGojaException(err, &ex); ok {
+	var ie *moejs.InterruptedError
+	if errors.As(err, &ie) {
+		if reason, ok := ie.Value.(string); ok && reason == "canceled" {
+			return "脚本执行被取消"
+		}
+		return fmt.Sprintf("脚本被中断（超时 %dms 或请求已取消）：检查是否有死循环", timeoutMs)
+	}
+	var ex *moejs.Exception
+	if errors.As(err, &ex) {
 		return "JavaScript 错误: " + ex.String()
 	}
 	return "JavaScript 错误: " + err.Error()
-}
-
-// asGojaException 是 errors.As 的薄封装（避免在热路径重复分配包装）。
-func asGojaException(err error, target **goja.Exception) bool {
-	for err != nil {
-		if ex, ok := err.(*goja.Exception); ok {
-			*target = ex
-			return true
-		}
-		u, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = u.Unwrap()
-	}
-	return false
 }

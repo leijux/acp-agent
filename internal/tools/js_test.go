@@ -125,7 +125,7 @@ func TestJSTool_ConcurrencyAndMutation(t *testing.T) {
 }
 
 // TestJSTool_CircularReference 回归测试：脚本返回（或 console.log）自引用对象时
-// 不能让进程栈溢出。goja 的 Export 会把自引用对象转成真正的循环 map，
+// 不能让进程栈溢出。导出成 Go 值后是真正的循环 map，
 // 旧实现 fallback 到 fmt.Sprint 时无限递归，触发不可 recover 的
 // "fatal error: stack overflow"（整个进程死亡，不是普通 panic）。
 func TestJSTool_CircularReference(t *testing.T) {

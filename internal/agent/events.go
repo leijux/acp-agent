@@ -56,6 +56,18 @@ type MessageUpdateEvent struct {
 
 func (MessageUpdateEvent) EventName() string { return "message_update" }
 
+// MessageRewindEvent 表示一条正在流式输出的消息被整体回滚（网络中断后重连）。
+//
+// 消费者应丢弃自对应 MessageStartEvent 以来渲染的内容：之后会重新收到
+// MessageStartEvent 与增量。只有宿主声明了能撤销（Agent.SetStreamRewind）
+// 才会出现这个事件。
+type MessageRewindEvent struct {
+	// Message 是回滚前的 partial 消息（内容已清空，仅用于定位）。
+	Message Message
+}
+
+func (MessageRewindEvent) EventName() string { return "message_rewind" }
+
 // MessageEndEvent 一条消息完成。流的 assistant 消息在此时才拥有终态 stopReason。
 type MessageEndEvent struct {
 	Message Message

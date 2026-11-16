@@ -100,11 +100,36 @@ func TestPolicyReadOnly(t *testing.T) {
 
 func TestPolicyCheckCommand(t *testing.T) {
 	p := testPolicy(t)
-	if err := p.CheckCommand("rm -rf /"); err == nil {
-		t.Fatal("危险命令未被拦截")
+	// 该拦的：目标是根目录本身（含各种等价写法）
+	for _, cmd := range []string{
+		"rm -rf /",
+		"rm -fr /",
+		"sudo rm -rf /*",
+		"rm -rf // ",
+		"rm -rf --no-preserve-root /",
+		"cd /tmp && rm -rf /",
+		"chmod -R 777 /",
+		"mkfs.ext4 /dev/sda1",
+		"dd if=/dev/zero of=/dev/sda",
+		"shutdown -h now",
+	} {
+		if err := p.CheckCommand(cmd); err == nil {
+			t.Errorf("危险命令未被拦截: %q", cmd)
+		}
 	}
-	if err := p.CheckCommand("ls -la"); err != nil {
-		t.Fatalf("正常命令被拦截: %v", err)
+	// 不该拦的：根目录只是更长路径的前缀
+	for _, cmd := range []string{
+		"ls -la",
+		"rm -rf /tmp/hold",
+		"rm -rf /home/me/build",
+		"rm -rf '/tmp/hold'",
+		"rm -rf ./build",
+		"chmod -R 777 /tmp/cache",
+		"grep -r reboot internal/",
+	} {
+		if err := p.CheckCommand(cmd); err != nil {
+			t.Errorf("正常命令被误拦: %q: %v", cmd, err)
+		}
 	}
 }
 

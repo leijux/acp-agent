@@ -24,7 +24,7 @@ import (
 //   - 子代理崩了不会带走主进程
 //   - 同一套协议可以换成任意第三方 ACP agent（改 Command 即可）
 //
-// 代价是每次 delegate 要起一个进程（kernel 的 goja VM 初始化 ~35ms），
+// 代价是每次 delegate 要起一个进程（kernel 首次 NewSession 要编译 400KB bundle，约 100ms；之后 ~1–3ms），
 // 相对一次 LLM 往返可以忽略。
 
 // SubagentConfig 描述如何启动子代理。为零值时用「自身 + --acp」。

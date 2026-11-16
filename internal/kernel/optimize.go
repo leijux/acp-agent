@@ -12,8 +12,8 @@ import "sort"
 //	  return cjkCount + Math.ceil((text.length - cjkCount) / 4);
 //	}
 //
-// 这条正则对每条消息、每个压缩块都会跑一次，而 goja 的 String.prototype.match
-// 走的是 regexp2 回溯引擎 —— pprof 显示它占 Turn 的 78% 分配、33% CPU。
+// 这条正则对每条消息、每个压缩块都会跑一次，而 goja 时代它走的是 regexp2
+// 回溯引擎 —— pprof 显示占 Turn 的 78% 分配、33% CPU。
 // kernel 允许从宿主注入 countTokens，这里用 Go 精确复刻同一算法，
 // 与 JS 版逐字节等价，但快两个数量级。
 

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
 // 增量 / 轻量路径（②）。
@@ -16,7 +16,7 @@ import (
 //   - 另外 refs 还要独立做一次 JSON 编解码
 //
 // 对「每轮只想知道要不要压缩」的调用方，输出侧的两趟 JSON 是完全浪费的。
-// TurnMeta 只回 nudge + refs（refs 直接从 goja 读，不过 JSON），
+// TurnMeta 只回 nudge + refs（refs 直接从引擎对象读，不过 JSON），
 // 需要消息视图时再显式调 View()。
 
 // MetaResult 是 TurnMeta 的结果。
@@ -61,44 +61,43 @@ func (s *Session) TurnMetaSource(messages []Message, tokenCount int, source Toke
 		tokenCount = EstimateTokens(messages)
 	}
 
-	vm := s.rt.vm
-	in := vm.NewObject()
-	_ = in.Set("messages", s.messagesToJS(messages))
-	_ = in.Set("state", s.state)
-	_ = in.Set("config", s.cfg)
-	_ = in.Set("tokenCount", tokenCount)
+	in := map[string]any{
+		"messages":   s.messagesToJS(messages),
+		"state":      s.state,
+		"config":     s.cfg,
+		"tokenCount": tokenCount,
+	}
 	if source != TokenCountUnspecified {
-		_ = in.Set("tokenCountSource", string(source))
+		in["tokenCountSource"] = string(source)
 	}
 
-	out, err := s.rt.coreCall("processTurn", in)
+	out, err := s.rt.coreCall("processTurn", s.rt.val(in))
 	if err != nil {
 		return nil, fmt.Errorf("kernel: processTurn: %w", err)
 	}
-	obj := out.ToObject(vm)
 
-	if st := obj.Get("state"); isValue(st) {
+	if st := s.rt.prop(out, "state"); isValue(st) {
 		s.state = st
 	}
-	if mv := obj.Get("messages"); isValue(mv) {
+	if mv := s.rt.prop(out, "messages"); isValue(mv) {
 		s.last = mv
 	}
 
 	res := &MetaResult{}
-	if nj, err := s.rt.toJSON(obj.Get("nudge")); err == nil && len(nj) > 0 && string(nj) != "null" {
+	if nj, err := s.rt.toJSON(s.rt.prop(out, "nudge")); err == nil && len(nj) > 0 && string(nj) != "null" {
 		res.NudgeJSON = nj
 		var n Nudge
 		if err := json.Unmarshal(nj, &n); err == nil {
 			res.Nudge = &n
 		}
 	}
-	if te, err := s.rt.toJSON(obj.Get("terminalEscape")); err == nil && len(te) > 0 && string(te) != "null" {
+	if te, err := s.rt.toJSON(s.rt.prop(out, "terminalEscape")); err == nil && len(te) > 0 && string(te) != "null" {
 		res.TerminalEscape = te
 	}
-	if v := obj.Get("truncationSkipped"); isValue(v) {
+	if v := s.rt.prop(out, "truncationSkipped"); isValue(v) {
 		res.TruncationSkipped = v.String()
 	}
-	res.RefsByRaw = readStringMap(s.state.ToObject(vm).Get("messageRefs"), "byRaw")
+	res.RefsByRaw = readStringMap(s.rt, s.rt.prop(s.state, "messageRefs"), "byRaw")
 	return res, nil
 }
 
@@ -133,8 +132,8 @@ func (s *Session) View() ([]Message, error) {
 	return msgs, nil
 }
 
-func isValue(v goja.Value) bool {
-	return v != nil && !goja.IsUndefined(v) && !goja.IsNull(v)
+func isValue(v moejs.Value) bool {
+	return !v.IsNullish()
 }
 
 // BatchTurn 是批量提交的一项。

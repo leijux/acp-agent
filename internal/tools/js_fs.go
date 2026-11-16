@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
 const (
@@ -41,109 +41,128 @@ type jsFS struct {
 	bytes  int64
 }
 
-// installFS 注入全局 fs 对象（只读）。
-func installFS(vm *goja.Runtime, p Policy) error {
+// newJSFS 按 Policy 建一次脚本的文件系统上下文。
+func newJSFS(p Policy) *jsFS {
 	if p.Root == "" {
 		p = DefaultPolicy()
 	}
-	fs := &jsFS{policy: p}
-	obj := vm.NewObject()
-
-	methods := map[string]func(goja.FunctionCall) goja.Value{
-		"readFile":       fs.readFile(vm),
-		"readFileBytes":  fs.readFileBytes(vm),
-		"readFileBase64": fs.readFileBase64(vm),
-		"readDir":        fs.readDir(vm),
-		"stat":           fs.stat(vm),
-		"exists":         fs.exists(vm),
-		"glob":           fs.glob(vm),
-		"writeFile":      fs.writeFile(vm),
-	}
-	names := make([]string, 0, len(methods))
-	for name := range methods {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := obj.Set(name, methods[name]); err != nil {
-			return err
-		}
-	}
-	// fs.root 让脚本能自己拼绝对路径（日志/输出里也更可读）。
-	if err := obj.Set("root", p.Root); err != nil {
-		return err
-	}
-	return vm.Set("fs", obj)
+	return &jsFS{policy: p}
 }
 
-// resolve 解析路径并做越界检查；失败时直接抛 JS 异常（脚本可以 try/catch）。
-func (fs *jsFS) resolve(vm *goja.Runtime, path string) string {
-	abs, err := fs.policy.Resolve(path)
-	if err != nil {
-		throwJS(vm, err.Error())
-	}
-	return abs
+// installFS 注入全局 fs 对象（只读）。
+func installFS(rt *moejs.Runtime, p Policy) error {
+	return rt.SetGlobal("fs", newJSFS(p).methods(rt))
 }
 
-// charge 记账并检查本次执行的累计预算。
-func (fs *jsFS) charge(vm *goja.Runtime, n int64) {
-	fs.files++
-	fs.bytes += n
-	if fs.files > jsFSMaxFiles || fs.bytes > jsFSMaxBytes {
-		throwJS(vm, fmt.Sprintf(
-			"本次脚本读取超过预算（%d 个文件 / %d 字节），请缩小范围或分步执行",
-			jsFSMaxFiles, jsFSMaxBytes))
-	}
-}
-
-func (fs *jsFS) readRaw(vm *goja.Runtime, op, path string) []byte {
-	abs := fs.resolve(vm, path)
-	info, err := os.Stat(abs)
-	if err != nil {
-		throwJS(vm, fmt.Sprintf("%s: %s: %s", op, path, errText(err)))
-	}
-	if info.IsDir() {
-		throwJS(vm, fmt.Sprintf("%s: %s: 是目录（用 readDir）", op, path))
-	}
-	limit := fs.policy.MaxReadBytes
-	if limit <= 0 {
-		limit = jsFSDefaultReadLimit
-	}
-	if info.Size() > limit {
-		throwJS(vm, fmt.Sprintf(
-			"%s: %s 大小 %d 字节，超过上限 %d（大文件请先用 read 工具分页）",
-			op, path, info.Size(), limit))
-	}
-	fs.charge(vm, info.Size())
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		throwJS(vm, fmt.Sprintf("%s: %s: %s", op, path, errText(err)))
-	}
-	return data
-}
-
-func (fs *jsFS) readFile(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		return vm.ToValue(string(fs.readRaw(vm, "readFile", jsArg(call, 0))))
-	}
-}
-
-// readFileBytes 返回 ArrayBuffer：脚本用 `new Uint8Array(b)` 就能按字节处理。
+// methods 构造 fs 对象的方法表。
 //
-// ArrayBuffer 而不是 Uint8Array：交给 JS 自己选视图（Uint8Array/DataView），
-// 也方便直接喂给 crypto.sha256。
-func (fs *jsFS) readFileBytes(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		data := fs.readRaw(vm, "readFileBytes", jsArg(call, 0))
-		return vm.ToValue(vm.NewArrayBuffer(data))
+// 单独抽出来是给内建命令 `goja` 用的：它要在同一个对象上多挂一个
+// readStdin()，而 moejs 没有「建好对象后再加一个属性」的顶层 API。
+func (fs *jsFS) methods(rt *moejs.Runtime) map[string]any {
+	return map[string]any{
+		"root":           fs.policy.Root,
+		"readFile":       fs.handler(rt, "readFile"),
+		"readFileBytes":  fs.handler(rt, "readFileBytes"),
+		"readFileBase64": fs.handler(rt, "readFileBase64"),
+		"readDir":        fs.handler(rt, "readDir"),
+		"stat":           fs.handler(rt, "stat"),
+		"exists":         fs.handler(rt, "exists"),
+		"glob":           fs.handler(rt, "glob"),
+		"writeFile":      fs.handler(rt, "writeFile"),
 	}
 }
 
-// readFileBase64 返回 base64 字符串：只想知道大小/校验值、或要把内容嵌进文本时用。
-func (fs *jsFS) readFileBase64(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		data := fs.readRaw(vm, "readFileBase64", jsArg(call, 0))
-		return vm.ToValue(base64.StdEncoding.EncodeToString(data))
+// handler 按名字分派一个 fs 方法。
+//
+// 用一张 switch 而不是每个方法各自建闭包：错误现在走返回值（moejs 的宿主
+// 函数返回 error 就是抛异常），返回值则要经过 FromGo/ParseJSON 转换，集中
+// 在一处好核对。
+func (fs *jsFS) handler(rt *moejs.Runtime, name string) moejs.NativeFunc {
+	return func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+		switch name {
+		case "readFile":
+			data, err := fs.readRaw(name, jsArg(args, 0))
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			return moejs.String(string(data)), nil
+
+		case "readFileBytes":
+			// ArrayBuffer 而不是 Uint8Array：交给 JS 自己选视图
+			// （Uint8Array/DataView），也方便直接喂给 crypto.sha256。
+			data, err := fs.readRaw(name, jsArg(args, 0))
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			return rt.FromGo(data)
+
+		case "readFileBase64":
+			data, err := fs.readRaw(name, jsArg(args, 0))
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			return moejs.String(base64.StdEncoding.EncodeToString(data)), nil
+
+		case "writeFile":
+			return fs.writeFile(jsArg(args, 0), jsArg(args, 1))
+
+		case "readDir":
+			path := jsArg(args, 0)
+			if strings.TrimSpace(path) == "" {
+				path = "."
+			}
+			abs, err := fs.resolve(path)
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			entries, err := os.ReadDir(abs)
+			if err != nil {
+				return moejs.Undefined(), throwErr("readDir: %s: %s", path, errText(err))
+			}
+			if err := fs.charge(0); err != nil {
+				return moejs.Undefined(), err
+			}
+			out := make([]string, 0, len(entries))
+			for _, e := range entries {
+				item := e.Name()
+				if e.IsDir() {
+					item += "/" // 和 ls 工具保持一致，目录带斜杠
+				}
+				out = append(out, item)
+			}
+			return rt.FromGo(out)
+
+		case "stat":
+			path := jsArg(args, 0)
+			abs, err := fs.resolve(path)
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			info, err := os.Stat(abs)
+			if err != nil {
+				return moejs.Undefined(), throwErr("stat: %s: %s", path, errText(err))
+			}
+			return rt.FromGo(map[string]any{
+				"path":    fs.policy.Rel(abs),
+				"size":    info.Size(),
+				"isDir":   info.IsDir(),
+				"mode":    info.Mode().String(),
+				"mtimeMs": info.ModTime().UnixMilli(),
+				"mtime":   info.ModTime().Format(time.RFC3339),
+			})
+
+		case "exists":
+			abs, err := fs.policy.Resolve(jsArg(args, 0))
+			if err != nil {
+				return moejs.Bool(false), nil // 越界也算「不存在」，不抛错
+			}
+			_, statErr := os.Stat(abs)
+			return moejs.Bool(statErr == nil), nil
+
+		case "glob":
+			return fs.glob(rt, jsArg(args, 0))
+		}
+		return moejs.Undefined(), throwErr("fs: 未知方法 %q", name)
 	}
 }
 
@@ -151,117 +170,113 @@ func (fs *jsFS) readFileBase64(vm *goja.Runtime) func(goja.FunctionCall) goja.Va
 //
 // 只在 Policy.AllowScriptWrite 打开时可用，且路径同样受 Root 约束；写盘复用
 // write 工具的 LockFile，所以与并发的 write/edit 不会互相踩。
-func (fs *jsFS) writeFile(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		if fs.policy.ReadOnly {
-			throwJS(vm, "当前策略为只读，禁止写文件")
-		}
-		if !fs.policy.AllowScriptWrite {
-			throwJS(vm, "fs.writeFile 需要 permissions=auto；在 ask 模式下请用 write/edit 工具"+
-				"（那条路有确认与 diff 审计）")
-		}
-		abs := fs.resolve(vm, jsArg(call, 0))
-		content := jsArg(call, 1)
-		unlock := LockFile(abs)
-		defer unlock()
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			throwJS(vm, fmt.Sprintf("创建目录失败: %v", err))
-		}
-		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
-			throwJS(vm, fmt.Sprintf("写入失败: %v", err))
-		}
-		return vm.ToValue(len(content))
+func (fs *jsFS) writeFile(path, content string) (moejs.Value, error) {
+	if fs.policy.ReadOnly {
+		return moejs.Undefined(), throwErr("当前策略为只读，禁止写文件")
 	}
+	if !fs.policy.AllowScriptWrite {
+		return moejs.Undefined(), throwErr("fs.writeFile 需要 permissions=auto；在 ask 模式下请用 write/edit 工具" +
+			"（那条路有确认与 diff 审计）")
+	}
+	abs, err := fs.resolve(path)
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	unlock := LockFile(abs)
+	defer unlock()
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return moejs.Undefined(), throwErr("创建目录失败: %v", err)
+	}
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		return moejs.Undefined(), throwErr("写入失败: %v", err)
+	}
+	return moejs.Int(int64(len(content))), nil
 }
 
-func (fs *jsFS) readDir(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		path := jsArg(call, 0)
-		if strings.TrimSpace(path) == "" {
-			path = "."
-		}
-		abs := fs.resolve(vm, path)
-		entries, err := os.ReadDir(abs)
-		if err != nil {
-			throwJS(vm, fmt.Sprintf("readDir: %s: %s", path, errText(err)))
-		}
-		fs.charge(vm, 0)
-		out := make([]any, 0, len(entries))
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() {
-				name += "/" // 和 ls 工具保持一致，目录带斜杠
-			}
-			out = append(out, name)
-		}
-		return vm.ToValue(out)
+func (fs *jsFS) glob(rt *moejs.Runtime, pattern string) (moejs.Value, error) {
+	if pattern == "" {
+		return moejs.Undefined(), throwErr("glob: 缺少 pattern")
 	}
+	if filepath.IsAbs(pattern) {
+		return moejs.Undefined(), throwErr("glob: pattern %q 不能是绝对路径（相对 fs.root）", pattern)
+	}
+	// 先挡住明显的越界；符号链接逃逸由下面的 Resolve 兜住。
+	pat := filepath.ToSlash(pattern)
+	if strings.Contains(pat, "..") {
+		return moejs.Undefined(), throwErr("glob: pattern %q 不能包含 ..", pattern)
+	}
+	matches, err := fs.globMatches(pat)
+	if err != nil {
+		return moejs.Undefined(), throwErr("glob: %s", err)
+	}
+	sort.Strings(matches)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if len(out) >= jsFSMaxGlob {
+			break
+		}
+		// 校验符号链接没有指到 root 外；越界的静默跳过。
+		if _, err := fs.policy.Resolve(m); err != nil {
+			continue
+		}
+		out = append(out, filepath.ToSlash(fs.policy.Rel(m)))
+	}
+	if err := fs.charge(0); err != nil {
+		return moejs.Undefined(), err
+	}
+	return rt.FromGo(out)
 }
 
-func (fs *jsFS) stat(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		path := jsArg(call, 0)
-		abs := fs.resolve(vm, path)
-		info, err := os.Stat(abs)
-		if err != nil {
-			throwJS(vm, fmt.Sprintf("stat: %s: %s", path, errText(err)))
-		}
-		return vm.ToValue(map[string]any{
-			"path":    fs.policy.Rel(abs),
-			"size":    info.Size(),
-			"isDir":   info.IsDir(),
-			"mode":    info.Mode().String(),
-			"mtimeMs": info.ModTime().UnixMilli(),
-			"mtime":   info.ModTime().Format(time.RFC3339),
-		})
+// resolve 解析路径并做越界检查；失败时作为 JS 异常抛出（脚本可以 try/catch）。
+func (fs *jsFS) resolve(path string) (string, error) {
+	abs, err := fs.policy.Resolve(path)
+	if err != nil {
+		return "", &moejs.Exception{Value: moejs.String(err.Error())}
 	}
+	return abs, nil
 }
 
-func (fs *jsFS) exists(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		path := jsArg(call, 0)
-		abs, err := fs.policy.Resolve(path)
-		if err != nil {
-			return vm.ToValue(false) // 越界也算「不存在」，不抛错
-		}
-		_, statErr := os.Stat(abs)
-		return vm.ToValue(statErr == nil)
+// charge 记账并检查本次执行的累计预算。
+func (fs *jsFS) charge(n int64) error {
+	fs.files++
+	fs.bytes += n
+	if fs.files > jsFSMaxFiles || fs.bytes > jsFSMaxBytes {
+		return throwErr(
+			"本次脚本读取超过预算（%d 个文件 / %d 字节），请缩小范围或分步执行",
+			jsFSMaxFiles, jsFSMaxBytes)
 	}
+	return nil
 }
 
-func (fs *jsFS) glob(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
-	return func(call goja.FunctionCall) goja.Value {
-		pattern := jsArg(call, 0)
-		if pattern == "" {
-			throwJS(vm, "glob: 缺少 pattern")
-		}
-		if filepath.IsAbs(pattern) {
-			throwJS(vm, fmt.Sprintf("glob: pattern %q 不能是绝对路径（相对 fs.root）", pattern))
-		}
-		// 先挡住明显的越界；符号链接逃逸由下面的 Resolve 兜住。
-		pat := filepath.ToSlash(pattern)
-		if strings.Contains(pat, "..") {
-			throwJS(vm, fmt.Sprintf("glob: pattern %q 不能包含 ..", pattern))
-		}
-		matches, err := fs.globMatches(pat)
-		if err != nil {
-			throwJS(vm, fmt.Sprintf("glob: %s", err))
-		}
-		sort.Strings(matches)
-		out := make([]any, 0, len(matches))
-		for _, m := range matches {
-			if len(out) >= jsFSMaxGlob {
-				break
-			}
-			// 校验符号链接没有指到 root 外；越界的静默跳过。
-			if _, err := fs.policy.Resolve(m); err != nil {
-				continue
-			}
-			out = append(out, filepath.ToSlash(fs.policy.Rel(m)))
-		}
-		fs.charge(vm, 0)
-		return vm.ToValue(out)
+func (fs *jsFS) readRaw(op, path string) ([]byte, error) {
+	abs, err := fs.resolve(path)
+	if err != nil {
+		return nil, err
 	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, throwErr("%s: %s: %s", op, path, errText(err))
+	}
+	if info.IsDir() {
+		return nil, throwErr("%s: %s: 是目录（用 readDir）", op, path)
+	}
+	limit := fs.policy.MaxReadBytes
+	if limit <= 0 {
+		limit = jsFSDefaultReadLimit
+	}
+	if info.Size() > limit {
+		return nil, throwErr(
+			"%s: %s 大小 %d 字节，超过上限 %d（大文件请先用 read 工具分页）",
+			op, path, info.Size(), limit)
+	}
+	if err := fs.charge(info.Size()); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, throwErr("%s: %s: %s", op, path, errText(err))
+	}
+	return data, nil
 }
 
 // globMatches 展开 pattern，支持 `**`（匹配任意层目录）。
@@ -301,21 +316,21 @@ func (fs *jsFS) globMatches(pattern string) ([]string, error) {
 }
 
 // jsArg 取第 i 个字符串参数（缺失或非字符串时返回空串）。
-func jsArg(call goja.FunctionCall, i int) string {
-	if i >= len(call.Arguments) {
+func jsArg(args []moejs.Value, i int) string {
+	if i >= len(args) || args[i].IsNullish() {
 		return ""
 	}
-	v := call.Arguments[i]
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-		return ""
-	}
-	return v.String()
+	return args[i].String()
 }
 
-// throwJS 把消息作为 JS 异常抛出（脚本可以 try/catch）。
+// throwErr 构造一个「抛字符串」的异常，返回给 moejs 的宿主函数。
 //
-// 用字符串而不是 Error 对象：模型看到的输出更短，`catch (e) { e }
-// 直接就是一句人话。
-func throwJS(vm *goja.Runtime, msg string) {
-	panic(vm.ToValue(msg))
+// 抛字符串而不是 Error 对象：模型看到的输出更短，`catch (e) { e }` 直接就是
+// 一句人话。moejs 的宿主函数返回 *Exception 时按原样抛出它的 Value。
+func throwErr(format string, a ...any) error {
+	msg := format
+	if len(a) > 0 {
+		msg = fmt.Sprintf(format, a...)
+	}
+	return &moejs.Exception{Value: moejs.String(msg)}
 }

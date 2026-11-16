@@ -260,7 +260,7 @@ func TestContextSearchAndDecompress(t *testing.T) {
 	}
 	hits := sres.Details.([]tools.ContextHit)
 	if len(hits) == 0 {
-		t.Skipf("检索无命中（goja 分词差异），跳过：%s", sres.Text())
+		t.Skipf("检索无命中（分词/召回差异），跳过：%s", sres.Text())
 	}
 
 	// 展开块详情。

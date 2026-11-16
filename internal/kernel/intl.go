@@ -1,10 +1,11 @@
 package kernel
 
 import (
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/dop251/goja"
+	"github.com/MoeForge/moejs"
 )
 
 // Segment 是一个分词结果。Index 是 rune 偏移。
@@ -13,7 +14,11 @@ type Segment struct {
 	Index int
 }
 
-// Segmenter 是 goja 缺失的 Intl.Segmenter 的替换实现。
+// Segmenter 是内核宿主的可插拔分词器（上游用 `Intl.Segmenter`）。
+//
+// 默认路径不注入：引擎自带的 Segmenter（UAX#29、无词典，汉字逐字成段）
+// 与 RuneSegmenter 在检索语义上等价。传入自定义实现（例如 gse 词典）时
+// 会被注入为 Intl.Segmenter 的替身，见 runtime.injectIntl。
 //
 // kernel 只在 src/search/tokenizer.ts 里用它切分 CJK 文本：把连续 CJK 段
 // 聚成 run，再在 run 内做 OOV bigram 回退。因此“每个汉字一段”的实现与
@@ -104,59 +109,76 @@ func isCJK(r rune) bool {
 	return false
 }
 
-// injectIntl 注册最小可用的 Intl.Segmenter。
+// injectIntl 只在宿主显式传了分词器时才替换 Intl.Segmenter。
+//
+// 默认路径什么都不做：moejs 自带 Intl.Segmenter（UAX#29、无词典，汉字逐字
+// 成段），与默认的 RuneSegmenter 在检索语义上等价。不动它也就保住了 moejs
+// 的「进程级共享冻结内建」—— 写内建需要 Options.MutableIntrinsics，而那会
+// 让每个 runtime 复制一份内建（内存与启动成本都上去）。
+//
+// 传了 WithSegmenter（例如 gse 词典分词）时才注入；newRuntime 已经据
+// opts.Segmenter 打开了 MutableIntrinsics，否则这里写 Intl 会抛 TypeError。
 func (r *runtime) injectIntl() error {
 	seg := r.opts.Segmenter
 	if seg == nil {
-		seg = RuneSegmenter{}
+		return nil
 	}
-	vm := r.vm
-
-	ctor := vm.ToValue(func(call goja.ConstructorCall) *goja.Object {
-		obj := vm.NewObject()
-		_ = obj.Set("resolvedOptions", vm.ToValue(func(goja.FunctionCall) goja.Value {
-			o := vm.NewObject()
-			_ = o.Set("granularity", "word")
-			return o
-		}))
-		_ = obj.Set("segment", vm.ToValue(func(fc goja.FunctionCall) goja.Value {
-			input := fc.Argument(0).String()
+	if err := r.rt.SetGlobal("__acpSegment", moejs.NativeFunc(
+		func(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			input := jsString(args, 0)
 			segs := seg.Segment(input)
-			arr := vm.NewArray()
-			for i, s := range segs {
-				item := vm.NewObject()
-				_ = item.Set("segment", s.Text)
-				_ = item.Set("index", s.Index)
-				_ = item.Set("input", input)
-				_ = arr.Set(intToKey(i), item)
+			out := make([]any, 0, len(segs))
+			for _, s := range segs {
+				out = append(out, []any{s.Text, s.Index})
 			}
-			return arr
-		}))
-		return obj
-	})
-
-	intlObj := vm.NewObject()
-	_ = intlObj.Set("Segmenter", ctor)
-	// 只有缺 Intl 时才需要注入；显式覆盖可以保证 bundle 在任何宿主下行为一致。
-	v := vm.Get("Intl")
-	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
-		return vm.Set("Intl", intlObj)
+			return r.rt.FromGo(out)
+		})); err != nil {
+		return err
 	}
-	existing := v.ToObject(vm)
-	_ = existing.Set("Segmenter", ctor)
-	return nil
+	s, err := intlShim()
+	if err != nil {
+		return err
+	}
+	_, err = r.rt.RunScript(s)
+	return err
 }
 
-func intToKey(i int) string {
-	if i == 0 {
-		return "0"
+// intlSegmenterShim 是替换 Intl.Segmenter 的 JS 代码。
+//
+// 用 JS（而不是从 Go 造一个构造器）是因为 new Intl.Segmenter() 需要
+// [[Construct]]，而 class 写一行就有了；返回的对象数组也在 JS 里拼，
+// 不必来回跨引擎边界。Script 不可变、可被多个 runtime 共享。
+const intlSegmenterShim = `(function() {
+	"use strict";
+	class Segmenter {
+		constructor(locale, opts) {
+			this._granularity = (opts && opts.granularity) || "word";
+		}
+		resolvedOptions() { return { granularity: this._granularity }; }
+		segment(input) {
+			const raw = __acpSegment(input);
+			const out = new Array(raw.length);
+			for (let i = 0; i < raw.length; i++) {
+				out[i] = { segment: raw[i][0], index: raw[i][1], input: input };
+			}
+			return out;
+		}
 	}
-	var buf [20]byte
-	pos := len(buf)
-	for i > 0 {
-		pos--
-		buf[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(buf[pos:])
+	Object.defineProperty(Intl, "Segmenter", {
+		value: Segmenter, writable: true, configurable: true, enumerable: false,
+	});
+})()`
+
+var (
+	intlShimOnce sync.Once
+	intlShimProg *moejs.Script
+	intlShimErr  error
+)
+
+// intlShim 返回（进程内只编译一次的）Segmenter 替换脚本。
+func intlShim() (*moejs.Script, error) {
+	intlShimOnce.Do(func() {
+		intlShimProg, intlShimErr = moejs.CompileScript("acp-kernel.intl.js", intlSegmenterShim)
+	})
+	return intlShimProg, intlShimErr
 }

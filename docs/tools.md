@@ -31,7 +31,7 @@ results := ex.Execute(ctx, []tools.Call{
 | `bash` | ✅ | 执行命令；超时或 `background:true` 转后台，返回 `sessionId` |
 | `bash_output` | ✅ | 读后台输出：正则 `filter`、`cursor` 增量读、`wait=output/exit` 阻塞等待（见下方「后台任务的等待」） |
 | `bash_kill` | ❌ | 杀整个进程组 / 进程树 |
-| `js` | ✅ | 内置 goja 执行 JavaScript：纯计算、JSON 变换、字符串/正则处理，`fs` 默认只读（`permissions=auto` 下可 `fs.writeFile`），同步 `fetch`（出网受超时/次数/字节预算约束） |
+| `js` | ✅ | 内置 moejs（纯 Go JS 引擎）执行 JavaScript：纯计算、JSON 变换、字符串/正则处理，`fs` 默认只读（`permissions=auto` 下可 `fs.writeFile`），同步 `fetch`（出网受超时/次数/字节预算约束） |
 | `skill` | ✅ | 加载 `.agents/skills` 里的技能：无参列清单、`name` 读 SKILL.md 正文、`name`+`file` 读随附脚本/文档。**未发现技能时不注册**（见下方「Skills」） |
 | `todo` | ❌ | 内存态任务清单（replace/add/update/list） |
 | `web_search` | ✅ | 多 query 并发检索；后端在 `internal/web`（duckduckgo 免 key / searxng / tavily / brave / exa） |
@@ -239,6 +239,24 @@ go env GOMOD                                 默认 50ms   native 71ms
 内建命令里的 panic 会被 ExecHandler 兜成 stderr 一行 `cmd: 内部错误: …` + exit 1，
 脚本继续执行——这类 panic 跑在解释器 goroutine 里，不兜住就是整个进程退出。
 
+### 退出码只有低 8 位（Windows 上是真的会踩到）
+
+mvdan/sh 的 `ExitStatus` 是 `uint8`，`DefaultExecHandler` 用 `ExitStatus(err.ExitCode())`
+把外部程序的退出码截成 8 位。Windows 的退出码是 32 位，**256 的倍数（256 / 512 /
+0xC0000000…）截断后就是 0** —— 于是得到一个「非 nil 但码为 0」的错误，而 `Runner.Run`
+在收尾时会对这个状态直接 panic（`interp.Run` api.go:1030
+`ended up with a non-nil exitStatus.err but a zero exitStatus.code`）。
+那个 panic 在解释器 goroutine 里：没有 recover 的构建上，一条 `cmd /c exit 256`
+就能带走整个进程；有 recover 的构建上也会退化成一句「shell 内部错误」。
+
+`shell_builtin.go` 的 `normalizeExecErr` 在 ExecHandler 边界把这种错误收敛成
+`ExitStatus(1)`（原码已经丢了，只能保住「失败」这一个事实），`exitStatus(0)` 也一律
+返回 nil。所以现在看到的是 `[exit 1, …]`，而不是 panic。
+注意它在 `-tags shellnative` 下不存在：那条路直接 `os/exec`，原码（比如 256）会原样显示。
+
+这是上游缺陷，已写好 issue 草稿：[upstream-mvdan-sh-exitstatus.md](upstream-mvdan-sh-exitstatus.md)
+（v3.12.0 把它当成成功、v3.13.1 起改成 panic，v3.14.1 仍在）。
+
 #### 内建 grep 的取舍（`shell_builtin_grep.go`）
 
 退出码与 GNU 一致：`0` 有匹配 / `1` 无匹配 / `2` 出错（打不开文件、选项非法、正则无效），
@@ -352,7 +370,7 @@ HTTP 400: Invalid schema for function 'context_check': null is not of type "obje
 ## JavaScript 工具（js）
 
 模型需要算数（`86243 秒是几小时几分`）、改一段 JSON、写个正则验证时，调 `bash` + `python`
-要么没装、要么起进程 20ms 起步、要么跨平台不一致。`js` 直接跑在进程内的 goja 上：
+要么没装、要么起进程 20ms 起步、要么跨平台不一致。`js` 直接跑在进程内的 moejs 上：
 **零外部依赖、跨平台一致、启动 <1ms、无写权限**。
 
 ```json
@@ -376,7 +394,12 @@ js(script="({a:1,b:[1,2]}).b.length", )
 
 实现要点（`internal/tools/js.go`）：
 
-- **每次调用新建 `goja.Runtime`** —— 变量不会跨调用泄漏，天然并发安全（`ConcurrencySafe() == true`）；
+- **每次调用新建一个 runtime** —— 变量不会跨调用泄漏，天然并发安全（`ConcurrencySafe() == true`）；
+- **单脚本 JS 堆上限 64MB**（`Options.MemoryLimit`）：超过会被引擎打断并报「内存超限」。
+  引擎先测「**真正留住的量**」再决定是否打断，所以逐行扫文件、反复拼临时串这类
+  「大量垃圾但只留一点」的脚本不受影响；被拦的是把结果集越堆越大的写法。
+  换引擎前没有任何约束，一个 `const a=[];for(;;)a.push(new Array(1<<16).fill(0))`
+  就能把进程吃到内核 OOM kill（连 error 都拿不到）；
 - 注入 `console.{log,info,warn,error,debug}`，对象用 `JSON.stringify` 打印，多余参数空格分隔；
 - 返回值打印 `=> <值>`：`undefined` 不打印，对象/数组走 JSON，BigInt/Symbol 走 String；
 - **只读 fs 桥**（`internal/tools/js_fs.go`）：`fs.readFile(path)` / `fs.readFileBytes(path)` /
@@ -385,7 +408,7 @@ js(script="({a:1,b:[1,2]}).b.length", )
   - `readFileBytes` 返回 **ArrayBuffer**（`new Uint8Array(b)` 即可按字节处理，含 NUL）；
     `readFileBase64` 返回 base64 串，适合只关心大小/校验值的场景；
   - **`crypto.sha256(字符串或 ArrayBuffer)`** → 十六进制摘要（`internal/tools/js_crypto.go`）。
-    goja 没有 SubtleCrypto/Buffer，读二进制最常见的用途就是算校验值，所以这层接 Go 标准库；
+    引擎没有 SubtleCrypto/Buffer，读二进制最常见的用途就是算校验值，所以这层接 Go 标准库；
   - 所有路径过 `Policy.Resolve`：越界（含符号链接指向 root 外）直接抛 JS 异常，
     脚本可以 `try/catch` 接住；
   - `fs.glob` 支持 `**`（`filepath.Glob` 不认识，内部走 WalkDir + 正则），
@@ -422,7 +445,7 @@ js(script="({a:1,b:[1,2]}).b.length", )
 
 ## 内建命令 `goja`（shell 里执行 JS）
 
-内建解释器里还有一个 `goja` 命令，可以在管道里直接做纯计算，跨平台且不依赖
+内建解释器里还有一个 `goja` 命令（名字沿用旧引擎，执行引擎现在是 moejs），可以在管道里直接做纯计算，跨平台且不依赖
 任何外部程序（不需要装 python/node）：
 
 ```sh

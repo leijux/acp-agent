@@ -77,6 +77,17 @@ type RunningMsg struct {
 // ResetMsg 清空所有块（/new 用）。
 type ResetMsg struct{}
 
+// RewindMsg 撤销「正在流式输出、尚未结束」的正文/思考内容（网络中断重连用）。
+//
+// 截断到最近的 MarkStreamMsg 标记处：标记之后的就是这一条消息渲染出来的块。
+// 没有标记时退化成删尾部连续的正文/思考块。之后宿主会重发这条消息。
+type RewindMsg struct{}
+
+// MarkStreamMsg 标记「接下来的增量属于一条新消息」，块下标存在模型里供
+// RewindMsg 截断。消息开始（而非第一条增量）时发：否则本轮还没吐出任何
+// 块就重连时，RewindMsg 会一路删到上一条回复。
+type MarkStreamMsg struct{}
+
 // HeaderMsg 更新顶部固定行（切模型、上下文变化时）。
 type HeaderMsg struct{ Text string }
 
@@ -396,6 +407,23 @@ func (u *UI) Running(on bool, note string) {
 // Reset 清空会话块。
 func (u *UI) Reset() { u.Send(ResetMsg{}) }
 
+// RewindStream 撤销正在流式输出、尚未结束的正文/思考内容（网络中断重连用）。
+//
+// 网络中断后 provider 会重发同一个请求，重发前调它：行缓冲里的未换行残余
+// 要先丢掉，否则它会粘到重发后的新内容头部；界面同步截断到 MarkStream 处。
+func (u *UI) RewindStream() {
+	u.mu.Lock()
+	s := u.sink
+	u.mu.Unlock()
+	if s != nil {
+		s.reset()
+	}
+	u.Send(RewindMsg{})
+}
+
+// MarkStream 声明「下一条消息从当前块位置开始」（消息起始时调）。
+func (u *UI) MarkStream() { u.Send(MarkStreamMsg{}) }
+
 // SetHeader 更新顶部固定行。
 func (u *UI) SetHeader(s string) { u.Send(HeaderMsg{Text: s}) }
 
@@ -470,6 +498,13 @@ func (s *lineSink) Write(p []byte) (int, error) {
 		s.ui.Send(PartialMsg{Kind: s.kind, Text: string(s.buf)})
 	}
 	return len(p), nil
+}
+
+// reset 丢弃未换行的残余字节（重连前调：这些内容会被重发生成）。
+func (s *lineSink) reset() {
+	s.mu.Lock()
+	s.buf = s.buf[:0]
+	s.mu.Unlock()
 }
 
 // flushLine 把未换行的残余收尾成一行；没有残余时什么也不做。
