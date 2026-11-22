@@ -38,8 +38,8 @@ func TestResolveVersionFallsBackToDefault(t *testing.T) {
 //   - `validatePiMcpVersion` 要求 ≥ 0.99.0，否则配了 MCP 的任务直接失败；
 //   - `SupportsTaskSupplement` 要求 ≥ 1.4.0 才发 `--mode rpc`（prompt/steer）。
 //
-// 现在我们已经实现了 rpc 的 prompt/steer/agent_settled，所以 1.4.0 是正确目标：
-// 低于它 steering 用不上，高于它等于宣称我们没实现的能力。
+// 现在我们已经实现了 rpc 的 prompt/steer/agent_settled，所以 1.4.x 是正确目标：
+// 低于 1.4.0 steering 用不上，越过 1.5.0 等于宣称我们没实现的能力。
 func TestDefaultVersionSatisfiesRuntimeGates(t *testing.T) {
 	re := regexp.MustCompile(`v?(\d+)\.(\d+)\.(\d+)`)
 	m := re.FindStringSubmatch(defaultVersion)
