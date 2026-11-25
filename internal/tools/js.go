@@ -189,7 +189,7 @@ func runJSScript(rt *moejs.Runtime, name, src string) (moejs.Value, error) {
 
 // consoleSink 决定 console.* 各级别写到哪，并限制累计输出量。
 //
-// js 工具把所有级别并进同一块缓冲（模型看到一份完整日志）；shell 里的 goja
+// js 工具把所有级别并进同一块缓冲（模型看到一份完整日志）；shell 里的 moejs
 // 则把 warn/error 分到 stderr，符合命令行直觉。
 type consoleSink struct {
 	out    io.Writer
@@ -238,17 +238,59 @@ func installConsole(rt *moejs.Runtime, sink *consoleSink) error {
 	})
 }
 
+// jsPromiseMaxDepth 限制 Promise 结果展开的嵌套深度。
+//
+// promise 可以自引用（`const p = Promise.resolve(1).then(() => p)`），
+// 展开结果值时必须设上限，否则会无限递归直到栈溢出。
+const jsPromiseMaxDepth = 3
+
 // jsValueString 把引擎值转成稳定可读的字符串。
 //
 // 顺序有讲究：字符串原样（不套引号），其余先试 JSON.stringify（对象/数组/
 // 数字/布尔都得到模型习惯的形态），失败（循环引用、BigInt、函数）才退到
 // 有界渲染 —— 见 safeString 的注释，这里绝不能直接 fmt.Sprint。
 func jsValueString(rt *moejs.Runtime, v moejs.Value) string {
+	return jsValueStringDepth(rt, v, 0)
+}
+
+func jsValueStringDepth(rt *moejs.Runtime, v moejs.Value, depth int) string {
 	if v.IsNullish() {
 		return "undefined"
 	}
 	if v.IsString() {
 		return v.String()
+	}
+	// BigInt 必须排在某些通用分支之前：AppendJSON 拒绝它，落到 ToGo 再 safeString
+	// 只会打印 Go 类型的调试形态（`<big.Int>`），模型看到的是类型名而不是数字。
+	// Value.String 给的是完整十进制（超 6400 bit 才退化成占位描述）。
+	if v.IsBigInt() {
+		return v.String()
+	}
+	// Error 的 name/message 是不可枚举槽位，AppendJSON 只会给 `{}`。
+	// 模型看 rejected promise 里的原因时，`{}` 等于什么都没说。
+	if v.IsObject() && v.AsObject().ErrorData() != nil {
+		return formatJSError(rt, v)
+	}
+	// Promise 没有自有属性，AppendJSON 会写成 `{}`，模型会误以为拿到空对象。
+	// 改报状态 + 结果（pending 时没有结果），形态对齐 Node REPL。
+	if state, result, ok := moejs.PromiseResult(v); ok {
+		if depth >= jsPromiseMaxDepth {
+			return "Promise { … }"
+		}
+		inner := func() string {
+			if result.IsString() {
+				return strconv.Quote(result.String())
+			}
+			return jsValueStringDepth(rt, result, depth+1)
+		}
+		switch state {
+		case moejs.PromiseFulfilled:
+			return "Promise { " + inner() + " }"
+		case moejs.PromiseRejected:
+			return "Promise { <rejected> " + inner() + " }"
+		default:
+			return "Promise { <pending> }"
+		}
 	}
 	if out, err := rt.AppendJSON(nil, v); err == nil && len(out) > 0 && string(out) != "undefined" {
 		return string(out)
@@ -257,6 +299,25 @@ func jsValueString(rt *moejs.Runtime, v moejs.Value) string {
 		return safeString(x)
 	}
 	return v.String()
+}
+
+// formatJSError 渲染 Error 对象：`Error: message`（name 取自对象，可能是 TypeError 等）。
+//
+// 容忍 getter：name/message 可能被 defineProperty 成访问器；取失败就退回默认名，
+// 渲染路径不能因为一个 getter 抛错而整体失败。
+func formatJSError(rt *moejs.Runtime, v moejs.Value) string {
+	name := "Error"
+	if nv, err := rt.Get(v, "name"); err == nil && nv.IsString() {
+		if s := nv.String(); s != "" {
+			name = s
+		}
+	}
+	if mv, err := rt.Get(v, "message"); err == nil && mv.IsString() {
+		if s := mv.String(); s != "" {
+			return name + ": " + s
+		}
+	}
+	return name
 }
 
 const (
