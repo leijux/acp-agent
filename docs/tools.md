@@ -235,7 +235,7 @@ go env GOMOD                                 默认 50ms   native 71ms
 `read`/`grep`/`glob` 工具。
 
 没有管道输入时，stdin 一律当**空输入（EOF，等价 `/dev/null`）**：`cat`、`head`、`tail`、
-`grep`、`goja` 立即读到 EOF（`cat` 退出 0），不会像真 shell 那样等终端输入。
+`grep`、`moejs` 立即读到 EOF（`cat` 退出 0），不会像真 shell 那样等终端输入。
 内建命令里的 panic 会被 ExecHandler 兜成 stderr 一行 `cmd: 内部错误: …` + exit 1，
 脚本继续执行——这类 panic 跑在解释器 goroutine 里，不兜住就是整个进程退出。
 
@@ -443,17 +443,17 @@ js(script="({a:1,b:[1,2]}).b.length", )
 - 未捕获异常（含语法错误）返回 `IsError` 结果而不是 Go error，模型能看到错误并自行修正；
 - `timeout` 或 ctx 取消都通过 `vm.Interrupt` 打断，死循环不会挂住进程（实测 100ms 超时对 `while(true){}` 生效）。
 
-## 内建命令 `goja`（shell 里执行 JS）
+## 内建命令 `moejs`（shell 里执行 JS）
 
-内建解释器里还有一个 `goja` 命令（名字沿用旧引擎，执行引擎现在是 moejs），可以在管道里直接做纯计算，跨平台且不依赖
+内建解释器里还有一个 `moejs` 命令（引擎是纯 Go 的 moejs，不起子进程），可以在管道里直接做纯计算，跨平台且不依赖
 任何外部程序（不需要装 python/node）：
 
 ```sh
-goja -e '1 + 2'                                  # => 3
-printf '6 * 7' | goja                            # 从 stdin 读脚本
-goja script.js a b c                             # argv = ["a","b","c"]
-ls | goja -e 'argv.length' -- x y                # -- 之后是 argv
-goja -t 200ms -e 'while(true){}' || echo TIMEOUT # 超时打断
+moejs -e '1 + 2'                                  # => 3
+printf '6 * 7' | moejs                            # 从 stdin 读脚本
+moejs script.js a b c                             # argv = ["a","b","c"]
+ls | moejs -e 'argv.length' -- x y                # -- 之后是 argv
+moejs -t 200ms -e 'while(true){}' || echo TIMEOUT # 超时打断
 ```
 
 | 选项 | 说明 |
@@ -474,8 +474,8 @@ goja -t 200ms -e 'while(true){}' || echo TIMEOUT # 超时打断
 - `fs` 同样受 `Policy.Root` 约束（越界直接抛异常，非零退出）；
 - 未捕获异常 → stderr + 退出码 1（不打印 `=> ` 前缀，方便接管道）。
 
-实现要点（`internal/tools/shell_goja.go`）：走 `interp.ExecHandlers` 中间件，
-和 `ls/cat/sleep` 同一层；**PATH 里有真的 `goja` 时让真程序跑**（和别的内建
+实现要点（`internal/tools/shell_moejs.go`）：走 `interp.ExecHandlers` 中间件，
+和 `ls/cat/sleep` 同一层；**PATH 里有真的 `moejs` 时让真程序跑**（和别的内建
 命令一致）。`Policy` 由 `newShellProcess(..., policy)` 一路传进来，所以 shell
 里的 JS 看到的工作区范围和 `read`/`write` 工具相同。
 

@@ -299,17 +299,17 @@ func TestBuiltinEmptyStdin(t *testing.T) {
 		t.Fatalf("grep 空 stdin 后未继续: %q", text)
 	}
 
-	// goja 无参数、无输入：报错退出而不是 panic（只断言不崩 + 后续命令照跑，
-	// 不绑定具体文案：那是 shell_goja.go 的措辞，不是契约）。
-	res, err := bt.Execute(ctx_(), Args{"command": "goja; echo AFTER", "env": map[string]any{"PATH": empty}})
+	// moejs 无参数、无输入：报错退出而不是 panic（只断言不崩 + 后续命令照跑，
+	// 不绑定具体文案：那是 shell_moejs.go 的措辞，不是契约）。
+	res, err := bt.Execute(ctx_(), Args{"command": "moejs; echo AFTER", "env": map[string]any{"PATH": empty}})
 	if err != nil {
-		t.Fatalf("goja Execute: %v", err)
+		t.Fatalf("moejs Execute: %v", err)
 	}
 	if !strings.Contains(res.Text(), "AFTER") {
-		t.Fatalf("goja 空 stdin 处理不对: %q", res.Text())
+		t.Fatalf("moejs 空 stdin 处理不对: %q", res.Text())
 	}
 	if strings.Contains(res.Text(), "内部错误") {
-		t.Fatalf("goja 空 stdin 不应走 panic 兜底: %q", res.Text())
+		t.Fatalf("moejs 空 stdin 不应走 panic 兜底: %q", res.Text())
 	}
 }
 

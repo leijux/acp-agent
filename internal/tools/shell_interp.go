@@ -23,7 +23,7 @@ import (
 func shellEngineHint() string {
 	return "（内置解释器 POSIX/bash 语义；" +
 		"PATH 里没有 ls/cat/head/tail/sleep/pwd/mkdir/rm/cp/mv/grep 时自动用内建实现，" +
-		"内建命令 goja 可在管道里执行 JS 做纯计算（执行引擎是 moejs））"
+		"内建命令 moejs 可在管道里执行 JS 做纯计算）"
 }
 
 // newShellProcess 用 mvdan/sh 的纯 Go 解释器执行脚本（默认引擎）。

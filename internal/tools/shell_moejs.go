@@ -2,15 +2,15 @@
 
 package tools
 
-// 内建命令 `goja`：在 shell 里直接执行 JavaScript。
+// 内建命令 `moejs`：在 shell 里直接执行 JavaScript。
 //
 // 为什么值得存在：模型（和人）经常需要「对命令输出做点变形再判断」——
 // 统计、过滤、JSON 提取。以前只有两条路：调 js 工具（把数据手动搬进 args），
-// 或者调系统 python/node（换台机器可能没有）。有了内建 goja，
+// 或者调系统 python/node（换台机器可能没有）。有了内建 moejs，
 //
-//	jq_like() { goja -e '...' ; }
-//	ls -l | goja -e 'const s = fs.readFile("/dev/stdin")'
-//	git status --short | goja -e 'fs.readFile("/dev/stdin").split("\n").length'
+//	jq_like() { moejs -e '...' ; }
+//	ls -l | moejs -e 'const s = fs.readFile("/dev/stdin")'
+//	git status --short | moejs -e 'fs.readFile("/dev/stdin").split("\n").length'
 //
 // 就能在管道里做纯计算，且跨平台（不依赖任何外部程序）。
 //
@@ -31,37 +31,38 @@ import (
 	"mvdan.cc/sh/v3/interp"
 )
 
-// gojaDefaultTimeout 是内建 goja 的默认超时。
+// moejsDefaultTimeout 是内建 moejs 的默认超时。
 //
 // 比 js 工具的 5s 宽松：shell 里常常要扫一批文件，5s 容易误杀；
 // 但仍然必须有个上限，否则一个死循环会把整个 bash 工具卡住
 // （纯内建命令没有子进程可杀，只能靠 vm.Interrupt）。
-const gojaDefaultTimeout = 30 * time.Second
+const moejsDefaultTimeout = 30 * time.Second
 
-const gojaUsage = `用法: goja [选项] [脚本文件] [参数...]
+const moejsUsage = `用法: moejs [选项] [脚本文件] [参数...]
 
 不带脚本文件时从 stdin 读。选项:
   -e, --eval <code>    直接执行代码；此时管道数据用 fs.readStdin() 读
   -t, --timeout <时长> 执行上限，如 30s / 1m（默认 30s）
   -q, --quiet          不打印最后一个表达式的值
+  -h, --help           显示本帮助
   --                   之后全部当作脚本参数（写入 argv）
 
-（命令名沿用旧引擎；实际执行者是 moejs）
+（执行引擎是纯 Go 的 moejs）
 脚本内可用: console.log/info/warn/error、fs.readFile/readFileBytes/readFileBase64/
 readDir/stat/exists/glob/readStdin（只读，受 Root 约束）、crypto.sha256、argv。
 
 示例:
-  goja -e '1 + 2'
-  ls -l | goja -e 'fs.readStdin().split("\n").length'
-  goja script.js a b c      # argv 为 ["a","b","c"]
+  moejs -e '1 + 2'
+  ls -l | moejs -e 'fs.readStdin().split("\n").length'
+  moejs script.js a b c      # argv 为 ["a","b","c"]
 `
 
-// cmdGoja 实现内建 goja 命令。
-func cmdGoja(ctx context.Context, hc interp.HandlerContext, args []string, policy Policy) error {
+// cmdMoejs 实现内建 moejs 命令。
+func cmdMoejs(ctx context.Context, hc interp.HandlerContext, args []string, policy Policy) error {
 	var (
 		script  string
 		srcName = "<stdin>"
-		timeout = gojaDefaultTimeout
+		timeout = moejsDefaultTimeout
 		quiet   bool
 		argv    []string
 		// scriptFromStdin 记录脚本本身是不是从 stdin 读的：
@@ -84,7 +85,7 @@ func cmdGoja(ctx context.Context, hc interp.HandlerContext, args []string, polic
 			argv = append(argv, a)
 
 		case a == "-h" || a == "--help":
-			fmt.Fprint(hc.Stdout, gojaUsage)
+			fmt.Fprint(hc.Stdout, moejsUsage)
 			return nil
 
 		case a == "-q" || a == "--quiet":
@@ -92,31 +93,31 @@ func cmdGoja(ctx context.Context, hc interp.HandlerContext, args []string, polic
 
 		case a == "-e" || a == "--eval":
 			if i+1 >= len(args) {
-				return parseFailed("goja: %s 需要一个代码参数", a)
+				return parseFailed("moejs: %s 需要一个代码参数", a)
 			}
 			i++
 			script, srcName = args[i], "-e"
 
 		case a == "-t" || a == "--timeout":
 			if i+1 >= len(args) {
-				return parseFailed("goja: %s 需要一个时长", a)
+				return parseFailed("moejs: %s 需要一个时长", a)
 			}
 			i++
-			d, err := parseGojaTimeout(args[i])
+			d, err := parseMoejsTimeout(args[i])
 			if err != nil || d <= 0 {
-				return parseFailed("goja: 无效的时长 %q（如 200ms / 30s / 1m）", args[i])
+				return parseFailed("moejs: 无效的时长 %q（如 200ms / 30s / 1m）", args[i])
 			}
 			timeout = d
 
 		case strings.HasPrefix(a, "-") && a != "-":
-			return parseFailed("goja: 未知选项 %q（--help 看用法）", a)
+			return parseFailed("moejs: 未知选项 %q（--help 看用法）", a)
 
 		default:
 			// 第一个非选项参数是脚本文件。
 			if a == "-" {
 				data, err := readAllLimited(builtinStdin(hc), 4<<20)
 				if err != nil {
-					return parseFailed("goja: 读取 stdin 失败: %v", err)
+					return parseFailed("moejs: 读取 stdin 失败: %v", err)
 				}
 				script, srcName = string(data), "<stdin>"
 				scriptFromStdin = true
@@ -124,7 +125,7 @@ func cmdGoja(ctx context.Context, hc interp.HandlerContext, args []string, polic
 			}
 			data, err := os.ReadFile(hcAbs(hc, a))
 			if err != nil {
-				fmt.Fprintf(hc.Stderr, "goja: %s: %s\n", a, errText(err))
+				fmt.Fprintf(hc.Stderr, "moejs: %s: %s\n", a, errText(err))
 				return exitStatus(1)
 			}
 			script, srcName = string(data), a
@@ -135,23 +136,23 @@ func cmdGoja(ctx context.Context, hc interp.HandlerContext, args []string, polic
 		// 没有脚本文件也没 -e：从 stdin 读（管道里的常见用法）。
 		data, err := readAllLimited(builtinStdin(hc), 4<<20)
 		if err != nil {
-			return parseFailed("goja: 读取 stdin 失败: %v", err)
+			return parseFailed("moejs: 读取 stdin 失败: %v", err)
 		}
 		script, srcName = string(data), "<stdin>"
 		scriptFromStdin = true
 		if strings.TrimSpace(script) == "" {
-			return parseFailed("goja: 没有脚本内容（-e 或文件名，或从 stdin 传入）")
+			return parseFailed("moejs: 没有脚本内容（-e 或文件名，或从 stdin 传入）")
 		}
 	}
 
-	return runGoja(ctx, hc, policy, srcName, script, argv, timeout, quiet, !scriptFromStdin)
+	return runMoejs(ctx, hc, policy, srcName, script, argv, timeout, quiet, !scriptFromStdin)
 }
 
-// parseGojaTimeout 解析 -t 的时长：支持 ms/s/m/h/d 后缀，纯数字按秒。
+// parseMoejsTimeout 解析 -t 的时长：支持 ms/s/m/h/d 后缀，纯数字按秒。
 //
 // 不复用 sleep 的 parseDuration：那里没有 ms（GNU sleep 也没有），
 // 但脚本超时用毫秒最自然。
-func parseGojaTimeout(s string) (time.Duration, error) {
+func parseMoejsTimeout(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, fmt.Errorf("empty")
@@ -181,16 +182,16 @@ func parseGojaTimeout(s string) (time.Duration, error) {
 	return time.Duration(f * float64(unit) * float64(mult)), nil
 }
 
-// runGoja 执行脚本并把结果写到 hc。
-func runGoja(ctx context.Context, hc interp.HandlerContext, policy Policy, srcName, script string, argv []string, timeout time.Duration, quiet, stdinFree bool) error {
+// runMoejs 执行脚本并把结果写到 hc。
+func runMoejs(ctx context.Context, hc interp.HandlerContext, policy Policy, srcName, script string, argv []string, timeout time.Duration, quiet, stdinFree bool) error {
 	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: jsMemoryLimit})
 
 	sink := &consoleSink{out: hc.Stdout, errOut: hc.Stderr}
 	if err := installConsole(rt, sink); err != nil {
-		fmt.Fprintf(hc.Stderr, "goja: 初始化 console 失败: %v\n", err)
+		fmt.Fprintf(hc.Stderr, "moejs: 初始化 console 失败: %v\n", err)
 		return exitStatus(1)
 	}
-	// 管道里最常见的写法是 `cmd | goja -e '...'`：脚本来自 -e，数据从 stdin 来。
+	// 管道里最常见的写法是 `cmd | moejs -e '...'`：脚本来自 -e，数据从 stdin 来。
 	// Windows 上没有 /dev/stdin，stdin 又是解释器的 io.Reader 而不是文件，
 	// 所以只能由宿主提供 fs.readStdin()。它必须在装 fs 的同一次 SetGlobal 里
 	// 加进去 —— moejs 建好的全局对象没有「事后加一个属性」的顶层 API。
@@ -199,15 +200,15 @@ func runGoja(ctx context.Context, hc interp.HandlerContext, policy Policy, srcNa
 		fsObj["readStdin"] = stdinReader(rt, builtinStdin(hc), 8<<20)
 	}
 	if err := rt.SetGlobal("fs", fsObj); err != nil {
-		fmt.Fprintf(hc.Stderr, "goja: 初始化 fs 失败: %v\n", err)
+		fmt.Fprintf(hc.Stderr, "moejs: 初始化 fs 失败: %v\n", err)
 		return exitStatus(1)
 	}
 	if err := installCrypto(rt); err != nil {
-		fmt.Fprintf(hc.Stderr, "goja: 初始化 crypto 失败: %v\n", err)
+		fmt.Fprintf(hc.Stderr, "moejs: 初始化 crypto 失败: %v\n", err)
 		return exitStatus(1)
 	}
 	if err := installArgv(rt, argv); err != nil {
-		fmt.Fprintf(hc.Stderr, "goja: 注入 argv 失败: %v\n", err)
+		fmt.Fprintf(hc.Stderr, "moejs: 注入 argv 失败: %v\n", err)
 		return exitStatus(1)
 	}
 
@@ -232,7 +233,7 @@ func runGoja(ctx context.Context, hc interp.HandlerContext, policy Policy, srcNa
 	if quiet {
 		return nil
 	}
-	// 打印最后一个表达式的值（真正的 undefined/null 不打印）——`goja -e '1+2'` 得到 3。
+	// 打印最后一个表达式的值（真正的 undefined/null 不打印）——`moejs -e '1+2'` 得到 3。
 	//
 	// 注意不能用「字符串等于 "undefined"」来判断：脚本返回**字符串** "undefined"
 	// 时也要打印出来（`typeof x` 的结果就是这样）。
@@ -246,7 +247,7 @@ func runGoja(ctx context.Context, hc interp.HandlerContext, policy Policy, srcNa
 
 // stdinReader 构造 fs.readStdin()：只允许读一次（管道不可回退）。
 //
-// 有了它，`cmd | goja -e '...'` 这种最自然的写法才成立；否则脚本来自 -e 时
+// 有了它，`cmd | moejs -e '...'` 这种最自然的写法才成立；否则脚本来自 -e 时
 // 上游数据根本没法被读到（Windows 连 /dev/stdin 都没有）。
 func stdinReader(rt *moejs.Runtime, r io.Reader, limit int64) moejs.NativeFunc {
 	used := false

@@ -56,7 +56,7 @@ func installFS(rt *moejs.Runtime, p Policy) error {
 
 // methods 构造 fs 对象的方法表。
 //
-// 单独抽出来是给内建命令 `goja` 用的：它要在同一个对象上多挂一个
+// 单独抽出来是给内建命令 `moejs` 用的：它要在同一个对象上多挂一个
 // readStdin()，而 moejs 没有「建好对象后再加一个属性」的顶层 API。
 func (fs *jsFS) methods(rt *moejs.Runtime) map[string]any {
 	return map[string]any{

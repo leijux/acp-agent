@@ -69,11 +69,11 @@ func TestJSTool_MemoryLimitAllowsBigResult(t *testing.T) {
 	}
 }
 
-// 内建 goja 命令走同一套上限（同一个引擎、同一个进程风险）。
-func TestBuiltinGojaMemoryLimit(t *testing.T) {
-	out := runGojaBuiltin(t, `goja -t 30s -e 'const a=[];for(;;)a.push(new Array(1<<16).fill(0))' || echo "EXIT=$?"`)
+// 内建 moejs 命令走同一套上限（同一个引擎、同一个进程风险）。
+func TestBuiltinMoejsMemoryLimit(t *testing.T) {
+	out := runMoejsBuiltin(t, `moejs -t 30s -e 'const a=[];for(;;)a.push(new Array(1<<16).fill(0))' || echo "EXIT=$?"`)
 	if !strings.Contains(out, "内存超限") {
-		t.Fatalf("内建 goja 未触发内存上限: %q", out)
+		t.Fatalf("内建 moejs 未触发内存上限: %q", out)
 	}
 	if !strings.Contains(out, "EXIT=1") {
 		t.Fatalf("内存超限应退出码 1: %q", out)

@@ -4,7 +4,7 @@ import "io"
 
 // shellProc 抽象「执行一段脚本」，让执行引擎在“内置解释器”与“系统 shell”之间切换。
 //
-// Policy 会传给内置解释器：`goja` 等由 Go 实现的内建命令要按同一套 Root 约束
+// Policy 会传给内置解释器：`moejs` 等由 Go 实现的内建命令要按同一套 Root 约束
 // 访问文件（和 read/write 工具看到的范围一致）。
 //
 // 默认实现（shell_interp.go）用 mvdan/sh 纯 Go 执行，不需要外部 shell；

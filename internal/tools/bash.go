@@ -431,7 +431,7 @@ type BashManager struct {
 	sessions map[string]*bashSession
 	seq      int
 	maxKeep  int
-	// policy 传给内建解释器（`goja` 等 Go 实现的内建命令按同一套 Root 约束读文件）。
+	// policy 传给内建解释器（`moejs` 等 Go 实现的内建命令按同一套 Root 约束读文件）。
 	policy Policy
 }
 

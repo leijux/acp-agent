@@ -70,7 +70,7 @@ func builtinStdin(hc interp.HandlerContext) io.Reader {
 
 // panicStack 返回截断后的 panic 栈，用于把「内部错误」变成可诊断、可 grep 的线索。
 //
-// 不限长度会把几千行栈全喷进模型上下文（goja + 解释器的帧很多），所以只留头部。
+// 不限长度会把几千行栈全喷进模型上下文（moejs + 解释器的帧很多），所以只留头部。
 func panicStack() string {
 	const max = 2048
 	stack := string(debug.Stack())
@@ -100,10 +100,9 @@ func builtinExecHandler(policy Policy) func(next interp.ExecHandlerFunc) interp.
 					err = exitStatus(1)
 				}
 			}()
-			// goja 需要一个 policy，单独分派（其它内建命令的签名里没有它）。
-			// 命令名沿用旧引擎的名字（已有脚本/文档在用它），实际执行者是 moejs。
-			if args[0] == "goja" && findExecutable(hc.Env, args[0]) == "" {
-				return normalizeExecErr(cmdGoja(ctx, hc, args[1:], policy))
+			// moejs 需要一个 policy，单独分派（其它内建命令的签名里没有它）。
+			if args[0] == "moejs" && findExecutable(hc.Env, args[0]) == "" {
+				return normalizeExecErr(cmdMoejs(ctx, hc, args[1:], policy))
 			}
 			fn, ok := builtinFor(hc.Env, args[0])
 			if !ok {

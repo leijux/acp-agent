@@ -262,7 +262,7 @@ GC 是全局的 —— 8 个 VM 并行跑，GC 成了共同瓶颈。这也意味
 - **没有**用 `eventloop` 包：kernel 的 fs/path 由 Go 侧 `WithFS` 注入，不需要事件循环。
 - **没有设 `Options.MemoryLimit`**：kernel 的输入就是全量历史（几 MB 文本 + 分词索引），
   而它干的正是「上下文太长就压缩」—— 在这里限死堆只会在最需要压的时候把压缩本断。
-  工具侧的 `js` / 内建 `goja` 是另一回事（单次脚本、输入有预算），那边设了 64MB。
+  工具侧的 `js` / 内建 `moejs` 是另一回事（单次脚本、输入有预算），那边设了 64MB。
 - 产出与 Node **逐字节一致**：同一 workload 的 `messagesHash = 6a8561416f02cde1`、`blockNoTimeHash = 0cbd1741d253e587`。
   这条断言在三次性能优化、以及 0.0.177 → 0.0.193 的 bundle 更新之后依然通过 —— 因为
   `CountTokens` 是与上游 `defaultCountTokens` 逐字节等价的 Go 复刻

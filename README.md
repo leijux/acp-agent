@@ -10,7 +10,7 @@
 
 - **默认走 mvdan/sh 纯 Go 解释器**：`for`/`if`/`case`/`$(…)`/管道/重定向/函数/heredoc 都在进程内执行，只把真正的外部程序交给 `os/exec`。Windows 上不需要装 bash，也没有每次 `fork/exec bash.exe` 的启动开销。
 - **PATH 里没有 coreutils 时自动回退到内建实现**：`ls cat head tail sleep pwd mkdir rm grep`。`grep` 是完整实现（`-i -v -n -c -l -L -o -q -w -x -F -E -r/-R -e`，退出码与 GNU 一致，上下文行同样用 `-` 分隔）；装了 Git Bash/MSYS2 的用户行为不变 —— 真程序优先，找不到才回退。
-- **内建 `goja` 命令**（名字沿用旧引擎，实际跑 moejs）：可以在管道里跑 JS 做纯计算，`cat x | goja -e 'fs.readStdin().split("\n").length'`；纯 Windows 环境没有 node/python 也照样能算。
+- **内建 `moejs` 命令**（shell 里执行 JS）：可以在管道里跑 JS 做纯计算，`cat x | moejs -e 'fs.readStdin().split("\n").length'`；纯 Windows 环境没有 node/python 也照样能算。
 - **后台任务不必轮询**：`bash_output` 支持 `wait:"exit"` 直接等到命令结束、`wait:"output"` 等到有新输出、`cursor` 只取上次之后的新字节。
 
 ### 内置 JavaScript（`js` 工具）
