@@ -49,9 +49,9 @@ var errFlagsReported = errors.New("flag 解析失败（已报告）")
 //     我们已经实现了那条面（prompt / steer / agent_settled），所以可以越过。
 //
 // 不能再往上拍了：再高的门槛对应的是我们没实现的能力（比如 extension 弹窗、
-// 压缩通知）。改它之前先看 version_test.go 的
+// 压缩通知），1.4.x 是当前上限。改它之前先看 version_test.go 的
 // TestDefaultVersionSatisfiesRuntimeGates。
-const defaultVersion = "1.4.0"
+const defaultVersion = "1.4.1"
 
 // version 由构建时注入（-X main.version=...），这里是 go run/源码直用的默认值。
 var version = defaultVersion
