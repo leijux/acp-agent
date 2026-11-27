@@ -22,7 +22,7 @@ results := ex.Execute(ctx, []tools.Call{
 
 | 工具 | 并发安全 | 说明 |
 |---|:--:|---|
-| `read` | ✅ | 读文件，带行号 / offset+limit 分页 / 图片返回 image 块 / 截断提示 |
+| `read` | ✅ | 读文件，带行号 / offset+limit 分页 / 截断提示。图片（png/jpg/jpeg/gif/webp/bmp，≤10MB）返回 image 块：模型支持视觉且格式在白名单（JPEG/PNG/GIF/WebP）时才会真正发出去，否则降级为一行文本说明——见 `docs/acp.md` 的「图片（两条入口）」 |
 | `write` | ✅* | 创建或覆盖，自动建父目录。自带路径级互斥（同文件串行、异文件并行） |
 | `edit` | ✅* | 精确替换，要求 `oldText` 唯一；一次可带多个互不重叠的 edits。**读-改-写全程持文件锁**。容错见下方「edit 的文本容错」 |
 | `ls` | ✅ | 列目录，支持 `-a` / `-l` / 递归深度，默认跳过 `node_modules`、`.git` |

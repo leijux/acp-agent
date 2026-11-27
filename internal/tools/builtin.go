@@ -50,6 +50,12 @@ func (t *ReadTool) maxBytes() int64 {
 	return 2 << 20
 }
 
+// imageExts 把扩展名映射到 MIME。
+//
+// 为什么 bmp 也读：这里只负责「把文件变成图片块」，读回来先经 ACP 客户端
+// 展示（internal/acp/update.go 的 tool_call_update 带 image 块）。bmp 不在
+// 模型的视觉输入白名单里（JPEG/PNG/GIF/WebP），发请求前会被 provider 降级
+// 成一行文本说明 —— 模型看不见，但人能在客户端看到。
 var imageExts = map[string]string{
 	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
 	".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",

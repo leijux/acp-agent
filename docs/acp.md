@@ -182,16 +182,41 @@ LLM 往返可以忽略；实测本地假 provider 下 delegate 往返 **19ms**�
 
 `subagentKindMutates` 把未知的 `toolKind` 一律当改动型处理（宁可多问一次）。
 
+## 图片（两条入口）
+
+图片从客户端进来和从工具返回，走的是两套规则：
+
+| 来源 | 路径 | 请求里的位置 |
+|---|---|---|
+| 客户端 `session/prompt` 的 image 块（带 `data`） | `toAgentMessage` → `agent.ImageBlock` | `role:user` 的 parts 数组 |
+| 工具结果（`read` 读 png/jpg、MCP `ImageContent`） | `tools.Result` → `ToolResultMessage` | DeepSeek：`role:tool` 的 parts；其余端点：紧随其后一条 `role:user` |
+
+要点：
+
+- **DeepSeek 可以内联在 tool 消息里**（《图像理解》明确「图片可以出现在 user、
+system 和 tool 消息中」，assistant 带图才 400），所以 `cfg.Kind == "deepseek"` 时
+  不走后置；通用 OpenAI 兼容端点的 tool content 只认字符串，必须后置。
+- **后置必须整批**：一轮并行调多个工具会产生连续的 tool 消息，图片只能等这批
+  全部发完后插一条 user，否则会打断 `tool_calls` → `tool` 的配对。
+  实现在 `openAIMessages` 的 `flush()`（`internal/provider/openai.go`）。
+- **一道闸门**（失败一律降级为正文后的一行说明，不报错、不中断本轮）：
+  只发 JPEG/PNG/GIF/WebP（`image/bmp` 被拦）、单请求 ≤32 张、base64 总量
+  ≤16MB（DeepSeek 40MB）；模型 `SupportsImages=false` 时一律不发 `image_url`。
+  依据见 `agent.VisionMIMEType` 与 `imageGate`。
+- **压缩视图留占位**：kernel 只吃文本，`blocksForKernel` 会把图片渲染成
+  `[图片：image/png，约 12KB]`，否则压缩摘要里这件事彻底消失。
+- 客户端只给 `uri` 不给 `data` 时降级为文本占位（`toAgentMessage`）。
+- **未做**：DeepSeek Files API（`file_id`，可绕过 32MB 单图限制并跨请求复用）、
+  外部 URL 直传、`detail: low`。
+
 ## 已知限制
 
 - **MCP 服务器未接入**：`session/new` 的 `mcpServers` 会被记录在
   `ServerSession.MCPServers`，但没有拉起子进程。
 - **`fs/*` 与 `terminal/*` 只做了客户端调用封装**，内置工具仍用本地文件系统；
   想走客户端能力需要在 `tools.Policy` 层做适配。
-- **图片输入已直通**：`toAgentMessage` 把带 `data` 的 image 块保留为
-  `agent.ImageBlock`，`internal/provider/openai.go` 再转成 `image_url`
-  （`data:<mime>;base64,<data>`）。客户端只给 `uri` 不给 `data` 时才降级为
-  文本占位。
+  - **未做**：DeepSeek Files API（`file_id`，可绕过 32MB 单图限制并跨请求复用）、
+    外部 URL 直传、`detail: low`，需要时再按文档补。
 - **`parallel` 工具的嵌套调用绕过权限门禁**：它内部持有原始 Registry。
   需要严格门禁时把 `parallel` 放进 `AgentConfig.OnlyTools` 之外（或用
   `tools.Options.Disable` 关掉）。
