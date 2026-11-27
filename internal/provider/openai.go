@@ -5,10 +5,12 @@
 //
 //	OpenAI 兼容（chat/completions）—— OpenAI、DeepSeek、Moonshot、Qwen、
 //	vLLM、Ollama、LiteLLM 网关等
-//	Anthropic 兼容（messages）—— Claude 直连与 Bedrock 网关
+//	DeepSeek 特有行为 —— 思考参数、reasoning_content 回传、tool 消息内联图片
+//	（见 deepseek.go 与 cfg.Kind）
 //
-// 两者都实现了：流式 text/thinking、工具调用增量拼装、usage（含 cache 与
-// reasoning token）、stopReason 映射、ctx 取消。失败重试见 Retry。
+// 实现了：流式 text/thinking、工具调用增量拼装、usage（含 cache 与
+// reasoning token）、stopReason 映射、ctx 取消、图片（user 与 tool 消息）。
+// 失败重试见 Retry。
 package provider
 
 import (
@@ -164,8 +166,17 @@ func valueOr(s, def string) string {
 func (p *OpenAI) buildBody(req agent.Request) (map[string]any, error) {
 	// DeepSeek 在**带 tools** 的请求中强制要求把历史轮次的 reasoning_content
 	// 原样回传（不回传直接 400）；不带 tools 时回传会被忽略。
-	replayReasoning := p.cfg.Kind == "deepseek" && len(req.Tools) > 0
-	msgs, err := openAIMessages(req.SystemPrompt, req.Messages, replayReasoning)
+	opts := openAIMessageOptions{
+		replayReasoning:  p.cfg.Kind == "deepseek" && len(req.Tools) > 0,
+		vision:           req.Model.SupportsImages,
+		toolInlineImages: p.cfg.Kind == "deepseek",
+		maxImageBytes:    maxInlineImageBytes,
+		maxImages:        maxRequestImages,
+	}
+	if p.cfg.Kind == "deepseek" {
+		opts.maxImageBytes = maxInlineImageBytesDeepSeek
+	}
+	msgs, err := openAIMessages(req.SystemPrompt, req.Messages, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -222,16 +233,74 @@ func openAITools(tools []agent.ToolSpec) []map[string]any {
 	return out
 }
 
-// openAIMessages 把 agent 消息投影成 chat/completions 的 messages 数组。
+// openAIMessageOptions 收拢 openAIMessages 的端点差异。
 //
-// replayReasoning 为 true 时，assistant 消息会带上 reasoning_content ——
-// DeepSeek 只要请求携了 tools，就必须在后续每一轮完整回传思考内容。
-func openAIMessages(system string, msgs []agent.Message, replayReasoning bool) ([]map[string]any, error) {
+// 拆成结构体而不是五个参数：这些开关彼此无关（思考回传是 DeepSeek 工具协议、
+// 视觉是模型能力、tool 内联图是端点家族），调用点写一行更不容易接错。
+type openAIMessageOptions struct {
+	// replayReasoning 为 true 时 assistant 消息带 reasoning_content：
+	// DeepSeek 只要请求携了 tools，就必须在后续每一轮完整回传思考内容。
+	replayReasoning bool
+	// vision 表示当前模型能看图（agent.Model.SupportsImages）。为 false 时
+	// 图片一律降级成文本占位，绝不发 image_url —— 发过去就是 400。
+	vision bool
+	// toolInlineImages 表示可以把图片放进 role:tool 的 content 数组。
+	// DeepSeek 文档明确「图片可以出现在 user、system 和 tool 消息中」；
+	// 通用 OpenAI 端点的 tool content 只接受字符串，只能后置成 user 消息。
+	toolInlineImages bool
+	// maxImageBytes/maxImages 是整次请求的图片闸门（见 imageGate）。
+	maxImageBytes int
+	maxImages     int
+}
+
+// 图片闸门默认值。
+//
+// 总量按 base64 累计，比的是请求体大小：DeepSeek 请求体上限 48 MiB、
+// 单请求图片总量 64 MiB（不含 Files API）；通用 OpenAI 兼容端点没有公开
+// 数字，但 20 MiB 附近就开始 400。取值都留了余量。
+const (
+	maxInlineImageBytes         = 16 << 20
+	maxInlineImageBytesDeepSeek = 40 << 20
+	maxRequestImages            = 32
+)
+
+// openAIMessages 把 agent 消息投影成 chat/completions 的 messages 数组。
+func openAIMessages(system string, msgs []agent.Message, opts openAIMessageOptions) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(msgs)+1)
 	if system != "" {
 		out = append(out, map[string]any{"role": "system", "content": system})
 	}
+	gate := newImageGate(opts.maxImageBytes, opts.maxImages)
+	// 不能进请求体、或只能后置的图片先攒在这里。
+	var pending []pendingToolImages
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		blocks := make([]agent.Block, 0, len(pending)+1)
+		blocks = append(blocks, agent.TextBlock{Text: toolImagesNote(pending)})
+		for _, p := range pending {
+			for _, im := range p.images {
+				blocks = append(blocks, im)
+			}
+		}
+		pending = nil
+		content, err := userContent(blocks)
+		if err != nil {
+			return err
+		}
+		out = append(out, map[string]any{"role": "user", "content": content})
+		return nil
+	}
 	for _, m := range msgs {
+		// tool 消息必须连续紧跟 assistant 的 tool_calls，所以后置的 user 图片
+		// 只能在「这一批 tool 消息结束之后」插入。一轮并行调多个工具时
+		// （internal/agent/agent.go 的 Execute 结果顺序）这里就是唯一正确的位置。
+		if _, isTool := m.(*agent.ToolResultMessage); !isTool {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		}
 		switch v := m.(type) {
 		case *agent.SystemMessage:
 			if txt := blocksText(v.Content); txt != "" {
@@ -239,7 +308,7 @@ func openAIMessages(system string, msgs []agent.Message, replayReasoning bool) (
 			}
 
 		case *agent.UserMessage:
-			content, err := userContent(v.Content)
+			content, err := gatedUserContent(v.Content, gate, opts.vision)
 			if err != nil {
 				return nil, err
 			}
@@ -260,7 +329,7 @@ func openAIMessages(system string, msgs []agent.Message, replayReasoning bool) (
 			} else {
 				entry["content"] = nil
 			}
-			if replayReasoning {
+			if opts.replayReasoning {
 				if think := blocksThinking(v.Content); think != "" {
 					entry["reasoning_content"] = think
 				}
@@ -286,11 +355,40 @@ func openAIMessages(system string, msgs []agent.Message, replayReasoning bool) (
 			out = append(out, entry)
 
 		case *agent.ToolResultMessage:
-			out = append(out, map[string]any{
-				"role":         "tool",
-				"tool_call_id": v.ToolCallID,
-				"content":      blocksText(v.Content),
-			})
+			text := blocksText(v.Content)
+			var admitted []agent.ImageBlock
+			var notes []string
+			for _, im := range agent.ImageBlocks(v.Content) {
+				if !opts.vision {
+					notes = appendNote(notes, "当前模型不支持图片输入（图片已省略）")
+					continue
+				}
+				got, why := gate.admit(im)
+				if why != "" {
+					notes = appendNote(notes, why)
+					continue
+				}
+				admitted = append(admitted, got)
+			}
+			text = withNotes(text, notes)
+			entry := map[string]any{"role": "tool", "tool_call_id": v.ToolCallID}
+			switch {
+			case len(admitted) == 0:
+				entry["content"] = text
+			case opts.toolInlineImages:
+				// DeepSeek：图直接留在 tool 消息里，模型能对上「哪张图是哪个工具给的」。
+				parts := make([]map[string]any, 0, len(admitted)+1)
+				parts = append(parts, map[string]any{"type": "text", "text": textOr(text, "[工具返回了图片]")})
+				for _, im := range admitted {
+					parts = append(parts, imagePart(im))
+				}
+				entry["content"] = parts
+			default:
+				// 通用 OpenAI 端点：tool content 只认字符串，图片后置成一条 user 消息。
+				pending = append(pending, pendingToolImages{tool: v.ToolName, images: admitted})
+				entry["content"] = textOr(text, "[工具 "+v.ToolName+" 返回了图片，见下一则消息]")
+			}
+			out = append(out, entry)
 
 		case *agent.CompactionSummaryMessage:
 			out = append(out, map[string]any{
@@ -317,20 +415,109 @@ func openAIMessages(system string, msgs []agent.Message, replayReasoning bool) (
 			return nil, fmt.Errorf("provider/openai: 不支持的消息类型 %T", m)
 		}
 	}
+	// 会话末尾（最后一轮工具结果就是会话末尾）也要把图发出去。
+	if err := flush(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-// userContent 在有图片时返回 content parts 数组，否则返回纯字符串
-// （纯字符串兼容性最好，很多兼容实现不认 parts）。
-func userContent(blocks []agent.Block) (any, error) {
-	hasImage := false
-	for _, b := range blocks {
-		if _, ok := b.(agent.ImageBlock); ok {
-			hasImage = true
-			break
+// pendingToolImages 是「暂时拿不进请求体的工具图片」。
+type pendingToolImages struct {
+	tool   string
+	images []agent.ImageBlock
+}
+
+// imageGate 在整个请求上限制图片：格式、张数、base64 总量。
+//
+// 超限不报错，只把剩下的图换成一句说明。图片是附加信息，为它整轮 400
+// （或让用户白等一次重试）的代价远大于「少看一张图」。
+type imageGate struct {
+	maxBytes, used int
+	maxImages, n   int
+}
+
+func newImageGate(maxBytes, maxImages int) *imageGate {
+	return &imageGate{maxBytes: maxBytes, maxImages: maxImages}
+}
+
+// admit 判定一张图能不能进请求体，返回规范化后的块和拒绝原因（接受时为空）。
+func (g *imageGate) admit(im agent.ImageBlock) (agent.ImageBlock, string) {
+	mime, ok := agent.VisionMIMEType(im.MimeType)
+	if !ok {
+		return agent.ImageBlock{}, fmt.Sprintf("图片格式 %s 不受支持（仅 JPEG/PNG/GIF/WebP），已省略", displayMIME(im.MimeType))
+	}
+	if g.maxImages > 0 && g.n >= g.maxImages {
+		return agent.ImageBlock{}, fmt.Sprintf("单次请求图片数量上限 %d，已省略后面的图", g.maxImages)
+	}
+	if g.maxBytes > 0 && g.used+len(im.Data) > g.maxBytes {
+		return agent.ImageBlock{}, "单次请求图片总量超限，已省略"
+	}
+	g.n++
+	g.used += len(im.Data)
+	im.MimeType = mime
+	return im, ""
+}
+
+// displayMIME 让空 MIME 在提示里可读，而不是留一个空洞。
+func displayMIME(mime string) string {
+	if strings.TrimSpace(mime) == "" {
+		return "(未声明)"
+	}
+	return mime
+}
+
+// imagePart 组装 OpenAI 的 image_url 内容块（本地图片一律走 base64 data URL）。
+func imagePart(im agent.ImageBlock) map[string]any {
+	return map[string]any{
+		"type":      "image_url",
+		"image_url": map[string]any{"url": "data:" + im.MimeType + ";base64," + im.Data},
+	}
+}
+
+// toolImagesNote 说明后置的图片是哪些工具给的。
+func toolImagesNote(pending []pendingToolImages) string {
+	var names []string
+	for _, p := range pending {
+		names = append(names, fmt.Sprintf("%s %d 张", p.tool, len(p.images)))
+	}
+	return "[以下是工具返回的图片：" + strings.Join(names, "；") + "]"
+}
+
+// appendNote 追加一条降级说明（同因去重：三张图不支持格式只需要说一次）。
+func appendNote(notes []string, note string) []string {
+	for _, n := range notes {
+		if n == note {
+			return notes
 		}
 	}
-	if !hasImage {
+	return append(notes, note)
+}
+
+// withNotes 把降级说明接到文本后面，保持「先正文、后附注」的阅读顺序。
+func withNotes(text string, notes []string) string {
+	for _, n := range notes {
+		if text != "" {
+			text += "\n"
+		}
+		text += "[" + n + "]"
+	}
+	return text
+}
+
+// textOr 在正文为空时给出占位，避免 tool content 成为空串。
+func textOr(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+// userContent 只负责组装：入参里的图片视为已审核（供后置图片的 flush 用）。
+// 有图片时返回 content parts 数组，否则返回纯字符串
+// （纯字符串兼容性最好，很多兼容实现不认 parts）。
+func userContent(blocks []agent.Block) (any, error) {
+	if len(agent.ImageBlocks(blocks)) == 0 {
 		return blocksText(blocks), nil
 	}
 	parts := make([]map[string]any, 0, len(blocks))
@@ -339,13 +526,44 @@ func userContent(blocks []agent.Block) (any, error) {
 		case agent.TextBlock:
 			parts = append(parts, map[string]any{"type": "text", "text": v.Text})
 		case agent.ImageBlock:
-			parts = append(parts, map[string]any{
-				"type": "image_url",
-				"image_url": map[string]any{
-					"url": "data:" + v.MimeType + ";base64," + v.Data,
-				},
-			})
+			parts = append(parts, imagePart(v))
 		}
+	}
+	return parts, nil
+}
+
+// gatedUserContent 是用户消息的入口：与工具返回的图片共用同一道闸门。
+//
+// 客户端完全可以把一张 BMP 或 30MB 截图塞进 prompt，不过闸的话整个请求
+// 会因它 400 —— 而那些图本来也不在模型的视觉输入白名单里。
+func gatedUserContent(blocks []agent.Block, gate *imageGate, vision bool) (any, error) {
+	var parts []map[string]any
+	var notes []string
+	accepted := 0
+	for _, b := range blocks {
+		switch v := b.(type) {
+		case agent.TextBlock:
+			parts = append(parts, map[string]any{"type": "text", "text": v.Text})
+		case agent.ImageBlock:
+			if !vision {
+				notes = appendNote(notes, "当前模型不支持图片输入（图片已省略）")
+				continue
+			}
+			got, why := gate.admit(v)
+			if why != "" {
+				notes = appendNote(notes, why)
+				continue
+			}
+			accepted++
+			parts = append(parts, imagePart(got))
+		}
+	}
+	if accepted == 0 {
+		// 没有能发出去的图：退回纯字符串（兼容性最好），并附上降级说明。
+		return withNotes(blocksText(blocks), notes), nil
+	}
+	if len(notes) > 0 {
+		parts = append(parts, map[string]any{"type": "text", "text": "[" + strings.Join(notes, "；") + "]"})
 	}
 	return parts, nil
 }

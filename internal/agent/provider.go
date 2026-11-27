@@ -230,10 +230,14 @@ func EstimateTokens(s string) int {
 
 // imageTokens 是单张图片的保守估算。
 //
-// 真实值随分辨率与厂商口径变化（OpenAI 单图 85–1445 token 起），这里给一个
-// 固定中位数。旧实现按
-// "非 assistant 消息一律走 TextOf" 计算，而 TextOf/blocksText 只取 TextBlock，
-// 图片直接被当成 0 token —— 长会话里几张截图就足以让估算与真实值差出上万。
+// 口径取自 DeepSeek《图像理解》：图片先被等比缩放到「总像素约 1300×1300」，
+// 因此**每张最多 1024 token**，与分辨率无关（2000×2000 和 5000×5000 一样）。
+// OpenAI 的 high detail 更高，但同一个数量级。这里取 1100 —— 比已知上限
+// 略高，估高了只会让压缩提早一点，估低了会让请求实际超窗。
+//
+// 旧实现按「非 assistant 消息一律走 TextOf」计算，而 TextOf/blocksText
+// 只取 TextBlock，图片直接被当成 0 token —— 长会话里几张截图就足以让估算
+// 与真实值差出上万。
 const imageTokens = 1_100
 
 // EstimateMessagesTokens 估算一组消息的 token 数，含固定开销。

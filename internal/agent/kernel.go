@@ -151,12 +151,12 @@ func toKernelMessage(id string, msg Message) (kernel.Message, bool) {
 	case *UserMessage:
 		return kernel.Message{
 			ID: id, Role: kernel.RoleUser, ContentType: kernel.ContentText,
-			Text: blocksText(m.Content),
+			Text: blocksForKernel(m.Content),
 		}, true
 
 	case *AssistantMessage:
 		var b strings.Builder
-		b.WriteString(blocksText(m.Content))
+		b.WriteString(blocksForKernel(m.Content))
 		for _, blk := range m.Content {
 			if tc, ok := blk.(ToolCallBlock); ok {
 				b.WriteString("\n[tool-call] ")
@@ -174,7 +174,7 @@ func toKernelMessage(id string, msg Message) (kernel.Message, bool) {
 		}, true
 
 	case *ToolResultMessage:
-		text := blocksText(m.Content)
+		text := blocksForKernel(m.Content)
 		if m.IsError {
 			text = "[error] " + text
 		}
@@ -195,10 +195,27 @@ func toKernelMessage(id string, msg Message) (kernel.Message, bool) {
 	case *CustomMessage:
 		return kernel.Message{
 			ID: id, Role: kernel.RoleUser, ContentType: kernel.ContentText,
-			Text: blocksText(m.Content),
+			Text: blocksForKernel(m.Content),
 		}, true
 	}
 	return kernel.Message{}, false
+}
+
+// blocksForKernel 是 blocksText 的 kernel 视图版本：图片会留下占位行。
+//
+// kernel 只吃文本（kernel.Message.ContentType 只有 text/工具结果两种），
+// 而压缩摘要正是「以后只能靠这段文本回忆这个会话」的东西。图片不留痕，
+// 模型连「用户给过一张截图」都不知道，还会以为工具当时什么都没返回。
+func blocksForKernel(bs []Block) string {
+	text := blocksText(bs)
+	imgs := ImageBlocks(bs)
+	if len(imgs) == 0 {
+		return text
+	}
+	if text != "" {
+		text += "\n"
+	}
+	return text + DescribeImages(imgs)
 }
 
 // transcript 把 kernel 渲染视图里的消息拼成给模型看的会话文本。

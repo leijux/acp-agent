@@ -164,6 +164,9 @@ func NewFromEndpoint(endpoint Endpoint, apiKey string, headers map[string]string
 		APIKey:        apiKey,
 		Headers:       merged,
 		NoStreamUsage: endpoint.NoStreamUsage,
+		// Kind 不能漏：它开着 DeepSeek 的特有行为（思考参数、reasoning
+		// 回传、tool 消息内联图片）。漏了不会报错，只会静默退化成“通用”。
+		Kind: endpoint.Kind,
 	})
 }
 
